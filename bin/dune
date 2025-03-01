@@ -1,0 +1,4 @@
+(executable
+ (public_name nyaya)
+ (name main)
+ (libraries nyaya))
