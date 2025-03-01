@@ -1,2 +1,4 @@
 (library
- (name nyaya))
+ (name nyaya)
+ (preprocess (pps ppx_deriving.show))
+ (libraries containers))
