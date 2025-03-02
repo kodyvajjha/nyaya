@@ -1,4 +1,4 @@
 (library
  (name nyaya)
  (preprocess (pps ppx_deriving.show))
- (libraries containers))
+ (libraries containers zarith))

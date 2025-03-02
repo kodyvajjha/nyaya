@@ -51,7 +51,7 @@ let rec subst (level : t) p q =
   | Succ l -> Succ (subst l p q)
   | Max (l1, l2) -> Max (subst l1 p q, subst l2 p q)
   | IMax (l1, l2) -> IMax (subst l1 p q, subst l2 p q)
-  | Param _name -> assert false (* FIX *)
+  | Param _name -> assert false (* NYI *)
 
 let rec leq (x : t) (y : t) (balance : int) : bool =
   match x, y with
@@ -68,8 +68,8 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
   | (Param _ | Zero), Max (a, b) -> leq x a balance || leq y b balance
   (* imax *)
   | IMax (a1, b1), IMax (a2, b2) when a1 == a2 && b1 == b2 -> true
-  | IMax (_, (Param _ as _p)), _ -> assert false
-  | _, IMax (_, (Param _ as _p)) -> assert false
+  | IMax (_, (Param _ as _p)), _ -> assert false (* NYI*)
+  | _, IMax (_, (Param _ as _p)) -> assert false (* NYI*)
   | IMax (a, IMax (b, c)), _ -> leq (Max (IMax (a, c), IMax (b, c))) y balance
   | IMax (a, Max (b, c)), _ ->
     leq (simplify (Max (IMax (a, b), IMax (a, c)))) y balance
