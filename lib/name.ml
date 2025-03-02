@@ -5,3 +5,4 @@ type t =
   | Anon
   | Str of (t * string)
   | Num of (t * int)
+[@@deriving show]
