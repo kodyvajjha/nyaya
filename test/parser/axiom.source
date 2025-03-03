@@ -1,0 +1,3 @@
+prelude
+
+axiom foo : Prop
