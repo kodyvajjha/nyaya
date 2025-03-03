@@ -1,15 +1,17 @@
 (lang dune 3.15)
 
+(using menhir 3.0)
+
 (name nyaya)
 
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github kodyvajjha/nyaya))
 
-(authors "Author Name")
+(authors "Koundinya Vajjha")
 
-(maintainers "Maintainer Name")
+(maintainers "Koundinya Vajjha")
 
 (license LICENSE)
 
@@ -17,8 +19,8 @@
 
 (package
  (name nyaya)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "An external type-checker for Lean 4.")
+ (description "")
  (depends ocaml dune containers ppx_deriving)
  (tags
   (topics "to describe" your project)))
