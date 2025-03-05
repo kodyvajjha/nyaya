@@ -1,15 +1,19 @@
 (* Minimal parser.mly *)
 
 %{
- (* open Ast Assuming you have an AST module *)
+ open Ast (* Assuming you have an AST module *)
 %}
 
+%token <int> NAT
 %token EOF
-
+%token PERIOD
 %start file
-%type <unit> file
+%type <t> file
 
 %%
 
 file:
-  | EOF { () }
+  | version EOF { {version=$1;items=[]} }
+
+version: 
+  | NAT PERIOD NAT PERIOD NAT {[$1;$3;$5]}

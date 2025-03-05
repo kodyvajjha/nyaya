@@ -9,7 +9,8 @@ let parse_from_file filename =
       let parser =
         MenhirLib.Convert.Simplified.traditional2revised Parser.file
       in
-      let _result = parser lexer in
+      let result = parser lexer in
+      CCFormat.printf "%a" Nyaya.Ast.pp result;
       print_newline ();
       flush stdout
     done

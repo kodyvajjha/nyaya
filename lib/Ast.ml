@@ -9,3 +9,4 @@ and item =
   | EExpr of Expr.t
   | ERecRule of Decl.rule
   | EDecl of Decl.t
+[@@deriving show]
