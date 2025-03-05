@@ -1,4 +1,5 @@
-(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation. *)
+(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation. 
+Perhaps we could do hashconsing.*)
 
 type binfo =
   | Default
