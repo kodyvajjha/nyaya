@@ -2,9 +2,3 @@
  (name nyaya)
  (preprocess (pps ppx_deriving.show sedlex.ppx))
  (libraries containers zarith sedlex menhirLib))
-
-(menhir
- (modules parser)
- (flags --inspection --table --dump))
-
-; (ocamllex exportlex)

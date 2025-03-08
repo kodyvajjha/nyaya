@@ -1,19 +1,14 @@
-open Nyaya
-
 let parse_from_file filename =
+  let open Nyaya_parser in
   let ch = open_in filename in
-  try
-    let lexbuf = Sedlexing.Utf8.from_channel ch in
-    while true do
-      let lexer = Sedlexing.with_tokenizer Lexer.token lexbuf in
-      let parser =
-        MenhirLib.Convert.Simplified.traditional2revised Parser.file
-      in
-      let result = parser lexer in
-      CCFormat.printf "%a" Nyaya.Ast.pp result;
-      print_newline ();
-      flush stdout
-    done
-  with Lexer.Eof -> exit 0
+  let lexbuf = Sedlexing.Utf8.from_channel ch in
+  let lexer = Sedlexing.with_tokenizer Lexer.token lexbuf in
+  let parser = MenhirLib.Convert.Simplified.traditional2revised Parser.file in
+  let result =
+    try parser lexer with Parser.Error -> failwith "Caught parser error"
+  in
+  CCFormat.printf "%a@." Nyaya_parser.Ast.pp result;
+  print_newline ();
+  flush stdout
 
 let () = parse_from_file "test/parser/axiom.export"
