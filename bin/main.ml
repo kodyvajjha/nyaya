@@ -5,7 +5,10 @@ let parse_from_file filename =
   let lexer = Sedlexing.with_tokenizer Lexer.token lexbuf in
   let parser = MenhirLib.Convert.Simplified.traditional2revised Parser.file in
   let result =
-    try parser lexer with Parser.Error -> failwith "Caught parser error"
+    try parser lexer
+    with Parser.Error ->
+      Util.handle_parser_error lexbuf;
+      exit 1
   in
   CCFormat.printf "%a@." Nyaya_parser.Ast.pp result;
   print_newline ();
