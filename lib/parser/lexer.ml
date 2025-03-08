@@ -14,17 +14,7 @@ let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
 
-let name =
-  [%sedlex.regexp?
-    ( ( ('_' | alphabetic),
-        Star
-          ( '_' | alphabetic | 185 | 178 | 179
-          | 8304 .. 8351 (* sub-/super-scripts *)
-          | '0' .. '9'
-          | '\'' ) )
-    | math )]
-
-(* let identifier = [%sedlex.regexp? (Alphabetic | '_')] *)
+let name = [%sedlex.regexp? xid_start, Star ('-' | '|' | xid_continue)]
 
 open Parser
 
