@@ -4,4 +4,5 @@
  (libraries containers zarith sedlex menhirLib))
 (menhir
  (modules parser)
+ (explain true)
  (flags --inspection --table --dump))

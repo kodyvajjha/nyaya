@@ -14,4 +14,4 @@ let parse_from_file filename =
   print_newline ();
   flush stdout
 
-let () = parse_from_file "test/parser/axiom.export"
+let () = parse_from_file "test/parser/id.export"

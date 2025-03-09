@@ -32,22 +32,32 @@ let rec token buf =
   | "#NI" ->
     print_endline "#NI";
     NITOK
-  | "#ES" ->
-    print_endline "#ES";
-    ESTOK
-  | "#AX" ->
-    print_endline "#AX";
-    AXTOK
-  | white_space ->
-    print_endline "\tWhitespace";
+  | "#US" -> USTOK
+  | "#UM" -> UMTOK
+  | "#UIM" -> UIMTOK
+  | "#UP" -> UPTOK
+  | "#ES" -> ESTOK
+  | "#AX" -> AXTOK
+  | "#RR" -> RRTOK
+  | "O" -> OTOK
+  | "R" -> RTOK
+  | "A" -> ATOK
+  | "DEF" -> DEFTOK
+  | "#THM" -> THMTOK
+  | "#QUOT" -> QUOTOK
+  | "#IND" -> INDTOK
+  | "#REC" -> RECTOK
+  | "#CTOR" -> CTORTOK
+  | newline ->
+    print_endline "\t NEWLINE";
+    NL
+  | name -> Parser.NAME (Sedlexing.Utf8.lexeme buf)
+  | Sub (white_space, '\n') ->
+    print_endline "Other whitespace";
     token buf
   | eof ->
     print_endline "\tEnd";
     EOF
-  | name -> Parser.NAME (Sedlexing.Utf8.lexeme buf)
-  | any ->
-    print_endline "Other";
-    token buf
   | _ ->
     let lexeme = Sedlexing.Utf8.lexeme buf in
-    failwith ("Unexpected character:" ^ lexeme)
+    failwith ("Lexing error: Unexpected character:" ^ lexeme)
