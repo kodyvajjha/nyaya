@@ -139,7 +139,7 @@ type decl =
       name: nidx;
       expr: eidx;
       value: eidx;
-      hint: hint;
+      hint: hint option;
       uparams: uidx list;
     }
   | Theorem of {
