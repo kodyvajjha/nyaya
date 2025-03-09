@@ -21,4 +21,9 @@ makes it seem like hints are mandatory, however it should(?) be:
 ```
 Def ::= "#DEF" (name : nidx) (type : eidx) (value : eidx) (hint : Hint+) (uparams : uidx*)
 ```
-In other words, I don't see explicit hints in every def. 
+In other words, I don't see explicit hints in every def, so perhaps this is optional.
+
+### Strings in name
+
+Can strings in hirarchical names (`#NS`) be arbitrary unicode? 
+
