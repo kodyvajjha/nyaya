@@ -78,6 +78,7 @@ type expr =
       info: info;
       nid: nidx;
       eid2: eidx;
+      eid3: eidx;
     }
   | EPExpr of {
       eid1: eidx;

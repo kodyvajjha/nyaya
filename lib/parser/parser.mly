@@ -122,7 +122,7 @@ expr:
   | NAT ESTOK NAT {ESExpr {eid = $1; uid = $3} } 
   | NAT ECTOK NAT uparams {ECExpr {eid = $1; nid=$3; uids=$4}}
   | NAT EATOK NAT NAT {EAExpr {eid1=$1;eid2=$3;eid3=$4}}
-  | NAT ELTOK info NAT NAT {ELExpr {eid1=$1;info=$3;nid=$4;eid2=$5}}
+  | NAT ELTOK info NAT NAT NAT {ELExpr {eid1=$1;info=$3;nid=$4;eid2=$5; eid3=$6}}
   | NAT EPTOK info NAT NAT NAT {EPExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6}}
   | NAT EZTOK info NAT NAT NAT NAT {EZExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6; eid4=$7}}
   | NAT EJTOK NAT NAT NAT {EJExpr {eid1=$1;nid=$3;num=$4;eid2=$5}}
