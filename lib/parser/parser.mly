@@ -6,14 +6,30 @@
 
 %token <int> NAT
 %token <string> NAME
+
 %token EOF
 %token PERIOD
 %token NL 
 // Name tokens
 %token NSTOK
 %token NITOK
-%token AXTOK
+// Info tokens
+%token BDTOK
+%token BCTOK 
+%token BITOK 
+%token BSTOK 
+// Expr tokens
 %token ESTOK
+%token EVTOK
+%token ELTOK
+%token ECTOK
+%token EATOK
+%token EPTOK 
+%token EZTOK 
+%token EJTOK 
+%token ELNTOK 
+%token ELSTOK 
+%token EMTOK
 // Universe tokens
 %token USTOK
 %token UMTOK
@@ -25,6 +41,8 @@
 %token OTOK 
 %token ATOK 
 %token RTOK 
+// Decl tokens
+%token AXTOK
 %token DEFTOK
 %token THMTOK
 %token QUOTOK
@@ -89,8 +107,29 @@ decl:
   | CTORTOK NAT NAT NAT NAT NAT NAT uparams {Constructor {name=$2; expr=$3;parent_inductive=$4; ctor_id=$5; num_params=$6;num_fields=$7;uparams=$8}}
   | RECTOK indrecparams {Recursor ($2)}
 
+info:
+  | BDTOK {IBD}
+  | BITOK {IBI} 
+  | BSTOK {IBS}
+  | BCTOK {IBC}
+
+hexhex: 
+  | NAME {[$1]}
+  | NAME hexhex {$1 :: $2}
+
 expr: 
+  | NAT EVTOK NAT {EVExpr {eid=$1;num=$3}}
   | NAT ESTOK NAT {ESExpr {eid = $1; uid = $3} } 
+  | NAT ECTOK NAT uparams {ECExpr {eid = $1; nid=$3; uids=$4}}
+  | NAT EATOK NAT NAT {EAExpr {eid1=$1;eid2=$3;eid3=$4}}
+  | NAT ELTOK info NAT NAT {ELExpr {eid1=$1;info=$3;nid=$4;eid2=$5}}
+  | NAT EPTOK info NAT NAT NAT {EPExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6}}
+  | NAT EZTOK info NAT NAT NAT NAT {EZExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6; eid4=$7}}
+  | NAT EJTOK NAT NAT NAT {EJExpr {eid1=$1;nid=$3;num=$4;eid2=$5}}
+  | NAT ELNTOK NAT {ELNExpr {eid=$1;num=$3}}
+  | NAT ELSTOK hexhex {ELSExpr {eid=$1;hexhex=$3}}
+  | NAT EMTOK NAT NAT {EMExpr {eid1=$1; mptr = None; eid2=$4}}
+
 
 recrule:
   | NAT RRTOK NAT NAT NAT {{rid = $1; ctorName=$3; numFields = $4; value = $5}}

@@ -26,23 +26,43 @@ let rec token buf =
     print_endline (Sedlexing.Utf8.lexeme buf);
     NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
   | '.' -> PERIOD
+  (* Name Tokens *)
   | "#NS" ->
     print_endline "#NS";
     NSTOK
   | "#NI" ->
     print_endline "#NI";
     NITOK
+  (* Info tokens *)
+  | "#BD" -> BDTOK
+  | "#BI" -> BITOK
+  | "#BS" -> BSTOK
+  | "#BC" -> BCTOK
+  (* Level Tokens *)
   | "#US" -> USTOK
   | "#UM" -> UMTOK
   | "#UIM" -> UIMTOK
   | "#UP" -> UPTOK
+  (* Expr tokens *)
   | "#ES" -> ESTOK
-  | "#AX" -> AXTOK
-  | "#RR" -> RRTOK
+  | "#EV" -> EVTOK
+  | "#EC" -> ECTOK
+  | "#EA" -> EATOK
+  | "#EL" -> ELTOK
+  | "#EP" -> EPTOK
+  | "#EZ" -> EZTOK
+  | "#EJ" -> EJTOK
+  | "#ELN" -> ELNTOK
+  | "#ELS" -> ELSTOK
+  | "#EM" -> EMTOK
+  (* Hint tokens *)
   | "O" -> OTOK
   | "R" -> RTOK
   | "A" -> ATOK
-  | "DEF" -> DEFTOK
+  (* Decl Tokens *)
+  | "#AX" -> AXTOK
+  | "#RR" -> RRTOK
+  | "#DEF" -> DEFTOK
   | "#THM" -> THMTOK
   | "#QUOT" -> QUOTOK
   | "#IND" -> INDTOK
