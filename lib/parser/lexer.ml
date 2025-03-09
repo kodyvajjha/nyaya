@@ -22,7 +22,7 @@ exception Eof
 
 let rec token buf =
   match%sedlex buf with
-  | digit ->
+  | Plus digit ->
     print_endline (Sedlexing.Utf8.lexeme buf);
     NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
   | '.' -> PERIOD
