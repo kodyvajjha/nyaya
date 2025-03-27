@@ -1,33 +1,43 @@
 0.1.2
 1 #NS 0 my_type
 2 #NS 1 boo
-0 #EC 1 
 1 #US 0
-1 #ES 1
-#IND 0 1 1 1 2 0 
-3 #NS 1 recOn
-4 #NS 0 motive
-5 #NS 0 t
-6 #NS 0 u
-2 #UP 6
+0 #ES 1
+#IND 1 0 0 0 0 0 1 1 1 2 
+1 #EC 1 
+#CTOR 2 1 1 0 0 0 
+3 #NS 0 u
+2 #UP 3
 2 #ES 2
-3 #EP #BD 5 0 2
-7 #NS 0 boo
-4 #EV 1
+4 #NS 0 t
+3 #EP #BD 4 1 2
+4 #EV 0
 5 #EC 2 
 6 #EA 4 5
-7 #EV 2
-8 #EA 7 4
-9 #EP #BD 7 6 8
-10 #EP #BD 5 0 9
-11 #EP #BI 4 3 10
-8 #NS 1 rec
-12 #EC 8 2
-13 #EA 12 7
-14 #EV 0
-15 #EA 13 14
-16 #EA 15 4
-17 #EL #BD 7 6 16
-18 #EL #BD 5 0 17
-19 #EL #BI 4 3 18
-#DEF 3 11 19 6
+5 #NS 0 boo
+7 #EL #BD 5 6 4
+6 #NS 0 motive
+8 #EL #BD 6 3 7
+0 #RR 2 0 8
+7 #NS 1 rec
+9 #EV 2
+10 #EA 9 4
+11 #EP #BD 4 1 10
+12 #EP #BD 5 6 11
+13 #EP #BI 6 3 12
+#REC 7 13 1 1 0 0 1 1 1 0 0 3
+8 #NS 1 recOn
+14 #EV 1
+15 #EA 14 5
+16 #EA 9 14
+17 #EP #BD 5 15 16
+18 #EP #BD 4 1 17
+19 #EP #BI 6 3 18
+20 #EC 7 2
+21 #EA 20 9
+22 #EA 21 4
+23 #EA 22 14
+24 #EL #BD 5 15 23
+25 #EL #BD 4 1 24
+26 #EL #BI 6 3 25
+#DEF 8 19 26 A 3
