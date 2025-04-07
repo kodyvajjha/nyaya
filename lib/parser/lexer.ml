@@ -3,18 +3,54 @@
 
    ! # % & ' ( ) * + , - . / : ; < = > ? @ [ \ ] ^ _ { | } ~ ¬ · × ‹ › ↔ ∀ ∃ ∅ ∈ ∉ ∘ ∣ ∧ ∨ ∩ ∪ ≈ ≠ ≤ ≥ ⊂ ⊃ ⊆ ⊇ ⊕ ⊢ $ 0 ₀ 1 ₁ 2 ₂ 3 ₃ 4 ₄ 5 ₅ 6 ₆ 7 ₇ 8 ₈ 9 a A b B c C d D e E f F g G h H i I j J k K l L m M n N o O p P q Q r R s S t T u U v V w W x X y z Z α β γ δ ε ι μ ρ σ Σ φ ω
 *)
+(*
+   Lexical structure of names:
 
-let line_num = ref 1
-
-let update_line lexbuf =
-  incr line_num;
-  Sedlexing.new_line lexbuf
+      ident: atomic_ident | ident "." atomic_ident
+      atomic_ident: atomic_ident_start atomic_ident_rest*
+      atomic_ident_start: letterlike | "_" | escaped_ident_part
+      letterlike: [a-zA-Z] | greek | coptic | letterlike_symbols
+      greek: <[α-ωΑ-Ωἀ-῾] except for [λΠΣ]>
+      coptic: [ϊ-ϻ]
+      letterlike_symbols: [℀-⅏]
+      escaped_ident_part: "«" [^«»\r\n\t]* "»"
+      atomic_ident_rest: atomic_ident_start | [0-9'ⁿ] | subscript
+      subscript: [₀-₉ₐ-ₜᵢ-ᵪ]
+*)
 
 let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
 
-let name = [%sedlex.regexp? xid_start, Star ('-' | '|' | xid_continue)]
+let chars =
+  [%sedlex.regexp?
+    Star
+      ( 'a' .. 'z'
+      | 'A' .. 'Z'
+      (* Greek except lambda, Pi, Sigma *)
+      | 0x03B1 .. 0x03C9
+      (* α-ω *)
+      | 0x0391 .. 0x03A9
+      (* Α-Ω *)
+      | 0x1F00 .. 0x1FFF
+      (* ἀ-῾ *)
+      (* Coptic *)
+      | 0x03CA .. 0x03FB
+      (* ϊ-ϻ *)
+      (* Letterlike symbols *)
+      | 0x2100 .. 0x214F (* ℀-⅏ *) )]
+
+let subscript =
+  [%sedlex.regexp?
+    ( 0x2080 .. 0x2089
+    (* ₀-ₙ subscript digits *)
+    | 0x2090 .. 0x209C
+    (* ₐ-ₜ subscript letters *)
+    | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
+
+let excps = [%sedlex.regexp? '_' | '@']
+
+let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
 open Parser
 
@@ -80,4 +116,9 @@ let rec token buf =
     EOF
   | _ ->
     let lexeme = Sedlexing.Utf8.lexeme buf in
-    failwith ("Lexing error: Unexpected character:" ^ lexeme)
+    let pos = Util.of_lex buf in
+    let errstr =
+      CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
+        Util.pp_location pos lexeme
+    in
+    failwith errstr
