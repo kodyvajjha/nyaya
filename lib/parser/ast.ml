@@ -142,6 +142,12 @@ type decl =
       hint: hint option;
       uparams: uidx list;
     }
+  | Opaque of {
+      name: nidx;
+      expr: eidx;
+      value: eidx;
+      uparams: uidx list;
+    }
   | Theorem of {
       name: nidx;
       expr: eidx;

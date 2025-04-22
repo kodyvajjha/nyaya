@@ -17,6 +17,7 @@
       atomic_ident_rest: atomic_ident_start | [0-9'ⁿ] | subscript
       subscript: [₀-₉ₐ-ₜᵢ-ᵪ]
 *)
+let is_els = ref false
 
 let digit = [%sedlex.regexp? '0' .. '9']
 
@@ -48,7 +49,7 @@ let subscript =
     (* ₐ-ₜ subscript letters *)
     | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
 
-let excps = [%sedlex.regexp? '_' | '@']
+let excps = [%sedlex.regexp? '_' | '@' | '\'' | '=' | '>']
 
 let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
@@ -59,8 +60,13 @@ exception Eof
 let rec token buf =
   match%sedlex buf with
   | Plus digit ->
-    print_endline (Sedlexing.Utf8.lexeme buf);
-    NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
+    if !is_els then (
+      CCFormat.printf "hii:%s@." (Sedlexing.Utf8.lexeme buf);
+      STRLITHEX (Sedlexing.Utf8.lexeme buf)
+    ) else (
+      CCFormat.printf "Nat : %d@." (int_of_string (Sedlexing.Utf8.lexeme buf));
+      NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
+    )
   | '.' -> PERIOD
   (* Name Tokens *)
   | "#NS" ->
@@ -89,10 +95,12 @@ let rec token buf =
   | "#EZ" -> EZTOK
   | "#EJ" -> EJTOK
   | "#ELN" -> ELNTOK
-  | "#ELS" -> ELSTOK
+  | "#ELS" ->
+    is_els := true;
+    CCFormat.printf "is_els : %s@." (string_of_bool !is_els);
+    ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
-  | "O" -> OTOK
   | "R" -> RTOK
   | "A" -> ATOK
   (* Decl Tokens *)
@@ -101,13 +109,20 @@ let rec token buf =
   | "#DEF" -> DEFTOK
   | "#THM" -> THMTOK
   | "#QUOT" -> QUOTOK
+  | "#OPAQ" -> OPQTOK
   | "#IND" -> INDTOK
   | "#REC" -> RECTOK
   | "#CTOR" -> CTORTOK
   | newline ->
     print_endline "\t NEWLINE";
+    is_els := false;
     NL
-  | name -> Parser.NAME (Sedlexing.Utf8.lexeme buf)
+  | name ->
+    if !is_els then (
+      CCFormat.printf "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
+      STRLITHEX (Sedlexing.Utf8.lexeme buf)
+    ) else
+      Parser.NAME (Sedlexing.Utf8.lexeme buf)
   | Sub (white_space, '\n') ->
     print_endline "Other whitespace";
     token buf

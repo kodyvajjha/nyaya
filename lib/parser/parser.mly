@@ -6,6 +6,7 @@
 
 %token <int> NAT
 %token <string> NAME
+%token <string> STRLITHEX
 
 %token EOF
 %token PERIOD
@@ -49,6 +50,7 @@
 %token INDTOK 
 %token RECTOK
 %token CTORTOK
+%token OPQTOK
 %start file
 %type <t> file
 
@@ -103,6 +105,7 @@ decl:
   | AXTOK NAT NAT uparams {Axiom {name = $2; expr = $3; uparams = $4}}
   | QUOTOK NAT NAT uparams {Quotient {name=$2;expr=$3;uparams=$4}}
   | DEFTOK NAT NAT NAT hint uparams {Definition {name = $2; expr = $3; value=$4; hint = $5; uparams = $6}} 
+  | OPQTOK NAT NAT NAT uparams {Opaque {name = $2; expr = $3; value=$4; uparams = $5}} 
   | THMTOK NAT NAT NAT uparams {Theorem {name = $2; expr=$3; value =$4;uparams=$5}} 
   | INDTOK indrecparams {Inductive ($2)}
   | CTORTOK NAT NAT NAT NAT NAT NAT uparams {Constructor {name=$2; expr=$3;parent_inductive=$4; ctor_id=$5; num_params=$6;num_fields=$7;uparams=$8}}
@@ -115,8 +118,8 @@ info:
   | BCTOK {IBC}
 
 hexhex: 
-  | NAME {[$1]}
-  | NAME hexhex {$1 :: $2}
+  | STRLITHEX {[$1]}
+  | STRLITHEX hexhex {$1 :: $2}
 
 expr: 
   | NAT EVTOK NAT {EVExpr {eid=$1;num=$3}}
@@ -128,9 +131,8 @@ expr:
   | NAT EZTOK info NAT NAT NAT NAT {EZExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6; eid4=$7}}
   | NAT EJTOK NAT NAT NAT {EJExpr {eid1=$1;nid=$3;num=$4;eid2=$5}}
   | NAT ELNTOK NAT {ELNExpr {eid=$1;num=$3}}
-  | NAT ELSTOK hexhex {ELSExpr {eid=$1;hexhex=$3}}
+  | NAT ELSTOK hexhex {ELSExpr {eid=$1; hexhex=$3}}
   | NAT EMTOK NAT NAT {EMExpr {eid1=$1; mptr = None; eid2=$4}}
-
 
 recrule:
   | NAT RRTOK NAT NAT NAT {{rid = $1; ctorName=$3; numFields = $4; value = $5}}
