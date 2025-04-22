@@ -19,6 +19,8 @@
 *)
 let is_els = ref false
 
+let is_eln = ref false
+
 let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
@@ -49,7 +51,9 @@ let subscript =
     (* ₐ-ₜ subscript letters *)
     | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
 
-let excps = [%sedlex.regexp? '_' | '@' | '\'' | '=' | '>' | '?']
+let excps =
+  [%sedlex.regexp?
+    '_' | '@' | '\'' | '=' | '>' | '<' | '?' | '!' | ':' | ',' | '\\' | '/']
 
 let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
@@ -61,8 +65,11 @@ let rec token buf =
   match%sedlex buf with
   | Plus digit ->
     if !is_els then (
-      CCFormat.printf "hii:%s@." (Sedlexing.Utf8.lexeme buf);
+      CCFormat.printf "Str Lit:%s@." (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
+    ) else if !is_eln then (
+      CCFormat.printf "Nat Lit : %s@." (Sedlexing.Utf8.lexeme buf);
+      NATLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else (
       CCFormat.printf "Nat : %d@." (int_of_string (Sedlexing.Utf8.lexeme buf));
       NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
@@ -94,7 +101,10 @@ let rec token buf =
   | "#EP" -> EPTOK
   | "#EZ" -> EZTOK
   | "#EJ" -> EJTOK
-  | "#ELN" -> ELNTOK
+  | "#ELN" ->
+    is_eln := true;
+    CCFormat.printf "is_eln : %s@." (string_of_bool !is_eln);
+    ELNTOK
   | "#ELS" ->
     is_els := true;
     CCFormat.printf "is_els : %s@." (string_of_bool !is_els);
@@ -116,6 +126,7 @@ let rec token buf =
   | newline ->
     print_endline "\t NEWLINE";
     is_els := false;
+    is_eln := false;
     NL
   | name ->
     if !is_els then (

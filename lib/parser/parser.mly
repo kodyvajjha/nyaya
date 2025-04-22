@@ -7,6 +7,7 @@
 %token <int> NAT
 %token <string> NAME
 %token <string> STRLITHEX
+%token <string> NATLITHEX
 
 %token EOF
 %token PERIOD
@@ -118,7 +119,7 @@ info:
   | BCTOK {IBC}
 
 hexhex: 
-  | STRLITHEX {[$1]}
+  | /* empty */      {[]}
   | STRLITHEX hexhex {$1 :: $2}
 
 expr: 
@@ -130,7 +131,7 @@ expr:
   | NAT EPTOK info NAT NAT NAT {EPExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6}}
   | NAT EZTOK NAT NAT NAT NAT {EZExpr {eid1=$1;nid=$3;eid2=$4;eid3=$5; eid4=$6}}
   | NAT EJTOK NAT NAT NAT {EJExpr {eid1=$1;nid=$3;num=$4;eid2=$5}}
-  | NAT ELNTOK NAT {ELNExpr {eid=$1;num=$3}}
+  | NAT ELNTOK NATLITHEX {ELNExpr {eid=$1;num=$3}}
   | NAT ELSTOK hexhex {ELSExpr {eid=$1; hexhex=$3}}
   | NAT EMTOK NAT NAT {EMExpr {eid1=$1; mptr = None; eid2=$4}}
 

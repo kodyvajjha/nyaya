@@ -103,7 +103,7 @@ type expr =
     }
   | ELNExpr of {
       eid: eidx;
-      num: int;
+      num: string;
     }
   | ELSExpr of {
       eid: eidx;
