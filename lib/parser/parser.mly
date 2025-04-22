@@ -91,7 +91,7 @@ name:
 universe:
   | NAT USTOK NAT { USLevel {uid1 = $1; uid2 = $3}}
   | NAT UMTOK NAT NAT {UMLevel {uid1 = $1; uid2 = $3; uid3 = $4}}
-  | NAT UIMTOK NAT {UIMLevel {uid1 = $1; uid2 = $3}}
+  | NAT UIMTOK NAT NAT {UIMLevel {uid1 = $1; uid2 = $3; uid3=$4}}
   | NAT UPTOK NAT {UPLevel {uid = $1; nid = $3}}
   
 

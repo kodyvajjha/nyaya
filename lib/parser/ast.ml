@@ -47,6 +47,7 @@ type level =
   | UIMLevel of {
       uid1: uidx;
       uid2: uidx;
+      uid3: uidx;
     }
   | UPLevel of {
       uid: uidx;
