@@ -128,7 +128,7 @@ expr:
   | NAT EATOK NAT NAT {EAExpr {eid1=$1;eid2=$3;eid3=$4}}
   | NAT ELTOK info NAT NAT NAT {ELExpr {eid1=$1;info=$3;nid=$4;eid2=$5; eid3=$6}}
   | NAT EPTOK info NAT NAT NAT {EPExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6}}
-  | NAT EZTOK info NAT NAT NAT NAT {EZExpr {eid1=$1;info=$3;nid=$4;eid2=$5;eid3=$6; eid4=$7}}
+  | NAT EZTOK NAT NAT NAT NAT {EZExpr {eid1=$1;nid=$3;eid2=$4;eid3=$5; eid4=$6}}
   | NAT EJTOK NAT NAT NAT {EJExpr {eid1=$1;nid=$3;num=$4;eid2=$5}}
   | NAT ELNTOK NAT {ELNExpr {eid=$1;num=$3}}
   | NAT ELSTOK hexhex {ELSExpr {eid=$1; hexhex=$3}}

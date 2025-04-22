@@ -90,7 +90,6 @@ type expr =
     }
   | EZExpr of {
       eid1: eidx;
-      info: info;
       nid: nidx;
       eid2: eidx;
       eid3: eidx;

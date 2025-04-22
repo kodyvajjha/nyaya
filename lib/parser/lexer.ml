@@ -49,7 +49,7 @@ let subscript =
     (* ₐ-ₜ subscript letters *)
     | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
 
-let excps = [%sedlex.regexp? '_' | '@' | '\'' | '=' | '>']
+let excps = [%sedlex.regexp? '_' | '@' | '\'' | '=' | '>' | '?']
 
 let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
