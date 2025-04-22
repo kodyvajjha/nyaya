@@ -48,3 +48,11 @@ to the defs but without any `hint`s.
 ``` 
 Opaq ::= "#OPAQ" (name : nidx) (type : eidx) (value : eidx) (uparams : uidx*)
 ```
+
+### Empty hex for `#ELS`
+
+We can see the following on line 26089 in the export file of `Init.lean`: 
+``` 
+22639 #ELS
+```
+What does that mean? 
