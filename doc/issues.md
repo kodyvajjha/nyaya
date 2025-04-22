@@ -27,3 +27,24 @@ In other words, I don't see explicit hints in every def, so perhaps this is opti
 
 Can strings in hirarchical names (`#NS`) be arbitrary unicode? 
 
+### Wrong specification for `EZ`:
+
+The spec says EZ exprs are exported as follows: 
+
+``` 
+  | eidx "#EZ"  Info nidx eidx eidx eidx
+```
+
+However, it seems like it should just be
+``` 
+  | eidx "#EZ"  nidx eidx eidx eidx
+```
+
+### Missing spec for Opaque definitions
+
+The format does not have a line for opaque definitions. It should be identical 
+to the defs but without any `hint`s. 
+
+``` 
+Opaq ::= "#OPAQ" (name : nidx) (type : eidx) (value : eidx) (uparams : uidx*)
+```
