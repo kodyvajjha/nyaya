@@ -56,3 +56,16 @@ We can see the following on line 26089 in the export file of `Init.lean`:
 22639 #ELS
 ```
 What does that mean? 
+
+### Export format name clash
+
+The reducibility hints are exported as 
+
+``` 
+Hint ::= "O" | "A" | "R" nat
+```
+The single name `R` is clashing with a name string exported in `Init.lean`: 
+
+``` 
+9563 #NS 0 R
+```
