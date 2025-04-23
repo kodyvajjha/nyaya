@@ -64,8 +64,10 @@ The reducibility hints are exported as
 ``` 
 Hint ::= "O" | "A" | "R" nat
 ```
-The single name `R` is clashing with a name string exported in `Init.lean`: 
+The token `R` and token `.` which should be reserved are clashing with name 
+strings exported in `Init.lean`: 
 
 ``` 
 9563 #NS 0 R
+11118 #NS 1142 conv·._
 ```
