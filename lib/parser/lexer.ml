@@ -17,31 +17,20 @@
       atomic_ident_rest: atomic_ident_start | [0-9'ⁿ] | subscript
       subscript: [₀-₉ₐ-ₜᵢ-ᵪ]
 *)
+
+let is_preamble = ref true
+
 let is_els = ref false
 
 let is_eln = ref false
+
+let is_def = ref false
 
 let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
 
-let chars =
-  [%sedlex.regexp?
-    Star
-      ( 'a' .. 'z'
-      | 'A' .. 'Z'
-      (* Greek except lambda, Pi, Sigma *)
-      | 0x03B1 .. 0x03C9
-      (* α-ω *)
-      | 0x0391 .. 0x03A9
-      (* Α-Ω *)
-      | 0x1F00 .. 0x1FFF
-      (* ἀ-῾ *)
-      (* Coptic *)
-      | 0x03CA .. 0x03FB
-      (* ϊ-ϻ *)
-      (* Letterlike symbols *)
-      | 0x2100 .. 0x214F (* ℀-⅏ *) )]
+let chars = [%sedlex.regexp? Star ('a' .. 'z' | 'A' .. 'Z' | 0x00AC .. 0x22A2)]
 
 let subscript =
   [%sedlex.regexp?
@@ -51,9 +40,12 @@ let subscript =
     (* ₐ-ₜ subscript letters *)
     | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
 
+(** Various other exceptions not covered above. *)
 let excps =
   [%sedlex.regexp?
-    '_' | '@' | '\'' | '=' | '>' | '<' | '?' | '!' | ':' | ',' | '\\' | '/']
+    ( '_' | '-' | '(' | '#' | ')' | '[' | ']' | '{' | '}' | '$' | '&' | '%'
+    | '@' | '\'' | '=' | '>' | '<' | '?' | '!' | ':' | ';' | ',' | '\\' | '/'
+    | '^' | '|' | '*' | '+' | '~' )]
 
 let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
@@ -74,7 +66,11 @@ let rec token buf =
       CCFormat.printf "Nat : %d@." (int_of_string (Sedlexing.Utf8.lexeme buf));
       NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
     )
-  | '.' -> PERIOD
+  | '.' ->
+    if !is_preamble then
+      PERIOD
+    else
+      Parser.NAME (Sedlexing.Utf8.lexeme buf)
   (* Name Tokens *)
   | "#NS" ->
     print_endline "#NS";
@@ -111,12 +107,19 @@ let rec token buf =
     ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
-  | "R" -> RTOK
+  | "R" ->
+    if !is_def then
+      RTOK
+    else
+      Parser.NAME (Sedlexing.Utf8.lexeme buf)
   | "A" -> ATOK
+  | "O" -> OTOK
   (* Decl Tokens *)
   | "#AX" -> AXTOK
   | "#RR" -> RRTOK
-  | "#DEF" -> DEFTOK
+  | "#DEF" ->
+    is_def := true;
+    DEFTOK
   | "#THM" -> THMTOK
   | "#QUOT" -> QUOTOK
   | "#OPAQ" -> OPQTOK
@@ -127,6 +130,8 @@ let rec token buf =
     print_endline "\t NEWLINE";
     is_els := false;
     is_eln := false;
+    is_def := false;
+    is_preamble := false;
     NL
   | name ->
     if !is_els then (
