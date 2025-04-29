@@ -32,14 +32,6 @@ let newline = [%sedlex.regexp? '\n' | "\r\n"]
 
 let chars = [%sedlex.regexp? Star ('a' .. 'z' | 'A' .. 'Z' | 0x00AC .. 0x22A2)]
 
-let subscript =
-  [%sedlex.regexp?
-    ( 0x2080 .. 0x2089
-    (* ₀-ₙ subscript digits *)
-    | 0x2090 .. 0x209C
-    (* ₐ-ₜ subscript letters *)
-    | 0x1D62 .. 0x1D6A (* ᵢ-ᵪ subscript letters *) )]
-
 (** Various other exceptions not covered above. *)
 let excps =
   [%sedlex.regexp?
@@ -49,7 +41,7 @@ let excps =
 
 let name_preamble = [%sedlex.regexp? Plus digit]
 
-let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
+let name = [%sedlex.regexp? Star (digit | chars | excps)]
 
 open Parser
 
