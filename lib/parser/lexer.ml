@@ -43,9 +43,11 @@ let subscript =
 (** Various other exceptions not covered above. *)
 let excps =
   [%sedlex.regexp?
-    ( '_' | '-' | '(' | '#' | ')' | '[' | ']' | '{' | '}' | '$' | '&' | '%'
-    | '@' | '\'' | '=' | '>' | '<' | '?' | '!' | ':' | ';' | ',' | '\\' | '/'
-    | '^' | '|' | '*' | '+' | '~' )]
+    ( '.' | '_' | '-' | '(' | '#' | ')' | '[' | ']' | '{' | '}' | '$' | '&'
+    | '%' | '@' | '\'' | '=' | '>' | '<' | '?' | '!' | ':' | ';' | ',' | '\\'
+    | '/' | '^' | '|' | '*' | '+' | '~' )]
+
+let name_preamble = [%sedlex.regexp? Plus digit]
 
 let name = [%sedlex.regexp? Star (digit | chars | subscript | excps)]
 
@@ -53,7 +55,31 @@ open Parser
 
 exception Eof
 
+let handle_lexer_error buf =
+  let lexeme = Sedlexing.Utf8.lexeme buf in
+  let pos = Util.of_lex buf in
+  let errstr =
+    CCFormat.sprintf "Lexer error at %a: unexpected token '%s'" Util.pp_location
+      pos lexeme
+  in
+  failwith errstr
+
 let rec token buf =
+  match%sedlex buf with
+  | newline ->
+    print_endline "\t NEWLINE";
+    is_els := false;
+    is_eln := false;
+    is_def := false;
+    is_preamble := false;
+    NL
+  | _ ->
+    if !is_preamble then
+      token_preamble buf
+    else
+      token_body buf
+
+and token_body buf =
   match%sedlex buf with
   | Plus digit ->
     if !is_els then (
@@ -126,13 +152,6 @@ let rec token buf =
   | "#IND" -> INDTOK
   | "#REC" -> RECTOK
   | "#CTOR" -> CTORTOK
-  | newline ->
-    print_endline "\t NEWLINE";
-    is_els := false;
-    is_eln := false;
-    is_def := false;
-    is_preamble := false;
-    NL
   | name ->
     if !is_els then (
       CCFormat.printf "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
@@ -145,11 +164,10 @@ let rec token buf =
   | eof ->
     print_endline "\tEnd";
     EOF
-  | _ ->
-    let lexeme = Sedlexing.Utf8.lexeme buf in
-    let pos = Util.of_lex buf in
-    let errstr =
-      CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
-        Util.pp_location pos lexeme
-    in
-    failwith errstr
+  | _ -> handle_lexer_error buf
+
+and token_preamble buf =
+  match%sedlex buf with
+  | "." -> PERIOD
+  | digit -> Parser.NAT (int_of_string @@ Sedlexing.Utf8.lexeme buf)
+  | _ -> handle_lexer_error buf
