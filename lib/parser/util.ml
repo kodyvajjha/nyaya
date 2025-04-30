@@ -29,3 +29,37 @@ let handle_parser_error lexbuf =
   let lexeme = Sedlexing.Utf8.lexeme lexbuf in
   CCFormat.eprintf "Parser error at position %a: unexpected token '%s'\n"
     pp_location pos lexeme
+
+module Logger = struct
+  module Format = CCFormat
+
+  let stamp_tag : Mtime.span Logs.Tag.def =
+    Logs.Tag.def "stamp" ~doc:"Relative monotonic time stamp" Mtime.Span.pp
+
+  let stamp c = Logs.Tag.(empty |> add stamp_tag (Mtime_clock.count c))
+
+  let reporter ppf =
+    let report _src level ~over k msgf =
+      let k _ =
+        over ();
+        k ()
+      in
+      let with_stamp h tags k ppf fmt =
+        let stamp =
+          match tags with
+          | None -> None
+          | Some tags -> Logs.Tag.find stamp_tag tags
+        in
+        let dt =
+          match stamp with
+          | None -> Mtime.Span.zero
+          | Some s -> s
+        in
+        Format.kfprintf k ppf
+          ("%a[%a] @[" ^^ fmt ^^ "@]@.")
+          Logs.pp_header (level, h) Mtime.Span.pp dt
+      in
+      msgf @@ fun ?header ?tags fmt -> with_stamp header tags k ppf fmt
+    in
+    { Logs.report }
+end

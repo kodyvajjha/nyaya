@@ -59,7 +59,7 @@ let handle_lexer_error buf =
 let rec token buf =
   match%sedlex buf with
   | newline ->
-    print_endline "\t NEWLINE";
+    Logs.info (fun m -> m "[Lexer] NEWLINE");
     is_els := false;
     is_eln := false;
     is_def := false;
@@ -75,26 +75,27 @@ and token_body buf =
   match%sedlex buf with
   | Plus digit ->
     if !is_els then (
-      CCFormat.printf "Str Lit:%s@." (Sedlexing.Utf8.lexeme buf);
+      Logs.info (fun m -> m "[Lexer] Str Lit:%s" (Sedlexing.Utf8.lexeme buf));
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else if !is_eln then (
-      CCFormat.printf "Nat Lit : %s@." (Sedlexing.Utf8.lexeme buf);
+      Logs.info (fun m -> m "[Lexer] Nat Lit : %s" (Sedlexing.Utf8.lexeme buf));
       NATLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else (
-      CCFormat.printf "Nat : %d@." (int_of_string (Sedlexing.Utf8.lexeme buf));
+      Logs.info (fun m ->
+          m "[Lexer] Nat : %d" (int_of_string (Sedlexing.Utf8.lexeme buf)));
       NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
     )
   | '.' ->
     if !is_preamble then
       PERIOD
     else
-      Parser.NAME (Sedlexing.Utf8.lexeme buf)
+      NAME (Sedlexing.Utf8.lexeme buf)
   (* Name Tokens *)
   | "#NS" ->
-    print_endline "#NS";
+    Logs.info (fun m -> m "[Lexer] #NS");
     NSTOK
   | "#NI" ->
-    print_endline "#NI";
+    Logs.info (fun m -> m "[Lexer] #NI");
     NITOK
   (* Info tokens *)
   | "#BD" -> BDTOK
@@ -117,11 +118,11 @@ and token_body buf =
   | "#EJ" -> EJTOK
   | "#ELN" ->
     is_eln := true;
-    CCFormat.printf "is_eln : %s@." (string_of_bool !is_eln);
+    Logs.info (fun m -> m "[Lexer] is_eln : %s@." (string_of_bool !is_eln));
     ELNTOK
   | "#ELS" ->
     is_els := true;
-    CCFormat.printf "is_els : %s@." (string_of_bool !is_els);
+    Logs.info (fun m -> m "[Lexer] is_els : %s@." (string_of_bool !is_els));
     ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
@@ -129,7 +130,7 @@ and token_body buf =
     if !is_def then
       RTOK
     else
-      Parser.NAME (Sedlexing.Utf8.lexeme buf)
+      NAME (Sedlexing.Utf8.lexeme buf)
   | "A" -> ATOK
   | "O" -> OTOK
   (* Decl Tokens *)
@@ -146,15 +147,15 @@ and token_body buf =
   | "#CTOR" -> CTORTOK
   | name ->
     if !is_els then (
-      CCFormat.printf "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
+      Logs.info (fun m -> m "[Lexer] Lexing: %s@." (Sedlexing.Utf8.lexeme buf));
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else
-      Parser.NAME (Sedlexing.Utf8.lexeme buf)
+      NAME (Sedlexing.Utf8.lexeme buf)
   | Sub (white_space, '\n') ->
-    print_endline "Other whitespace";
+    Logs.info (fun m -> m "[Lexer] Other whitespace");
     token buf
   | eof ->
-    print_endline "\tEnd";
+    Logs.info (fun m -> m "[Lexer] End");
     EOF
   | _ -> handle_lexer_error buf
 
