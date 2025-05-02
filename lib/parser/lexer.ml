@@ -49,10 +49,10 @@ exception Eof
 
 let handle_lexer_error buf =
   let lexeme = Sedlexing.Utf8.lexeme buf in
-  let pos = Util.of_lex buf in
+  let pos = Util.Location.of_lex buf in
   let errstr =
-    CCFormat.sprintf "Lexer error at %a: unexpected token '%s'" Util.pp_location
-      pos lexeme
+    CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
+      Util.Location.pp_location pos lexeme
   in
   failwith errstr
 

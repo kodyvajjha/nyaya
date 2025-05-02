@@ -11,7 +11,7 @@ let parse_from_file filename =
   let result =
     try parser lexer
     with Parser.Error ->
-      Util.handle_parser_error lexbuf;
+      Util.Location.handle_parser_error lexbuf;
       exit 1
   in
   Logs.info (fun m -> m "%a@." Nyaya_parser.Ast.pp result);
