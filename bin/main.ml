@@ -1,6 +1,6 @@
 let parse_from_file filename =
   let open Nyaya_parser in
-  let open Util.Logger in
+  let open Lexer.Logger in
   Logs.set_reporter (reporter Format.std_formatter);
   Logs.set_level (Some Logs.Info);
 

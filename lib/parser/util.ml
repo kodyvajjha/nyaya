@@ -32,7 +32,12 @@ module Location = struct
       pp_location pos lexeme
 end
 
-module Logger = struct
+module MakeLogger (Data : sig
+  val counter : Mtime_clock.counter
+
+  val header : string
+end) =
+struct
   module Format = CCFormat
 
   let stamp_tag : Mtime.span Logs.Tag.def =
@@ -65,23 +70,31 @@ module Logger = struct
     in
     { Logs.report }
 
-  let info c ~header fmt =
+  let info fmt =
     CCFormat.ksprintf
-      ~f:(fun str -> Logs.info (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      ~f:(fun str ->
+        Logs.info (fun m ->
+            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
       fmt
 
-  let warn c ~header fmt =
+  let warn fmt =
     CCFormat.ksprintf
-      ~f:(fun str -> Logs.warn (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      ~f:(fun str ->
+        Logs.warn (fun m ->
+            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
       fmt
 
-  let err c ~header fmt =
+  let err fmt =
     CCFormat.ksprintf
-      ~f:(fun str -> Logs.err (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      ~f:(fun str ->
+        Logs.err (fun m ->
+            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
       fmt
 
-  let debug c ~header fmt =
+  let debug fmt =
     CCFormat.ksprintf
-      ~f:(fun str -> Logs.debug (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      ~f:(fun str ->
+        Logs.debug (fun m ->
+            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
       fmt
 end
