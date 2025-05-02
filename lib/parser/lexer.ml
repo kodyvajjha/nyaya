@@ -56,10 +56,14 @@ let handle_lexer_error buf =
   in
   failwith errstr
 
+let c = Mtime_clock.counter ()
+
+let header = "Lexer"
+
 let rec token buf =
   match%sedlex buf with
   | newline ->
-    Logs.info (fun m -> m "[Lexer] NEWLINE");
+    Util.Logger.info c ~header "NEWLINE";
     is_els := false;
     is_eln := false;
     is_def := false;
@@ -75,14 +79,14 @@ and token_body buf =
   match%sedlex buf with
   | Plus digit ->
     if !is_els then (
-      Logs.info (fun m -> m "[Lexer] Str Lit:%s" (Sedlexing.Utf8.lexeme buf));
+      Util.Logger.info c ~header "Str Lit:%s" (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else if !is_eln then (
-      Logs.info (fun m -> m "[Lexer] Nat Lit : %s" (Sedlexing.Utf8.lexeme buf));
+      Util.Logger.info c ~header "Nat Lit : %s" (Sedlexing.Utf8.lexeme buf);
       NATLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else (
-      Logs.info (fun m ->
-          m "[Lexer] Nat : %d" (int_of_string (Sedlexing.Utf8.lexeme buf)));
+      Util.Logger.info c ~header "Nat : %d"
+        (int_of_string (Sedlexing.Utf8.lexeme buf));
       NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
     )
   | '.' ->
@@ -92,10 +96,10 @@ and token_body buf =
       NAME (Sedlexing.Utf8.lexeme buf)
   (* Name Tokens *)
   | "#NS" ->
-    Logs.info (fun m -> m "[Lexer] #NS");
+    Util.Logger.info c ~header "#NS";
     NSTOK
   | "#NI" ->
-    Logs.info (fun m -> m "[Lexer] #NI");
+    Util.Logger.info c ~header "#NI";
     NITOK
   (* Info tokens *)
   | "#BD" -> BDTOK
@@ -118,11 +122,11 @@ and token_body buf =
   | "#EJ" -> EJTOK
   | "#ELN" ->
     is_eln := true;
-    Logs.info (fun m -> m "[Lexer] is_eln : %s@." (string_of_bool !is_eln));
+    Util.Logger.info c ~header "is_eln : %s@." (string_of_bool !is_eln);
     ELNTOK
   | "#ELS" ->
     is_els := true;
-    Logs.info (fun m -> m "[Lexer] is_els : %s@." (string_of_bool !is_els));
+    Util.Logger.info c ~header "is_els : %s@." (string_of_bool !is_els);
     ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
@@ -147,15 +151,15 @@ and token_body buf =
   | "#CTOR" -> CTORTOK
   | name ->
     if !is_els then (
-      Logs.info (fun m -> m "[Lexer] Lexing: %s@." (Sedlexing.Utf8.lexeme buf));
+      Util.Logger.info c ~header "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else
       NAME (Sedlexing.Utf8.lexeme buf)
   | Sub (white_space, '\n') ->
-    Logs.info (fun m -> m "[Lexer] Other whitespace");
+    Util.Logger.info c ~header "Other Whitespace";
     token buf
   | eof ->
-    Logs.info (fun m -> m "[Lexer] End");
+    Util.Logger.info c ~header "End";
     EOF
   | _ -> handle_lexer_error buf
 

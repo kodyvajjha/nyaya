@@ -62,4 +62,24 @@ module Logger = struct
       msgf @@ fun ?header ?tags fmt -> with_stamp header tags k ppf fmt
     in
     { Logs.report }
+
+  let info c ~header fmt =
+    CCFormat.ksprintf
+      ~f:(fun str -> Logs.info (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      fmt
+
+  let warn c ~header fmt =
+    CCFormat.ksprintf
+      ~f:(fun str -> Logs.warn (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      fmt
+
+  let err c ~header fmt =
+    CCFormat.ksprintf
+      ~f:(fun str -> Logs.err (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      fmt
+
+  let debug c ~header fmt =
+    CCFormat.ksprintf
+      ~f:(fun str -> Logs.debug (fun m -> m "%s" str ~header ~tags:(stamp c)))
+      fmt
 end
