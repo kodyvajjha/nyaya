@@ -65,7 +65,7 @@ end)
 let rec token buf =
   match%sedlex buf with
   | newline ->
-    Logger.info "NEWLINE";
+    Logger.debug "NEWLINE";
     is_els := false;
     is_eln := false;
     is_def := false;
@@ -81,13 +81,13 @@ and token_body buf =
   match%sedlex buf with
   | Plus digit ->
     if !is_els then (
-      Logger.info "Str Lit:%s" (Sedlexing.Utf8.lexeme buf);
+      Logger.debug "Str Lit:%s" (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else if !is_eln then (
-      Logger.info "Nat Lit : %s" (Sedlexing.Utf8.lexeme buf);
+      Logger.debug "Nat Lit : %s" (Sedlexing.Utf8.lexeme buf);
       NATLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else (
-      Logger.info "Nat : %d" (int_of_string (Sedlexing.Utf8.lexeme buf));
+      Logger.debug "Nat : %d" (int_of_string (Sedlexing.Utf8.lexeme buf));
       NAT (int_of_string (Sedlexing.Utf8.lexeme buf))
     )
   | '.' ->
@@ -97,10 +97,10 @@ and token_body buf =
       NAME (Sedlexing.Utf8.lexeme buf)
   (* Name Tokens *)
   | "#NS" ->
-    Logger.info "#NS";
+    Logger.debug "#NS";
     NSTOK
   | "#NI" ->
-    Logger.info "#NI";
+    Logger.debug "#NI";
     NITOK
   (* Info tokens *)
   | "#BD" -> BDTOK
@@ -123,11 +123,11 @@ and token_body buf =
   | "#EJ" -> EJTOK
   | "#ELN" ->
     is_eln := true;
-    Logger.info "is_eln : %s@." (string_of_bool !is_eln);
+    Logger.debug "is_eln : %s@." (string_of_bool !is_eln);
     ELNTOK
   | "#ELS" ->
     is_els := true;
-    Logger.info "is_els : %s@." (string_of_bool !is_els);
+    Logger.debug "is_els : %s@." (string_of_bool !is_els);
     ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
@@ -152,15 +152,15 @@ and token_body buf =
   | "#CTOR" -> CTORTOK
   | name ->
     if !is_els then (
-      Logger.info "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
+      Logger.debug "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else
       NAME (Sedlexing.Utf8.lexeme buf)
   | Sub (white_space, '\n') ->
-    Logger.info "Other Whitespace";
+    Logger.debug "Other Whitespace";
     token buf
   | eof ->
-    Logger.info "End";
+    Logger.debug "End";
     EOF
   | _ -> handle_lexer_error buf
 
