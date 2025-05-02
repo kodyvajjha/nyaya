@@ -123,11 +123,11 @@ and token_body buf =
   | "#EJ" -> EJTOK
   | "#ELN" ->
     is_eln := true;
-    Logger.debug "is_eln : %s@." (string_of_bool !is_eln);
+    Logger.debug "is_eln : %s" (string_of_bool !is_eln);
     ELNTOK
   | "#ELS" ->
     is_els := true;
-    Logger.debug "is_els : %s@." (string_of_bool !is_els);
+    Logger.debug "is_els : %s" (string_of_bool !is_els);
     ELSTOK
   | "#EM" -> EMTOK
   (* Hint tokens *)
@@ -152,7 +152,7 @@ and token_body buf =
   | "#CTOR" -> CTORTOK
   | name ->
     if !is_els then (
-      Logger.debug "Lexing: %s@." (Sedlexing.Utf8.lexeme buf);
+      Logger.debug "Lexing: %s" (Sedlexing.Utf8.lexeme buf);
       STRLITHEX (Sedlexing.Utf8.lexeme buf)
     ) else
       NAME (Sedlexing.Utf8.lexeme buf)
