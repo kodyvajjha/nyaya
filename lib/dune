@@ -1,4 +1,4 @@
 (library
  (name nyaya)
  (preprocess (pps ppx_deriving.show sedlex.ppx))
- (libraries containers zarith sedlex menhirLib))
+ (libraries containers zarith sedlex menhirLib nyaya_parser))
