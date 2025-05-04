@@ -77,23 +77,23 @@ items:
   | /* empty  */  {[]}
 
 item: 
-  | name {EName ($1)}
-  | universe {ELevel ($1)} 
-  | expr {EExpr ($1)}
-  | recrule {ERecRule ($1)} 
-  | decl {EDecl ($1)}
+  | name {Item.EName ($1)}
+  | universe {Item.ELevel ($1)} 
+  | expr {Item.EExpr ($1)}
+  | recrule {Item.ERecRule ($1)} 
+  | decl {Item.EDecl ($1)}
 
 
 name: 
-  | NAT NSTOK NAT NAME { NSName {nid = $1; uid = $3; str = $4} }
-  | NAT NITOK NAT NAT { NIName {nid = $1; uid = $3; nat = $4} }
+  | NAT NSTOK NAT NAME { Name.NSName {nid = $1; uid = $3; str = $4} }
+  | NAT NITOK NAT NAT { Name.NIName {nid = $1; uid = $3; nat = $4} }
 
 
 universe:
-  | NAT USTOK NAT { USLevel {uid1 = $1; uid2 = $3}}
-  | NAT UMTOK NAT NAT {UMLevel {uid1 = $1; uid2 = $3; uid3 = $4}}
-  | NAT UIMTOK NAT NAT {UIMLevel {uid1 = $1; uid2 = $3; uid3=$4}}
-  | NAT UPTOK NAT {UPLevel {uid = $1; nid = $3}}
+  | NAT USTOK NAT { Level.USLevel {uid1 = $1; uid2 = $3}}
+  | NAT UMTOK NAT NAT {Level.UMLevel {uid1 = $1; uid2 = $3; uid3 = $4}}
+  | NAT UIMTOK NAT NAT {Level.UIMLevel {uid1 = $1; uid2 = $3; uid3=$4}}
+  | NAT UPTOK NAT {Level.UPLevel {uid = $1; nid = $3}}
   
 
 hint:
