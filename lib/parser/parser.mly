@@ -85,8 +85,8 @@ item:
 
 
 name: 
-  | NAT NSTOK NAT NAME { Name.NSName {nid = $1; uid = $3; str = $4} }
-  | NAT NITOK NAT NAT { Name.NIName {nid = $1; uid = $3; nat = $4} }
+  | NAT NSTOK NAT NAME { Name.NSName {nid1 = $1; nid2 = $3; str = $4} }
+  | NAT NITOK NAT NAT { Name.NIName {nid1 = $1; nid2 = $3; nat = $4} }
 
 
 universe:

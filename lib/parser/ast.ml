@@ -24,13 +24,13 @@ type hint =
 module Name = struct
   type t =
     | NSName of {
-        nid: nidx;
-        uid: uidx;
+        nid1: nidx;
+        nid2: nidx;
         str: string;
       }
     | NIName of {
-        nid: nidx;
-        uid: uidx;
+        nid1: nidx;
+        nid2: nidx;
         nat: int;
       }
   [@@deriving show]
