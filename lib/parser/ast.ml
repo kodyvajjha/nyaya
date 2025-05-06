@@ -186,30 +186,30 @@ module Item = struct
     | EDecl of Decl.t
   [@@deriving show]
 
-  let is_name item =
+  let get_name item =
     match item with
-    | EName _ -> true
-    | _ -> false
+    | EName nm -> Some nm
+    | _ -> None
 
-  let is_level item =
+  let get_level item =
     match item with
-    | ELevel _ -> true
-    | _ -> false
+    | ELevel lvl -> Some lvl
+    | _ -> None
 
   let is_expr item =
     match item with
-    | EExpr _ -> true
-    | _ -> false
+    | EExpr expr -> Some expr
+    | _ -> None
 
   let is_decl item =
     match item with
-    | EDecl _ -> true
-    | _ -> false
+    | EDecl dcl -> Some dcl
+    | _ -> None
 
   let is_rec_rule item =
     match item with
-    | ERecRule _ -> true
-    | _ -> false
+    | ERecRule rr -> Some rr
+    | _ -> None
 end
 
 type t = {
