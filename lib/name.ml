@@ -25,24 +25,10 @@ let rec pp fpf name =
   | Num (n1, id) -> Fmt.fprintf fpf "%a.%d" pp n1 id
 
 let resolve_all (items : Ast.Name.t list) : (int, t) Hashtbl.t =
-  let raw_table : (int, Ast.Name.t) Hashtbl.t =
-    Hashtbl.create (List.length items)
-  in
   let resolved_table : (int, t) Hashtbl.t =
     Hashtbl.create (List.length items)
   in
-  let open Nyaya_parser.Ast.Name in
-  (* Fill raw_table for fast lookup by nid *)
-  List.iter
-    (fun item ->
-      let nid =
-        match item with
-        | NSName { nid1; _ } -> nid1
-        | NIName { nid1; _ } -> nid1
-      in
-      Hashtbl.add raw_table nid item)
-    items;
-
+  let name_table = Ast.Hashed.names items in
   (* Recursive resolution with memoization *)
   let rec resolve (nid : int) =
     match Hashtbl.find_opt resolved_table nid with
@@ -50,7 +36,7 @@ let resolve_all (items : Ast.Name.t list) : (int, t) Hashtbl.t =
     | None when nid = 0 -> Anon
     | None ->
       let resolved =
-        match Hashtbl.find raw_table nid with
+        match Hashtbl.find name_table nid with
         | NSName { nid2; str; _ } ->
           let parent_name = resolve nid2 in
           Str (parent_name, str)
@@ -63,5 +49,5 @@ let resolve_all (items : Ast.Name.t list) : (int, t) Hashtbl.t =
   in
 
   (* Resolve every name *)
-  Hashtbl.iter (fun nid _ -> ignore (resolve nid)) raw_table;
+  Hashtbl.iter (fun nid _ -> ignore (resolve nid)) name_table;
   resolved_table

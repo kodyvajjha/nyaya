@@ -217,3 +217,19 @@ type t = {
   items: Item.t list;
 }
 [@@deriving show]
+
+module Hashed = struct
+  (** Return a Hashtbl of names with nids as keys. *)
+  let names items =
+    let raw_table = Hashtbl.create (List.length items) in
+    CCList.iter
+      (fun item ->
+        let nid =
+          match item with
+          | Name.NSName { nid1; _ } -> nid1
+          | Name.NIName { nid1; _ } -> nid1
+        in
+        Hashtbl.add raw_table nid item)
+      items;
+    raw_table
+end
