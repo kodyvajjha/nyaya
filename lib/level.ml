@@ -44,6 +44,14 @@ let rec simplify (level : t) : t =
     | Zero -> Zero
     | l2_ -> IMax (simplify l1, l2_))
 
+(* let rec pp fpf t =
+   match t with
+   | Zero -> CCFormat.fprintf fpf "0"
+   | Succ l -> CCFormat.fprintf fpf "%a" pp (simplify l)
+   | Max (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
+   | IMax (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
+   | Param l -> CCFormat.fprintf fpf "%a" Name.pp l *)
+
 (* TODO: Maybe replace this with a Hashtbl.  *)
 let rec subst (level : t) p q =
   match level with
@@ -85,4 +93,29 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
 
 open Nyaya_parser
 
-let resolver (_ast : Ast.t) : (Ast.uidx, t) Hashtbl.t = assert false
+let resolver (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
+  let resolved_table : (Ast.uidx, t) Hashtbl.t =
+    Hashtbl.create (CCList.length ast.items)
+  in
+  let rec resolve uid =
+    match Hashtbl.find_opt resolved_table uid with
+    | Some l -> l
+    | None when uid = 0 -> Zero
+    | None ->
+      let lvl = Hashtbl.find (Ast.Hashed.levels ast) uid in
+      let resolved_level =
+        match lvl with
+        | Ast.Level.USLevel { uid2; _ } -> Succ (resolve uid2)
+        | Ast.Level.UMLevel { uid2; uid3; _ } -> Max (resolve uid2, resolve uid3)
+        | Ast.Level.UIMLevel { uid2; uid3; _ } ->
+          IMax (resolve uid2, resolve uid3)
+        | Ast.Level.UPLevel { nid; _ } ->
+          (match CCHashtbl.get (Name.resolver ast) nid with
+          | None -> failwith "level_resolver: could not find binding"
+          | Some name -> Param name)
+      in
+      Hashtbl.add resolved_table uid resolved_level;
+      resolved_level
+  in
+  Hashtbl.iter (fun uid _ -> ignore (resolve uid)) (Ast.Hashed.levels ast);
+  resolved_table

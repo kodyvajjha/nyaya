@@ -15,4 +15,13 @@ let parse_from_file filename =
 
 let () =
   let result = parse_from_file "test/parser/init.export" in
-  ignore @@ Logs.info (fun m -> m "%a@." Nyaya_parser.Ast.pp result)
+  let resolved_names = Nyaya.Name.resolver result in
+  let resolve_levels = Nyaya.Level.resolver result in
+  Logs.info (fun m ->
+      m "@[%a@]@."
+        (CCHashtbl.pp ~pp_sep:CCFormat.newline CCFormat.(int) Nyaya.Name.pp)
+        resolved_names);
+  Logs.info (fun m ->
+      m "@[%a@]@."
+        (CCHashtbl.pp ~pp_sep:CCFormat.newline CCFormat.(int) Nyaya.Level.pp)
+        resolve_levels)
