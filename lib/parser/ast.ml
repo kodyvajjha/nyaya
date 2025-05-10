@@ -220,16 +220,36 @@ type t = {
 
 module Hashed = struct
   (** Return a Hashtbl of names with nids as keys. *)
-  let names items =
-    let raw_table = Hashtbl.create (List.length items) in
+  let names ast : (nidx, Name.t) Hashtbl.t =
+    let names = CCList.filter_map Item.get_name ast.items in
+    let raw_table = Hashtbl.create (List.length names) in
     CCList.iter
-      (fun item ->
+      (fun name ->
         let nid =
-          match item with
+          match name with
           | Name.NSName { nid1; _ } -> nid1
           | Name.NIName { nid1; _ } -> nid1
         in
-        Hashtbl.add raw_table nid item)
-      items;
+        Hashtbl.add raw_table nid name)
+      names;
+    raw_table
+
+  (** Return a Hashtbl of levels with uids as keys. *)
+  let levels ast : (uidx, Level.t) Hashtbl.t =
+    let levels = CCList.filter_map Item.get_level ast.items in
+
+    let raw_table = Hashtbl.create (List.length levels) in
+    CCList.iter
+      (fun (level : Level.t) ->
+        let uid =
+          match level with
+          | Level.USLevel { uid1; _ } -> uid1
+          | Level.UMLevel { uid1; _ } -> uid1
+          | Level.UIMLevel { uid1; _ } -> uid1
+          | Level.UPLevel { uid; _ } -> uid
+        in
+
+        Hashtbl.add raw_table uid level)
+      levels;
     raw_table
 end

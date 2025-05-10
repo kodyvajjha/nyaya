@@ -24,11 +24,11 @@ let rec pp fpf name =
       Fmt.fprintf fpf "%a.%s" pp n1 str
   | Num (n1, id) -> Fmt.fprintf fpf "%a.%d" pp n1 id
 
-let resolve_all (items : Ast.Name.t list) : (int, t) Hashtbl.t =
+let resolver (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
   let resolved_table : (int, t) Hashtbl.t =
-    Hashtbl.create (List.length items)
+    Hashtbl.create (CCList.length ast.items)
   in
-  let name_table = Ast.Hashed.names items in
+  let name_table = Ast.Hashed.names ast in
   (* Recursive resolution with memoization *)
   let rec resolve (nid : int) =
     match Hashtbl.find_opt resolved_table nid with

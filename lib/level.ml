@@ -82,3 +82,7 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
         x pp y
     in
     failwith err
+
+open Nyaya_parser
+
+let resolver (_ast : Ast.t) : (Ast.uidx, t) Hashtbl.t = assert false
