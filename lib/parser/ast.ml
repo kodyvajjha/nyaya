@@ -34,6 +34,11 @@ module Name = struct
         nat: int;
       }
   [@@deriving show]
+
+  let get_nid name =
+    match name with
+    | NSName { nid1; _ } -> nid1
+    | NIName { nid1; _ } -> nid1
 end
 
 module Level = struct
@@ -57,6 +62,13 @@ module Level = struct
         nid: nidx;
       }
   [@@deriving show]
+
+  let get_uid level =
+    match level with
+    | USLevel { uid1; _ } -> uid1
+    | UMLevel { uid1; _ } -> uid1
+    | UIMLevel { uid1; _ } -> uid1
+    | UPLevel { uid; _ } -> uid
 end
 
 module Expr = struct
@@ -120,6 +132,20 @@ module Expr = struct
         eid2: eidx;
       }
   [@@deriving show]
+
+  let get_eid expr =
+    match expr with
+    | EVExpr { eid; _ } -> eid
+    | ESExpr { eid; _ } -> eid
+    | ECExpr { eid; _ } -> eid
+    | EAExpr { eid1; _ } -> eid1
+    | ELExpr { eid1; _ } -> eid1
+    | EPExpr { eid1; _ } -> eid1
+    | EZExpr { eid1; _ } -> eid1
+    | EJExpr { eid1; _ } -> eid1
+    | ELNExpr { eid; _ } -> eid
+    | ELSExpr { eid; _ } -> eid
+    | EMExpr { eid1; _ } -> eid1
 end
 
 type rec_rule = {
@@ -196,17 +222,17 @@ module Item = struct
     | ELevel lvl -> Some lvl
     | _ -> None
 
-  let is_expr item =
+  let get_expr item =
     match item with
     | EExpr expr -> Some expr
     | _ -> None
 
-  let is_decl item =
+  let get_decl item =
     match item with
     | EDecl dcl -> Some dcl
     | _ -> None
 
-  let is_rec_rule item =
+  let get_rec_rule item =
     match item with
     | ERecRule rr -> Some rr
     | _ -> None
@@ -219,6 +245,8 @@ type t = {
 [@@deriving show]
 
 module Hashed = struct
+  (* TODO: Pre-mature optimization: Create one table storing Item.t's instead?*)
+
   (** Return a Hashtbl of names with nids as keys. *)
   let names ast : (nidx, Name.t) Hashtbl.t =
     let names = CCList.filter_map Item.get_name ast.items in
@@ -251,5 +279,30 @@ module Hashed = struct
 
         Hashtbl.add raw_table uid level)
       levels;
+    raw_table
+
+  let exprs ast : (eidx, Expr.t) Hashtbl.t =
+    let exprs = CCList.filter_map Item.get_expr ast.items in
+
+    let raw_table = Hashtbl.create (List.length exprs) in
+    CCList.iter
+      (fun (expr : Expr.t) ->
+        let eid =
+          match expr with
+          | Expr.EVExpr { eid; _ } -> eid
+          | Expr.ESExpr { eid; _ } -> eid
+          | Expr.ECExpr { eid; _ } -> eid
+          | Expr.EAExpr { eid1; _ } -> eid1
+          | Expr.ELExpr { eid1; _ } -> eid1
+          | Expr.EPExpr { eid1; _ } -> eid1
+          | Expr.EZExpr { eid1; _ } -> eid1
+          | Expr.EJExpr { eid1; _ } -> eid1
+          | Expr.ELNExpr { eid; _ } -> eid
+          | Expr.ELSExpr { eid; _ } -> eid
+          | Expr.EMExpr { eid1; _ } -> eid1
+        in
+
+        Hashtbl.add raw_table eid expr)
+      exprs;
     raw_table
 end
