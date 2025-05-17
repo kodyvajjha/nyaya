@@ -253,6 +253,7 @@ type t = {
 [@@deriving show]
 
 module Hashed = struct
+  (** Return a Hashtbl of items with nids, eids, uids as keys. *)
   let items ast : (int, Item.t) Hashtbl.t =
     let raw_table = Hashtbl.create 65537 in
     CCList.iter
@@ -261,64 +262,5 @@ module Hashed = struct
           (fun id -> Hashtbl.add raw_table id item)
           (Item.get_id item))
       ast.items;
-    raw_table
-
-  (** Return a Hashtbl of names with nids as keys. *)
-  let names ast : (nidx, Name.t) Hashtbl.t =
-    let names = CCList.filter_map Item.get_name ast.items in
-    let raw_table = Hashtbl.create (List.length names) in
-    CCList.iter
-      (fun name ->
-        let nid =
-          match name with
-          | Name.NSName { nid1; _ } -> nid1
-          | Name.NIName { nid1; _ } -> nid1
-        in
-        Hashtbl.add raw_table nid name)
-      names;
-    raw_table
-
-  (** Return a Hashtbl of levels with uids as keys. *)
-  let levels ast : (uidx, Level.t) Hashtbl.t =
-    let levels = CCList.filter_map Item.get_level ast.items in
-
-    let raw_table = Hashtbl.create (List.length levels) in
-    CCList.iter
-      (fun (level : Level.t) ->
-        let uid =
-          match level with
-          | Level.USLevel { uid1; _ } -> uid1
-          | Level.UMLevel { uid1; _ } -> uid1
-          | Level.UIMLevel { uid1; _ } -> uid1
-          | Level.UPLevel { uid; _ } -> uid
-        in
-
-        Hashtbl.add raw_table uid level)
-      levels;
-    raw_table
-
-  let exprs ast : (eidx, Expr.t) Hashtbl.t =
-    let exprs = CCList.filter_map Item.get_expr ast.items in
-
-    let raw_table = Hashtbl.create (List.length exprs) in
-    CCList.iter
-      (fun (expr : Expr.t) ->
-        let eid =
-          match expr with
-          | Expr.EVExpr { eid; _ } -> eid
-          | Expr.ESExpr { eid; _ } -> eid
-          | Expr.ECExpr { eid; _ } -> eid
-          | Expr.EAExpr { eid1; _ } -> eid1
-          | Expr.ELExpr { eid1; _ } -> eid1
-          | Expr.EPExpr { eid1; _ } -> eid1
-          | Expr.EZExpr { eid1; _ } -> eid1
-          | Expr.EJExpr { eid1; _ } -> eid1
-          | Expr.ELNExpr { eid; _ } -> eid
-          | Expr.ELSExpr { eid; _ } -> eid
-          | Expr.EMExpr { eid1; _ } -> eid1
-        in
-
-        Hashtbl.add raw_table eid expr)
-      exprs;
     raw_table
 end

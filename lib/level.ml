@@ -97,13 +97,15 @@ let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
   let resolved_table : (Ast.uidx, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)
   in
+  let item_table = Ast.Hashed.items ast in
   let rec resolve uid =
     match Hashtbl.find_opt resolved_table uid with
     | Some l -> l
     | None when uid = 0 -> Zero
     | None ->
-      let lvl = Hashtbl.find (Ast.Hashed.levels ast) uid in
-      let resolved_level =
+      let resolved =
+        let open CCOption in
+        let+ lvl = Ast.Item.get_level (Hashtbl.find item_table uid) in
         match lvl with
         | Ast.Level.USLevel { uid2; _ } -> Succ (resolve uid2)
         | Ast.Level.UMLevel { uid2; uid3; _ } -> Max (resolve uid2, resolve uid3)
@@ -114,8 +116,12 @@ let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
           | None -> failwith "level_resolver: could not find binding"
           | Some name -> Param name)
       in
-      Hashtbl.add resolved_table uid resolved_level;
-      resolved_level
+      (match resolved with
+      | Some lvl ->
+        Hashtbl.add resolved_table uid lvl;
+        lvl
+      | None ->
+        failwith @@ CCFormat.sprintf "@[level resolution failed for id %d@]" uid)
   in
-  Hashtbl.iter (fun uid _ -> ignore (resolve uid)) (Ast.Hashed.levels ast);
+  Hashtbl.iter (fun uid _ -> ignore (resolve uid)) item_table;
   resolved_table
