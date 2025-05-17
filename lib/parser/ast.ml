@@ -212,6 +212,14 @@ module Item = struct
     | EDecl of Decl.t
   [@@deriving show]
 
+  let get_id item =
+    match item with
+    | EName name -> Some (Name.get_nid name)
+    | ELevel level -> Some (Level.get_uid level)
+    | EExpr expr -> Some (Expr.get_eid expr)
+    | ERecRule { rid; _ } -> Some rid
+    | _ -> None
+
   let get_name item =
     match item with
     | EName nm -> Some nm
@@ -245,7 +253,15 @@ type t = {
 [@@deriving show]
 
 module Hashed = struct
-  (* TODO: Pre-mature optimization: Create one table storing Item.t's instead?*)
+  let items ast : (int, Item.t) Hashtbl.t =
+    let raw_table = Hashtbl.create 65537 in
+    CCList.iter
+      (fun (item : Item.t) ->
+        CCOption.iter
+          (fun id -> Hashtbl.add raw_table id item)
+          (Item.get_id item))
+      ast.items;
+    raw_table
 
   (** Return a Hashtbl of names with nids as keys. *)
   let names ast : (nidx, Name.t) Hashtbl.t =
