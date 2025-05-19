@@ -37,7 +37,7 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
     | None ->
       let resolved =
         let open CCOption in
-        let item = Hashtbl.find item_table nid in
+        let* item = Hashtbl.find_opt item_table nid in
         let+ n = Ast.Item.get_name item in
         match n with
         | NSName { nid2; str; _ } ->
