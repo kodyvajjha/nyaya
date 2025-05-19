@@ -1,0 +1,7 @@
+prelude
+
+universe u v
+
+variable (α : Type u) (β : Type v)
+
+def foo (my_fun : α → β) (x : α) := my_fun x
