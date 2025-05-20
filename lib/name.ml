@@ -28,7 +28,7 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
   let resolved_table : (int, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)
   in
-  let item_table = Ast.Hashed.items ast in
+  let name_table = Ast.Hashed.names ast in
   (* Recursive resolution with memoization *)
   let rec resolve (nid : int) =
     match Hashtbl.find_opt resolved_table nid with
@@ -36,10 +36,7 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
     | None when nid = 0 -> Anon
     | None ->
       let resolved =
-        let open CCOption in
-        let* item = Hashtbl.find_opt item_table nid in
-        let+ n = Ast.Item.get_name item in
-        match n with
+        match Hashtbl.find name_table nid with
         | NSName { nid2; str; _ } ->
           let parent_name = resolve nid2 in
           Str (parent_name, str)
@@ -47,15 +44,10 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
           let parent_name = resolve nid2 in
           Num (parent_name, nat)
       in
-      (match resolved with
-      | Some nm ->
-        Hashtbl.add resolved_table nid nm;
-        nm
-      | None ->
-        failwith
-        @@ CCFormat.sprintf "@[name resolution failed for id %d@.@]" nid)
+      Hashtbl.add resolved_table nid resolved;
+      resolved
   in
 
   (* Resolve every name *)
-  Hashtbl.iter (fun nid _ -> ignore (resolve nid)) item_table;
+  Hashtbl.iter (fun nid _ -> ignore (resolve nid)) name_table;
   resolved_table
