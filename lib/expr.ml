@@ -74,15 +74,14 @@ open Nyaya_parser
 
 let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
-  let item_table = Ast.Hashed.items ast in
+  let expr_table = Ast.Hashed.exprs ast in
   let rec resolve (eid : int) =
     match Hashtbl.find_opt resolved_table eid with
     | Some expr -> expr
     | None ->
       let resolved =
         let open CCOption in
-        let* item = Hashtbl.find_opt item_table eid in
-        let+ expr = Ast.Item.get_expr item in
+        let+ expr = Hashtbl.find_opt expr_table eid in
         match expr with
         | Ast.Expr.EVExpr { num; _ } -> BoundVar num
         | Ast.Expr.ESExpr { uid; _ } ->
@@ -123,5 +122,5 @@ let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   in
 
   (* Resolve every name *)
-  Hashtbl.iter (fun eid _ -> ignore (resolve eid)) item_table;
+  Hashtbl.iter (fun eid _ -> ignore (resolve eid)) expr_table;
   resolved_table
