@@ -251,11 +251,7 @@ module Hashed = struct
     let raw_table = Hashtbl.create (List.length names) in
     CCList.iter
       (fun name ->
-        let nid =
-          match name with
-          | Name.NSName { nid1; _ } -> nid1
-          | Name.NIName { nid1; _ } -> nid1
-        in
+        let nid = Name.get_nid name in
         Hashtbl.add raw_table nid name)
       names;
     raw_table
@@ -267,13 +263,7 @@ module Hashed = struct
     let raw_table = Hashtbl.create (List.length levels) in
     CCList.iter
       (fun (level : Level.t) ->
-        let uid =
-          match level with
-          | Level.USLevel { uid1; _ } -> uid1
-          | Level.UMLevel { uid1; _ } -> uid1
-          | Level.UIMLevel { uid1; _ } -> uid1
-          | Level.UPLevel { uid; _ } -> uid
-        in
+        let uid = Level.get_uid level in
 
         Hashtbl.add raw_table uid level)
       levels;
@@ -285,20 +275,7 @@ module Hashed = struct
     let raw_table = Hashtbl.create (List.length exprs) in
     CCList.iter
       (fun (expr : Expr.t) ->
-        let eid =
-          match expr with
-          | Expr.EVExpr { eid; _ } -> eid
-          | Expr.ESExpr { eid; _ } -> eid
-          | Expr.ECExpr { eid; _ } -> eid
-          | Expr.EAExpr { eid1; _ } -> eid1
-          | Expr.ELExpr { eid1; _ } -> eid1
-          | Expr.EPExpr { eid1; _ } -> eid1
-          | Expr.EZExpr { eid1; _ } -> eid1
-          | Expr.EJExpr { eid1; _ } -> eid1
-          | Expr.ELNExpr { eid; _ } -> eid
-          | Expr.ELSExpr { eid; _ } -> eid
-          | Expr.EMExpr { eid1; _ } -> eid1
-        in
+        let eid = Expr.get_eid expr in
 
         Hashtbl.add raw_table eid expr)
       exprs;
