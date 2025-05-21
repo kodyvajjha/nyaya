@@ -80,6 +80,8 @@ let getter tbl key excp =
 let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let expr_table = Ast.Hashed.exprs ast in
+  let name_table = Name.table ast in
+  let level_table = Level.table ast in
   let rec resolve (eid : int) =
     match Hashtbl.find_opt resolved_table eid with
     | Some expr -> expr
@@ -90,35 +92,35 @@ let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
         match expr with
         | Ast.Expr.EVExpr { num; _ } -> BoundVar num
         | Ast.Expr.ESExpr { uid; _ } ->
-          Sort (getter (Level.table ast) uid "level table in ES")
+          Sort (getter level_table uid "level table in ES")
         | Ast.Expr.ECExpr { nid; uids; _ } ->
-          let name = getter (Name.table ast) nid "name table in EC" in
+          let name = getter name_table nid "name table in EC" in
           let uparams =
             CCList.(
-              uids >|= fun id -> getter (Level.table ast) id "level table in EC")
+              uids >|= fun id -> getter level_table id "level table in EC")
           in
           Const { name; uparams }
         | Ast.Expr.EAExpr { eid2; eid3; _ } -> App (resolve eid2, resolve eid3)
         | Ast.Expr.ELExpr { info; nid; eid2; eid3; _ } ->
-          let name = getter (Name.table ast) nid "name table in EL" in
+          let name = getter name_table nid "name table in EL" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
           Lam { name; binfo; btype; body }
         | Ast.Expr.EPExpr { info; nid; eid2; eid3; _ } ->
-          let name = getter (Name.table ast) nid "name table in EP" in
+          let name = getter name_table nid "name table in EP" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
           Forall { name; binfo; btype; body }
         | Ast.Expr.EZExpr { nid; eid2; eid3; eid4; _ } ->
-          let name = getter (Name.table ast) nid "name table in EZ" in
+          let name = getter name_table nid "name table in EZ" in
           let btype = resolve eid2 in
           let value = resolve eid3 in
           let body = resolve eid4 in
           Let { name; btype; value; body }
         | Ast.Expr.EJExpr { nid; num; eid2; _ } ->
-          let name = getter (Name.table ast) nid "name table in EJ" in
+          let name = getter name_table nid "name table in EJ" in
           let nat = num in
           let expr = resolve eid2 in
           Proj { name; nat; expr }
