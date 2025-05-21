@@ -72,6 +72,11 @@ let (foo : Bar) := 0; foo
 
 open Nyaya_parser
 
+let getter tbl key excp =
+  match CCHashtbl.get tbl key with
+  | Some v -> v
+  | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
+
 let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let expr_table = Ast.Hashed.exprs ast in
@@ -85,31 +90,54 @@ let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
         match expr with
         | Ast.Expr.EVExpr { num; _ } -> BoundVar num
         | Ast.Expr.ESExpr { uid; _ } ->
-          Sort (Hashtbl.find (Level.table ast) uid)
+          Sort (getter (Level.table ast) uid "level table in ES")
         | Ast.Expr.ECExpr { nid; uids; _ } ->
-          let name = Hashtbl.find (Name.table ast) nid in
+          let name = getter (Name.table ast) nid "name table in EC" in
           let uparams =
-            CCList.(uids >|= fun id -> Hashtbl.find (Level.table ast) id)
+            CCList.(
+              uids >|= fun id -> getter (Level.table ast) id "level table in EC")
           in
           Const { name; uparams }
         | Ast.Expr.EAExpr { eid2; eid3; _ } -> App (resolve eid2, resolve eid3)
         | Ast.Expr.ELExpr { info; nid; eid2; eid3; _ } ->
-          let name = Hashtbl.find (Name.table ast) nid in
+          let name = getter (Name.table ast) nid "name table in EL" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
           Lam { name; binfo; btype; body }
         | Ast.Expr.EPExpr { info; nid; eid2; eid3; _ } ->
-          let name = Hashtbl.find (Name.table ast) nid in
+          let name = getter (Name.table ast) nid "name table in EP" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
           Forall { name; binfo; btype; body }
-        | Ast.Expr.EZExpr _ -> assert false
-        | Ast.Expr.EJExpr _ -> assert false (* NYI *)
-        | Ast.Expr.ELNExpr _ -> assert false (* NYI *)
-        | Ast.Expr.ELSExpr _ -> assert false (* NYI *)
-        | Ast.Expr.EMExpr _ -> assert false (* NYI *)
+        | Ast.Expr.EZExpr { nid; eid2; eid3; eid4; _ } ->
+          let name = getter (Name.table ast) nid "name table in EZ" in
+          let btype = resolve eid2 in
+          let value = resolve eid3 in
+          let body = resolve eid4 in
+          Let { name; btype; value; body }
+        | Ast.Expr.EJExpr { nid; num; eid2; _ } ->
+          let name = getter (Name.table ast) nid "name table in EJ" in
+          let nat = num in
+          let expr = resolve eid2 in
+          Proj { name; nat; expr }
+        | Ast.Expr.ELNExpr { num; _ } ->
+          let nat = Z.of_string num in
+          Literal (NatLit nat)
+        | Ast.Expr.ELSExpr { hexhex; _ } ->
+          let str =
+            let bytes = Bytes.create (List.length hexhex) in
+            List.iteri
+              (fun i h ->
+                let byte = int_of_string ("0x" ^ h) in
+                Bytes.set bytes i (Char.chr byte))
+              hexhex;
+            Bytes.to_string bytes
+          in
+          Literal (StrLit str)
+        | Ast.Expr.EMExpr _ ->
+          failwith "Do not know how to resolve #EM just yet!!"
       in
 
       (match resolved with
@@ -121,6 +149,6 @@ let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
         @@ CCFormat.sprintf "@[expr resolution failed for id %d@.@]" eid)
   in
 
-  (* Resolve every name *)
+  (* Resolve every expr *)
   Hashtbl.iter (fun eid _ -> ignore (resolve eid)) expr_table;
   resolved_table

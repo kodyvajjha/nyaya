@@ -28,6 +28,7 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
   let resolved_table : (int, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)
   in
+  Hashtbl.add resolved_table 0 Anon;
   let name_table = Ast.Hashed.names ast in
   (* Recursive resolution with memoization *)
   let rec resolve (nid : int) =

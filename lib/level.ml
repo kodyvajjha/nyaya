@@ -97,6 +97,7 @@ let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
   let resolved_table : (Ast.uidx, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)
   in
+  Hashtbl.add resolved_table 0 Zero;
   let rec resolve uid =
     match Hashtbl.find_opt resolved_table uid with
     | Some l -> l
