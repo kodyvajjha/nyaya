@@ -172,7 +172,7 @@ module Decl = struct
         name: nidx;
         expr: eidx;
         value: eidx;
-        hint: hint option;
+        hint: hint;
         uparams: uidx list;
       }
     | Opaque of {
@@ -201,6 +201,17 @@ module Decl = struct
       (* Since the recursors  and inductives have complicated look-ahead behaviour, we dump everything to a list and then post-process at the next stage. *)
     | Recursor of int list
   [@@deriving show]
+
+  let get_nid (decl : t) =
+    match decl with
+    | Axiom { name; _ } -> name
+    | Quotient { name; _ } -> name
+    | Definition { name; _ } -> name
+    | Opaque { name; _ } -> name
+    | Theorem { name; _ } -> name
+    | Inductive l -> (*TODO: fix this*) CCList.hd l
+    | Constructor { name; _ } -> name
+    | Recursor l -> (*TODO: fix this*) CCList.hd l
 end
 
 module Item = struct
@@ -279,5 +290,15 @@ module Hashed = struct
 
         Hashtbl.add raw_table eid expr)
       exprs;
+    raw_table
+
+  let decls ast : (nidx, Decl.t) Hashtbl.t =
+    let decls = CCList.filter_map Item.get_decl ast.items in
+    let raw_table = Hashtbl.create (List.length decls) in
+    CCList.iter
+      (fun (decl : Decl.t) ->
+        let nid = Decl.get_nid decl in
+        Hashtbl.add raw_table nid decl)
+      decls;
     raw_table
 end

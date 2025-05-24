@@ -97,10 +97,9 @@ universe:
   
 
 hint:
-  | OTOK  {Some HO}
-  | ATOK  {Some HA}
-  | RTOK NAT {Some (HR ($2))}
-  | /* empty */ {None}
+  | OTOK  { HO}
+  | ATOK  { HA}
+  | RTOK NAT { (HR ($2))}
 
 decl:
   | AXTOK NAT NAT uparams {Axiom {name = $2; expr = $3; uparams = $4}}

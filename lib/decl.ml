@@ -11,6 +11,12 @@ type hint =
   | Reg of int
 [@@deriving show]
 
+let hint_of_ast (h : Nyaya_parser.Ast.hint) =
+  match h with
+  | Nyaya_parser.Ast.HO -> Opaque
+  | Nyaya_parser.Ast.HA -> Abbrev
+  | Nyaya_parser.Ast.HR i -> Reg i
+
 type rule = {
   ctor_name: Name.t;
   ctor_num_args: int;
