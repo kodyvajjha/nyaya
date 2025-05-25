@@ -1,5 +1,3 @@
-[@@@warning "-27"]
-
 open Nyaya_parser
 
 let getter tbl key excp =
@@ -61,8 +59,16 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let info : Decl.decl_info = { name; uparams; ty } in
           let value = getter expr_table value "expr table for value in Def" in
           Opaque { info; value }
-        | Ast.Decl.Theorem { name; expr; value; uparams } -> assert false
-        | Ast.Decl.Inductive l -> assert false
+        | Ast.Decl.Theorem { name; expr; value; uparams } ->
+          let name = getter name_table name "name table in Quot" in
+          let uparams =
+            CCList.(
+              uparams >|= fun id -> getter level_table id "level table in Quot")
+          in
+          let ty = getter expr_table expr "expr table in Quot" in
+          let info : Decl.decl_info = { name; uparams; ty } in
+          let value = getter expr_table value "expr table for value in Def" in
+          Thm { info; value }
         | Ast.Decl.Constructor
             {
               name;
@@ -73,8 +79,19 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
               num_fields;
               uparams;
             } ->
-          assert false
-        | Ast.Decl.Recursor l -> assert false
+          let name = getter name_table name "name table in Quot" in
+          let uparams =
+            CCList.(
+              uparams >|= fun id -> getter level_table id "level table in Quot")
+          in
+          let ty = getter expr_table expr "expr table in Quot" in
+          let info : Decl.decl_info = { name; uparams; ty } in
+          let inductive_name =
+            getter name_table parent_inductive "name table in Ind"
+          in
+          Ctor { info; inductive_name; ctor_id; num_params; num_fields }
+        | Ast.Decl.Inductive _ -> assert false
+        | Ast.Decl.Recursor _ -> assert false
       in
 
       (match resolved with

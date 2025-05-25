@@ -43,6 +43,7 @@ type t =
   | Inductive of {
       info: decl_info;
       is_recursive: bool;
+      is_nested: bool;
       num_params: int;
       num_idx: int;
       all_names: Name.t list;
@@ -50,7 +51,8 @@ type t =
     }
   | Ctor of {
       info: decl_info;
-      name: Name.t;
+      inductive_name: Name.t;
+      ctor_id: int;
       num_params: int;
       num_fields: int;
     }
