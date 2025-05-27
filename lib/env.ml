@@ -156,9 +156,9 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
               !inductive_names
               @ [ getter name_table arr.(j + 3) "name table in Rec" ]
           done;
-          CCFormat.printf "@[%a@.@]"
-            CCFormat.Dump.(list Name.pp)
-            !inductive_names;
+          (* CCFormat.printf "@[%a@.@]"
+             CCFormat.Dump.(list Name.pp)
+             !inductive_names; *)
           let num_params = arr.(3 + num_inductives) in
           let num_idx = arr.(4 + num_inductives) in
           let num_motives = arr.(5 + num_inductives) in
