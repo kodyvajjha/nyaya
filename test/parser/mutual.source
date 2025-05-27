@@ -1,0 +1,10 @@
+prelude
+
+mutual
+    inductive Tree (α : Type u) where
+      | node : α → TreeList α → Tree α
+
+    inductive TreeList (α : Type u) where
+      | nil  : TreeList α
+      | cons : Tree α → TreeList α → TreeList α
+end
