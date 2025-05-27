@@ -1,6 +1,6 @@
 type decl_info = {
   name: Name.t;
-  uparams: Level.t list;
+  uparams: Name.t list;
   ty: Expr.t;
 }
 [@@deriving show]

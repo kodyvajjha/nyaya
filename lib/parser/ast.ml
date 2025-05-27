@@ -161,31 +161,31 @@ module Decl = struct
     | Axiom of {
         name: nidx;
         expr: eidx;
-        uparams: uidx list;
+        uparams: nidx list;
       }
     | Quotient of {
         name: nidx;
         expr: eidx;
-        uparams: uidx list;
+        uparams: nidx list;
       }
     | Definition of {
         name: nidx;
         expr: eidx;
         value: eidx;
         hint: hint;
-        uparams: uidx list;
+        uparams: nidx list;
       }
     | Opaque of {
         name: nidx;
         expr: eidx;
         value: eidx;
-        uparams: uidx list;
+        uparams: nidx list;
       }
     | Theorem of {
         name: nidx;
         expr: eidx;
         value: eidx;
-        uparams: uidx list;
+        uparams: nidx list;
       }
       (* TODO: Figure out what is up with inductives. *)
     | Inductive of int list
@@ -196,7 +196,7 @@ module Decl = struct
         ctor_id: int;
         num_params: int;
         num_fields: int;
-        uparams: uidx list;
+        uparams: nidx list;
       }
       (* Since the recursors  and inductives have complicated look-ahead behaviour, we dump everything to a list and then post-process at the next stage. *)
     | Recursor of int list
@@ -300,5 +300,15 @@ module Hashed = struct
         let nid = Decl.get_nid decl in
         Hashtbl.add raw_table nid decl)
       decls;
+    raw_table
+
+  let rec_rules ast : (nidx, rec_rule) Hashtbl.t =
+    let rec_rules = CCList.filter_map Item.get_rec_rule ast.items in
+    let raw_table = Hashtbl.create (List.length rec_rules) in
+    CCList.iter
+      (fun (rr : rec_rule) ->
+        let rid = rr.rid in
+        Hashtbl.add raw_table rid rr)
+      rec_rules;
     raw_table
 end
