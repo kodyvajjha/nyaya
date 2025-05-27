@@ -11,6 +11,9 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
   let name_table = Name.table ast in
   let level_table = Level.table ast in
   let decl_table = Ast.Hashed.decls ast in
+  CCFormat.printf "@[%a@]@."
+    CCFormat.(CCHashtbl.pp int Level.pp ~pp_sep:CCFormat.newline)
+    level_table;
   let resolve (nid : int) =
     let nm = getter name_table nid "name table at top" in
     match Hashtbl.find_opt resolved_table nm with
@@ -39,12 +42,12 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let info : Decl.decl_info = { name; uparams; ty } in
           Quot { info }
         | Ast.Decl.Definition { name; expr; value; hint; uparams } ->
-          let name = getter name_table name "name table in Quot" in
+          let name = getter name_table name "name table in Def" in
           let uparams =
             CCList.(
-              uparams >|= fun id -> getter level_table id "level table in Quot")
+              uparams >|= fun id -> getter level_table id "level table in Def")
           in
-          let ty = getter expr_table expr "expr table in Quot" in
+          let ty = getter expr_table expr "expr table in Def" in
           let info : Decl.decl_info = { name; uparams; ty } in
           let value = getter expr_table value "expr table for value in Def" in
           let red_hint = Decl.hint_of_ast hint in
@@ -53,7 +56,8 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let name = getter name_table name "name table in Quot" in
           let uparams =
             CCList.(
-              uparams >|= fun id -> getter level_table id "level table in Quot")
+              uparams >|= fun id ->
+              getter level_table id "level table in Opaque")
           in
           let ty = getter expr_table expr "expr table in Quot" in
           let info : Decl.decl_info = { name; uparams; ty } in
@@ -63,7 +67,8 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let name = getter name_table name "name table in Quot" in
           let uparams =
             CCList.(
-              uparams >|= fun id -> getter level_table id "level table in Quot")
+              uparams >|= fun id ->
+              getter level_table id "level table in Theorem")
           in
           let ty = getter expr_table expr "expr table in Quot" in
           let info : Decl.decl_info = { name; uparams; ty } in
@@ -82,7 +87,8 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let name = getter name_table name "name table in Quot" in
           let uparams =
             CCList.(
-              uparams >|= fun id -> getter level_table id "level table in Quot")
+              uparams >|= fun id ->
+              getter level_table id "level table in Constructor")
           in
           let ty = getter expr_table expr "expr table in Quot" in
           let info : Decl.decl_info = { name; uparams; ty } in
@@ -90,7 +96,57 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
             getter name_table parent_inductive "name table in Ind"
           in
           Ctor { info; inductive_name; ctor_id; num_params; num_fields }
-        | Ast.Decl.Inductive _ -> assert false
+        | Ast.Decl.Inductive l ->
+          CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) l;
+
+          let arr = CCArray.of_list l in
+          let total = CCArray.length arr in
+          let num_inductives = arr.(6) in
+          let name = getter name_table arr.(0) "name table in Ind" in
+          let ty = getter expr_table arr.(1) "expr table in Ind" in
+          let all_names = ref [] in
+          for j = 0 to num_inductives - 1 do
+            all_names :=
+              !all_names
+              @ [
+                  getter name_table
+                    arr.(j + 7)
+                    "name table getting inductive names";
+                ]
+          done;
+          let ctor_names = ref [] in
+          let num_constructors = arr.(num_inductives + 7) in
+          for i = 0 to num_constructors - 1 do
+            ctor_names :=
+              !ctor_names
+              @ [
+                  getter name_table
+                    arr.(num_inductives + 8 + i)
+                    "name table getting inductive names";
+                ]
+          done;
+          let uparams =
+            let remaining =
+              CCList.map
+                (fun x -> arr.(x))
+                (CCArray.(num_inductives + num_constructors + 7 -- (total - 1))
+                |> CCArray.to_list)
+            in
+            CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining;
+            CCList.(
+              let+ id = remaining in
+              getter level_table id "level table in inductives")
+          in
+          Inductive
+            {
+              info = { name; uparams; ty };
+              is_recursive = CCBool.of_int arr.(2);
+              is_nested = CCBool.of_int arr.(3);
+              num_params = arr.(4);
+              num_idx = arr.(5);
+              all_names = CCList.rev !all_names;
+              ctor_names = CCList.rev !ctor_names;
+            }
         | Ast.Decl.Recursor _ -> assert false
       in
 
