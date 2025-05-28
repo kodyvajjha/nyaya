@@ -11,6 +11,7 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
   let name_table = Name.table ast in
   let _level_table = Level.table ast in
   let decl_table = Ast.Hashed.decls ast in
+  let rec_rule_table = Decl.Rec_rule.table ast in
   (* CCFormat.printf "@[%a@]@."
      CCFormat.(CCHashtbl.pp int Level.pp ~pp_sep:CCFormat.newline)
      level_table; *)
@@ -163,7 +164,18 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
           let num_idx = arr.(4 + num_inductives) in
           let num_motives = arr.(5 + num_inductives) in
           let num_minors = arr.(6 + num_inductives) in
-          let _num_rules = arr.(7 + num_inductives) in
+          let num_rules = arr.(7 + num_inductives) in
+          let rules = ref [] in
+          for i = 0 to num_rules - 1 do
+            rules :=
+              !rules
+              @ [
+                  getter rec_rule_table
+                    arr.(8 + num_inductives + i)
+                    "rec rule table in Rec";
+                ]
+          done;
+          let is_k = arr.(8 + num_inductives + num_rules) in
           Rec
             {
               info = { name; uparams = []; ty };
@@ -172,8 +184,8 @@ let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
               num_motives;
               num_minors;
               (* TODO: resolve rec rules*)
-              rules = [];
-              is_K = false;
+              rules = CCList.rev !rules;
+              is_K = CCBool.of_int is_k;
             }
       in
 

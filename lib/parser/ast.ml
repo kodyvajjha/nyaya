@@ -302,7 +302,7 @@ module Hashed = struct
       decls;
     raw_table
 
-  let rec_rules ast : (nidx, rec_rule) Hashtbl.t =
+  let rec_rules ast : (ridx, rec_rule) Hashtbl.t =
     let rec_rules = CCList.filter_map Item.get_rec_rule ast.items in
     let raw_table = Hashtbl.create (List.length rec_rules) in
     CCList.iter
