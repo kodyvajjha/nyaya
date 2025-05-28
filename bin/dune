@@ -1,4 +1,4 @@
 (executables
- (public_names nyaya nyaya_name)
- (names main name)
+ (public_names nyaya)
+ (names main)
  (libraries nyaya nyaya_parser))
