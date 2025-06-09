@@ -1,11 +1,18 @@
-open Nyaya_parser
+type t = (Name.t, Decl.t) Hashtbl.t
+
+let pp fpf t =
+  CCFormat.fprintf fpf "@[%a@]"
+    (CCHashtbl.pp Name.pp Decl.pp ~pp_sep:CCFormat.newline)
+    t
 
 let getter tbl key excp =
   match CCHashtbl.get tbl key with
   | Some v -> v
   | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
 
-let table (ast : Ast.t) : (Name.t, Decl.t) Hashtbl.t =
+open Nyaya_parser
+
+let table (ast : Ast.t) : t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let expr_table = Expr.table ast in
   let name_table = Name.table ast in
