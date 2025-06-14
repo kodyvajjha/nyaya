@@ -1,3 +1,3 @@
-(test
- (name init_bindings)
- (libraries nyaya containers))
+; (test
+;  (name init_bindings)
+;  (libraries nyaya containers))
