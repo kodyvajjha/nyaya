@@ -3,7 +3,7 @@ module ParserLogger = Util.MakeLogger (struct
 end)
 
 let parse_from_file filename : Ast.t =
-  ParserLogger.info "Opening file for parsing...";
+  ParserLogger.info "Opening file %s for parsing..." filename;
   let ch = open_in filename in
   let lexbuf = Sedlexing.Utf8.from_channel ch in
   let lexer = Sedlexing.with_tokenizer Lexer.token lexbuf in
