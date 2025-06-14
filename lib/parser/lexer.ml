@@ -167,7 +167,7 @@ and token_body buf =
     Logger.debug "Other Whitespace";
     token buf
   | eof ->
-    Logger.info "Finished lexing...";
+    Logger.info "Lexed EOF...";
     EOF
   | _ -> handle_lexer_error buf
 

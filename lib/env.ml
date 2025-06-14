@@ -15,16 +15,9 @@ module Logger = Util.MakeLogger (struct
   let header = "Env"
 end)
 
-let table (ast : Ast.t) : t =
+let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
-  let expr_table = Expr.table ast in
-  let name_table = Name.table ast in
-  (* let _level_table = Level.table ast in *)
   let decl_table = Ast.Hashed.decls ast in
-  let rec_rule_table = Decl.Rec_rule.table ast in
-  (* CCFormat.printf "@[%a@]@."
-     CCFormat.(CCHashtbl.pp int Level.pp ~pp_sep:CCFormat.newline)
-     level_table; *)
   let resolve (nid : int) =
     let nm = getter name_table nid "name table at top" in
     match Hashtbl.find_opt resolved_table nm with
@@ -216,3 +209,10 @@ let table (ast : Ast.t) : t =
   Logger.info "Finished environment construction. Total number of mappings: %d"
     (Hashtbl.length decl_table);
   resolved_table
+
+let mk (ast : Ast.t) : t =
+  let name_table = Name.table ast in
+  let level_table = Level.table ast in
+  let expr_table = Expr.table name_table level_table ast in
+  let rec_rule_table = Decl.Rec_rule.table name_table expr_table ast in
+  table expr_table name_table rec_rule_table ast

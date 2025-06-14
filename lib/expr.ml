@@ -1,5 +1,10 @@
 (* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation.
    Perhaps we could do hashconsing.*)
+open Nyaya_parser
+
+module Logger = Util.MakeLogger (struct
+  let header = "Expr"
+end)
 
 type binfo =
   | Default
@@ -8,12 +13,12 @@ type binfo =
   | StrictImplicit
 [@@deriving show]
 
-let binfo_of_ast (info : Nyaya_parser.Ast.info) =
+let binfo_of_ast (info : Ast.info) =
   match info with
-  | Nyaya_parser.Ast.IBD -> Default
-  | Nyaya_parser.Ast.IBI -> Implicit
-  | Nyaya_parser.Ast.IBS -> StrictImplicit
-  | Nyaya_parser.Ast.IBC -> InstanceImplicit
+  | Ast.IBD -> Default
+  | Ast.IBI -> Implicit
+  | Ast.IBS -> StrictImplicit
+  | Ast.IBC -> InstanceImplicit
 
 type literal =
   | NatLit of Z.t [@printer Z.pp_print]
@@ -77,11 +82,9 @@ let getter tbl key excp =
   | Some v -> v
   | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
 
-let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
+let table name_table level_table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let expr_table = Ast.Hashed.exprs ast in
-  let name_table = Name.table ast in
-  let level_table = Level.table ast in
   let rec resolve (eid : int) =
     match Hashtbl.find_opt resolved_table eid with
     | Some expr -> expr
@@ -153,4 +156,6 @@ let table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
 
   (* Resolve every expr *)
   Hashtbl.iter (fun eid _ -> ignore (resolve eid)) expr_table;
+  Logger.info "Finished resolving exprs. Total number : %d."
+    (Hashtbl.length expr_table);
   resolved_table

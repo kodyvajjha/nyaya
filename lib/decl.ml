@@ -31,12 +31,10 @@ module Rec_rule = struct
   }
   [@@deriving show]
 
-  let table (ast : Ast.t) : (Ast.ridx, t) Hashtbl.t =
+  let table name_table expr_table (ast : Ast.t) : (Ast.ridx, t) Hashtbl.t =
     let resolved_table : (int, t) Hashtbl.t =
       Hashtbl.create (CCList.length ast.items)
     in
-    let name_table = Name.table ast in
-    let expr_table = Expr.table ast in
     let rec_rule_table = Ast.Hashed.rec_rules ast in
     let resolve (ridx : int) =
       match Hashtbl.find_opt resolved_table ridx with
