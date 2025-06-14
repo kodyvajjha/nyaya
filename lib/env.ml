@@ -212,7 +212,7 @@ let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
 
 let mk (ast : Ast.t) : t =
   let name_table = Name.table ast in
-  let level_table = Level.table ast in
+  let level_table = Level.table name_table ast in
   let expr_table = Expr.table name_table level_table ast in
   let rec_rule_table = Decl.Rec_rule.table name_table expr_table ast in
   table expr_table name_table rec_rule_table ast

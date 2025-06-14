@@ -97,7 +97,7 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
 
 open Nyaya_parser
 
-let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
+let table name_table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
   let resolved_table : (Ast.uidx, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)
   in
@@ -115,7 +115,7 @@ let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
         | Ast.Level.UIMLevel { uid2; uid3; _ } ->
           IMax (resolve uid2, resolve uid3)
         | Ast.Level.UPLevel { nid; _ } ->
-          (match CCHashtbl.get (Name.table ast) nid with
+          (match CCHashtbl.get name_table nid with
           | None -> failwith "level_resolver: could not find binding"
           | Some name -> Param name)
       in
