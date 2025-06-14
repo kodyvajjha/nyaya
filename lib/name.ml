@@ -1,7 +1,12 @@
 (* This module contains the first of the Lean kernel's primitive types; the
    type of names. It provides kernel items with a way of addressing things. *)
+
 open Nyaya_parser
 module Fmt = CCFormat
+
+module Logger = Util.MakeLogger (struct
+  let header = "Name"
+end)
 
 type t =
   | Anon
@@ -51,4 +56,6 @@ let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
 
   (* Resolve every name *)
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) name_table;
+  Logger.info "Finished resolving names. Total number : %d."
+    (Hashtbl.length name_table);
   resolved_table

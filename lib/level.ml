@@ -1,5 +1,9 @@
 (* Universe levels. *)
 
+module Logger = Nyaya_parser.Util.MakeLogger (struct
+  let header = "Level"
+end)
+
 type t =
   | Zero
   | Succ of t
@@ -119,4 +123,6 @@ let table (ast : Ast.t) : (Ast.uidx, t) Hashtbl.t =
       resolved_level
   in
   Hashtbl.iter (fun uid _ -> ignore (resolve uid)) (Ast.Hashed.levels ast);
+  Logger.info "Finished resolving levels. Total number : %d."
+    (Hashtbl.length (Ast.Hashed.levels ast));
   resolved_table

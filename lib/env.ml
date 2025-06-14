@@ -11,11 +11,15 @@ let getter tbl key excp =
 
 open Nyaya_parser
 
+module Logger = Util.MakeLogger (struct
+  let header = "Env"
+end)
+
 let table (ast : Ast.t) : t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let expr_table = Expr.table ast in
   let name_table = Name.table ast in
-  let _level_table = Level.table ast in
+  (* let _level_table = Level.table ast in *)
   let decl_table = Ast.Hashed.decls ast in
   let rec_rule_table = Decl.Rec_rule.table ast in
   (* CCFormat.printf "@[%a@]@."
@@ -209,4 +213,6 @@ let table (ast : Ast.t) : t =
       | None -> failwith "Decl resolution failed")
   in
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) decl_table;
+  Logger.info "Finished environment construction. Total number of mappings: %d"
+    (Hashtbl.length decl_table);
   resolved_table

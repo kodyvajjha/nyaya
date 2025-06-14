@@ -49,6 +49,10 @@ open Parser
 
 exception Eof
 
+module Logger = Util.MakeLogger (struct
+  let header = "Lexer"
+end)
+
 let handle_lexer_error buf =
   let lexeme = Sedlexing.Utf8.lexeme buf in
   let pos = Util.Location.of_lex buf in
@@ -56,13 +60,8 @@ let handle_lexer_error buf =
     CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
       Util.Location.pp_location pos lexeme
   in
+  Logger.err "%s" errstr;
   failwith errstr
-
-module Logger = Util.MakeLogger (struct
-  let counter = Mtime_clock.counter ()
-
-  let header = "Lexer"
-end)
 
 let rec token buf =
   match%sedlex buf with
@@ -168,7 +167,7 @@ and token_body buf =
     Logger.debug "Other Whitespace";
     token buf
   | eof ->
-    Logger.debug "End";
+    Logger.info "Finished lexing...";
     EOF
   | _ -> handle_lexer_error buf
 

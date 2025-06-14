@@ -33,17 +33,17 @@ module Location = struct
 end
 
 module MakeLogger (Data : sig
-  val counter : Mtime_clock.counter
-
   val header : string
 end) =
 struct
   module Format = CCFormat
+  open CalendarLib
 
-  let stamp_tag : Mtime.span Logs.Tag.def =
-    Logs.Tag.def "stamp" ~doc:"Relative monotonic time stamp" Mtime.Span.pp
+  let stamp_tag : (Date.t * Time.t) Logs.Tag.def =
+    Logs.Tag.def "stamp" ~doc:"Time stamp"
+      (CCFormat.Dump.pair (Printer.Date.fprint "%D") (Printer.Time.fprint "%T"))
 
-  let stamp c = Logs.Tag.(empty |> add stamp_tag (Mtime_clock.count c))
+  let stamp = Logs.Tag.(empty |> add stamp_tag (Date.today (), Time.now ()))
 
   let reporter ppf =
     let report _src level ~over k msgf =
@@ -51,50 +51,37 @@ struct
         over ();
         k ()
       in
-      let with_stamp h tags k ppf fmt =
-        let stamp =
-          match tags with
-          | None -> None
-          | Some tags -> Logs.Tag.find stamp_tag tags
-        in
-        let dt =
-          match stamp with
-          | None -> Mtime.Span.zero
-          | Some s -> s
-        in
+      let with_stamp h _tags k ppf fmt =
         Format.kfprintf k ppf
           ("%a[%a] @[" ^^ fmt ^^ "@]@.")
-          Logs.pp_header (level, h) Mtime.Span.pp dt
+          Logs.pp_header (level, h) (Printer.Time.fprint "%T") (Time.now ())
       in
       msgf @@ fun ?header ?tags fmt -> with_stamp header tags k ppf fmt
     in
+    Time_Zone.change Time_Zone.Local;
     { Logs.report }
 
   let info fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.info (fun m ->
-            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
+        Logs.info (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
   let warn fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.warn (fun m ->
-            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
+        Logs.warn (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
   let err fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.err (fun m ->
-            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
+        Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
   let debug fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.debug (fun m ->
-            m "%s" str ~header:Data.header ~tags:(stamp Data.counter)))
+        Logs.debug (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 end

@@ -1,7 +1,7 @@
 (library
  (name nyaya_parser)
  (preprocess (pps ppx_deriving.show sedlex.ppx))
- (libraries containers zarith sedlex menhirLib logs mtime mtime.clock))
+ (libraries containers zarith sedlex menhirLib logs calendar))
 (menhir
  (modules parser)
  (explain true)
