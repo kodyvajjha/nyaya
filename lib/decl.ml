@@ -69,8 +69,9 @@ type t =
   | Quot of { info: decl_info }
   | Inductive of {
       info: decl_info;
+      is_reflexive: bool;
       is_recursive: bool;
-      is_nested: bool;
+      num_nested: int;
       num_params: int;
       num_idx: int;
       all_names: Name.t list;

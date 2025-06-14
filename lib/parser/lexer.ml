@@ -26,11 +26,13 @@ let is_eln = ref false
 
 let is_def = ref false
 
+let is_ns = ref false
+
 let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
 
-let chars = [%sedlex.regexp? Star ('a' .. 'z' | 'A' .. 'Z' | 0x00AC .. 0x22A2)]
+let chars = [%sedlex.regexp? Star ('a' .. 'z' | 'A' .. 'Z' | 0x00AC .. 0x22A5)]
 
 (** Various other exceptions not covered above. *)
 let excps =
@@ -70,6 +72,7 @@ let rec token buf =
     is_eln := false;
     is_def := false;
     is_preamble := false;
+    is_ns := false;
     NL
   | _ ->
     if !is_preamble then
@@ -98,6 +101,7 @@ and token_body buf =
   (* Name Tokens *)
   | "#NS" ->
     Logger.debug "#NS";
+    is_ns := true;
     NSTOK
   | "#NI" ->
     Logger.debug "#NI";
@@ -136,7 +140,11 @@ and token_body buf =
       RTOK
     else
       NAME (Sedlexing.Utf8.lexeme buf)
-  | "A" -> ATOK
+  | "A" ->
+    if !is_ns then
+      NAME (Sedlexing.Utf8.lexeme buf)
+    else
+      ATOK
   | "O" -> OTOK
   (* Decl Tokens *)
   | "#AX" -> AXTOK

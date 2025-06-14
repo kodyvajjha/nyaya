@@ -1,9 +1,8 @@
 type t = (Name.t, Decl.t) Hashtbl.t
 
 let pp fpf t =
-  CCFormat.fprintf fpf "@[%a@]"
-    (CCHashtbl.pp Name.pp Decl.pp ~pp_sep:CCFormat.newline)
-    t
+  CCFormat.fprintf fpf "@[Total unique declarations in environment: %d@.@]"
+    (Hashtbl.length t)
 
 let getter tbl key excp =
   match CCHashtbl.get tbl key with
@@ -104,30 +103,36 @@ let table (ast : Ast.t) : t =
           in
           Ctor { info; inductive_name; ctor_id; num_params; num_fields }
         | Ast.Decl.Inductive l ->
-          (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) l; *)
+          let errstr =
+            CCFormat.sprintf "@[Inductive : %a@]@." CCFormat.Dump.(list int) l
+          in
           let arr = CCArray.of_list l in
+          let get_arr i =
+            CCArray.get_safe arr i
+            |> CCOption.get_exn_or (errstr ^ " " ^ string_of_int i)
+          in
           let total = CCArray.length arr in
-          let name = getter name_table arr.(0) "name table in Ind" in
-          let ty = getter expr_table arr.(1) "expr table in Ind" in
+          let name = getter name_table (get_arr 0) "name table in Ind" in
+          let ty = getter expr_table (get_arr 1) "expr table in Ind" in
           let all_names = ref [] in
-          let num_inductives = arr.(6) in
+          let num_inductives = get_arr 7 in
           for j = 0 to num_inductives - 1 do
             all_names :=
               !all_names
               @ [
                   getter name_table
-                    arr.(j + 7)
+                    (get_arr (j + 8))
                     "name table getting inductive names";
                 ]
           done;
           let ctor_names = ref [] in
-          let num_constructors = arr.(num_inductives + 7) in
+          let num_constructors = get_arr (num_inductives + 8) in
           for i = 0 to num_constructors - 1 do
             ctor_names :=
               !ctor_names
               @ [
                   getter name_table
-                    arr.(num_inductives + 8 + i)
+                    (get_arr (num_inductives + 8 + i))
                     "name table getting inductive names";
                 ]
           done;
@@ -135,7 +140,7 @@ let table (ast : Ast.t) : t =
             let remaining =
               CCList.map
                 (fun x -> arr.(x))
-                (CCArray.(num_inductives + num_constructors + 7 -- (total - 1))
+                (CCArray.(num_inductives + num_constructors + 8 -- (total - 1))
                 |> CCArray.to_list)
             in
             (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
@@ -146,10 +151,11 @@ let table (ast : Ast.t) : t =
           Inductive
             {
               info = { name; uparams; ty };
-              is_recursive = CCBool.of_int arr.(2);
-              is_nested = CCBool.of_int arr.(3);
-              num_params = arr.(4);
-              num_idx = arr.(5);
+              is_reflexive = CCBool.of_int (get_arr 2);
+              is_recursive = CCBool.of_int (get_arr 3);
+              num_nested = get_arr 4;
+              num_params = get_arr 5;
+              num_idx = get_arr 6;
               all_names = CCList.rev !all_names;
               ctor_names = CCList.rev !ctor_names;
             }
