@@ -37,13 +37,17 @@ module MakeLogger (Data : sig
 end) =
 struct
   module Format = CCFormat
-  open CalendarLib
 
-  let stamp_tag : (Date.t * Time.t) Logs.Tag.def =
-    Logs.Tag.def "stamp" ~doc:"Time stamp"
-      (CCFormat.Dump.pair (Printer.Date.fprint "%D") (Printer.Time.fprint "%T"))
+  let timestamp () =
+    let now = Unix.gettimeofday () in
+    let tm = Unix.localtime now in
+    CCFormat.sprintf "%02d:%02d:%02d" tm.Unix.tm_hour tm.Unix.tm_min
+      tm.Unix.tm_sec
 
-  let stamp = Logs.Tag.(empty |> add stamp_tag (Date.today (), Time.now ()))
+  let stamp_tag : string Logs.Tag.def =
+    Logs.Tag.def "stamp" ~doc:"Time stamp" CCFormat.pp_print_string
+
+  let stamp = Logs.Tag.(empty |> add stamp_tag (timestamp ()))
 
   let reporter ppf =
     let report _src level ~over k msgf =
@@ -53,12 +57,11 @@ struct
       in
       let with_stamp h _tags k ppf fmt =
         Format.kfprintf k ppf
-          ("%a[%a] @[" ^^ fmt ^^ "@]@.")
-          Logs.pp_header (level, h) (Printer.Time.fprint "%T") (Time.now ())
+          ("%a[%s] @[" ^^ fmt ^^ "@]@.")
+          Logs.pp_header (level, h) (timestamp ())
       in
       msgf @@ fun ?header ?tags fmt -> with_stamp header tags k ppf fmt
     in
-    Time_Zone.change Time_Zone.Local;
     { Logs.report }
 
   let info fmt =
