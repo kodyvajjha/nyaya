@@ -19,6 +19,11 @@ let is_zero level =
   | Zero -> true
   | _ -> false
 
+let is_one level =
+  match level with
+  | Succ _ -> true
+  | _ -> false
+
 let is_any_max level =
   match level with
   | Max _ -> true
@@ -43,10 +48,16 @@ let rec simplify (level : t) : t =
   | Succ l -> Succ (simplify l)
   | Max (l1, l2) -> combining (simplify l1, simplify l2)
   | IMax (l1, l2) ->
-    (match simplify l2 with
-    | Succ _ as l2_ -> combining (simplify l1, l2_)
-    | Zero -> Zero
-    | l2_ -> IMax (simplify l1, l2_))
+    let l_simp = simplify l1 in
+    let r_simp = simplify l2 in
+    if is_zero l_simp || is_one r_simp then
+      r_simp
+    else (
+      match simplify l2 with
+      | Succ _ as l2_ -> combining (simplify l1, l2_)
+      | Zero -> Zero
+      | l2_ -> IMax (simplify l1, l2_)
+    )
 
 (* let rec pp fpf t =
    match t with
@@ -56,14 +67,17 @@ let rec simplify (level : t) : t =
    | IMax (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
    | Param l -> CCFormat.fprintf fpf "%a" Name.pp l *)
 
-(* TODO: Maybe replace this with a Hashtbl.  *)
-let rec subst (level : t) p q =
+let rec subst (level : t) (p : Name.t) (q : t) =
   match level with
   | Zero -> Zero
   | Succ l -> Succ (subst l p q)
   | Max (l1, l2) -> Max (subst l1 p q, subst l2 p q)
   | IMax (l1, l2) -> IMax (subst l1 p q, subst l2 p q)
-  | Param _name -> assert false (* NYI *)
+  | Param name ->
+    if name == p then
+      q
+    else
+      Param name
 
 let rec leq (x : t) (y : t) (balance : int) : bool =
   match x, y with
@@ -80,8 +94,8 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
   | (Param _ | Zero), Max (a, b) -> leq x a balance || leq y b balance
   (* imax *)
   | IMax (a1, b1), IMax (a2, b2) when a1 == a2 && b1 == b2 -> true
-  | IMax (_, (Param _ as _p)), _ -> assert false (* NYI*)
-  | _, IMax (_, (Param _ as _p)) -> assert false (* NYI*)
+  | IMax (_, Param p), _ -> cases x y p balance
+  | _, IMax (_, Param p) -> cases x y p balance
   | IMax (a, IMax (b, c)), _ -> leq (Max (IMax (a, c), IMax (b, c))) y balance
   | IMax (a, Max (b, c)), _ ->
     leq (simplify (Max (IMax (a, b), IMax (a, c)))) y balance
@@ -94,6 +108,19 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
         x pp y
     in
     failwith err
+
+and cases l1 l2 p balance =
+  leq (simplify (subst l1 p Zero)) (simplify (subst l2 p Zero)) balance
+  && leq
+       (simplify (subst l1 p (Succ (Param p))))
+       (simplify (subst l2 p (Succ (Param p))))
+       balance
+
+let ( <= ) l1 l2 = leq l1 l2 0
+
+let eq l1 l2 = l1 <= l2 && l2 <= l1
+
+let ( === ) = eq
 
 open Nyaya_parser
 
