@@ -88,3 +88,11 @@ struct
         Logs.debug (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 end
+
+let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =
+  let el =
+    let open CCRandom in
+    let+ key = CCList.random_choose (CCHashtbl.keys_list tbl) in
+    Hashtbl.find tbl key
+  in
+  el |> CCRandom.run
