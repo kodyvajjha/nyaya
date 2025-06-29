@@ -39,6 +39,13 @@ type t =
     }
   | Sort of Level.t
   | App of t * t
+  (*
+    binderName      body
+      |            |
+fun (foo : Bar) => 0 
+            |         
+        binderType    
+  *)
   | Lam of {
       name: Name.t;
       btype: t;
