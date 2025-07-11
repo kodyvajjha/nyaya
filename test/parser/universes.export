@@ -1,0 +1,75 @@
+2.0.0
+1 #NS 0 γ
+2 #NS 0 u
+1 #UP 2
+2 #US 1
+0 #ES 2
+#AX 1 0 2
+3 #NS 0 foo
+4 #NS 0 u_1
+3 #UP 4
+4 #US 3
+1 #ES 4
+2 #EC 1 3
+#DEF 3 1 2 R 1 4
+5 #NS 0 D
+5 #US 2
+6 #NS 0 v
+6 #UP 6
+7 #US 6
+8 #US 7
+9 #UM 5 8
+3 #ES 9
+7 #NS 0 a
+8 #NS 7 _@
+9 #NS 8 Test
+10 #NS 9 Foo
+11 #NS 10 _hyg
+12 #NI 11 23
+13 #NI 11 25
+4 #ES 0
+14 #NI 11 27
+5 #ES 7
+6 #EP #BD 14 5 4
+7 #EP #BD 13 4 6
+8 #EP #BD 12 0 7
+#DEF 5 3 8 R 1 2 6
+15 #NS 0 A
+9 #ES 5
+#DEF 15 9 0 R 1 2
+16 #NS 0 B
+10 #US 5
+10 #ES 10
+#DEF 16 10 9 R 1 2
+17 #NS 0 F
+18 #NS 0 α
+11 #ES 3
+19 #NS 0 β
+20 #NS 0 u_2
+11 #UP 20
+12 #ES 11
+12 #UIM 3 11
+13 #ES 12
+14 #EP #BD 19 12 13
+15 #EP #BD 18 11 14
+21 #NS 0 x
+22 #NS 21 _@
+23 #NS 22 Test
+24 #NS 23 Foo
+25 #NS 24 _hyg
+26 #NI 25 41
+16 #EV 1
+17 #EP #BD 26 16 16
+18 #EL #BD 19 12 17
+19 #EL #BD 18 11 18
+#DEF 17 15 19 R 1 4 20
+27 #NS 0 E
+13 #US 0
+14 #US 13
+20 #ES 14
+21 #ES 13
+#DEF 27 20 21 R 1 
+28 #NS 0 C
+29 #NI 11 17
+22 #EP #BD 29 0 5
+#DEF 28 3 22 R 1 2 6

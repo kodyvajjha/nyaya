@@ -1,0 +1,20 @@
+prelude
+
+universe u v
+
+axiom γ : Type u
+
+-- : Type (u + 1)
+def A := Type u
+-- : Type (u + 2)
+def B := Type (u+1)
+-- : Type (max (u+1) (v+1))
+def C := Type u → Type v
+-- : Type (u+1)
+def D := Type u → Prop → Type v → Prop
+-- Type (u+1)
+def E := Type (imax u 0)
+-- Type (imax u_1 u_2)
+def F α β := ∀ (_ : α), β
+-- Type u
+def foo := γ

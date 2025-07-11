@@ -1,0 +1,7 @@
+prelude
+
+universe u v w
+
+variable (α : Type u)
+
+def f (x y : α) := x
