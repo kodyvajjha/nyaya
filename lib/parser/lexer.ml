@@ -60,8 +60,7 @@ let handle_lexer_error buf =
     CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
       Util.Location.pp_location pos lexeme
   in
-  Logger.err "%s" errstr;
-  failwith errstr
+  Logger.err "%s" errstr
 
 let rec token buf =
   match%sedlex buf with

@@ -79,7 +79,8 @@ struct
   let err fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+        Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp);
+        failwith str)
       fmt
 
   let debug fmt =
