@@ -37,6 +37,8 @@ type t =
       name: Name.t;
       uparams: Level.t list;
     }
+  (* Sort 0 | Sort 1 | ... | Sort  u
+     Prop   | Type   | ... | Type (u+1) *)
   | Sort of Level.t
   | App of t * t
   (*
