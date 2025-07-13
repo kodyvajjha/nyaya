@@ -76,11 +76,11 @@ struct
         Logs.warn (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
-  let err fmt =
+  let err fmt e =
     CCFormat.ksprintf
       ~f:(fun str ->
         Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp);
-        failwith str)
+        raise e)
       fmt
 
   let debug fmt =

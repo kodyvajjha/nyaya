@@ -49,6 +49,8 @@ open Parser
 
 exception Eof
 
+exception Lexer_error of string
+
 module Logger = Util.MakeLogger (struct
   let header = "Lexer"
 end)
@@ -60,7 +62,7 @@ let handle_lexer_error buf =
     CCFormat.sprintf "Lexer error at %a: unexpected token '%s'"
       Util.Location.pp_location pos lexeme
   in
-  Logger.err "%s" errstr
+  Logger.err "%s" (Lexer_error errstr) errstr
 
 let rec token buf =
   match%sedlex buf with
