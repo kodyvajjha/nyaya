@@ -77,7 +77,8 @@ struct
       fmt
 
   let err fmt e =
-    CCFormat.ksprintf
+    CCFormat.set_color_default true;
+    CCFormat.with_color_ksf "red"
       ~f:(fun str ->
         Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp);
         raise e)
