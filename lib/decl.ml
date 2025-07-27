@@ -100,3 +100,15 @@ type t =
       is_K: bool;
     }
 [@@deriving show]
+
+(** Helper to extract decl_info from any declaration *)
+let get_decl_info (decl : t) : decl_info =
+  match decl with
+  | Axiom info -> info
+  | Def { info; _ } -> info
+  | Thm { info; _ } -> info
+  | Opaque { info; _ } -> info
+  | Quot { info } -> info
+  | Inductive { info; _ } -> info
+  | Ctor { info; _ } -> info
+  | Rec { info; _ } -> info

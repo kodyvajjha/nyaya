@@ -9,18 +9,6 @@ let infer (_env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | _ -> Logger.err "failed inferring: %a" (TypeError expr) Expr.pp expr
 
-(* Helper to extract decl_info from any declaration *)
-let get_decl_info (decl : Decl.t) : Decl.decl_info =
-  match decl with
-  | Decl.Axiom info -> info
-  | Decl.Def { info; _ } -> info
-  | Decl.Thm { info; _ } -> info
-  | Decl.Opaque { info; _ } -> info
-  | Decl.Quot { info } -> info
-  | Decl.Inductive { info; _ } -> info
-  | Decl.Ctor { info; _ } -> info
-  | Decl.Rec { info; _ } -> info
-
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let rec dup_exist = function
     | [] -> false
@@ -37,11 +25,11 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   in
   no_dup_uparams && no_free_vars && type_is_sort
 
-(* Check well-posedness of all declarations in the environment *)
+(** Check well-posedness of all declarations in the environment *)
 let check_all_well_posed (env : Env.t) : bool =
   Hashtbl.fold
     (fun name decl acc ->
-      let info = get_decl_info decl in
+      let info = Decl.get_decl_info decl in
       let is_well_posed = well_posed env info in
       if not is_well_posed then
         Logger.info "Declaration %a is not well-posed" Name.pp name;
