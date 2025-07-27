@@ -84,6 +84,20 @@ let (foo : Bar) := 0; foo
   | Literal of literal
 [@@deriving show]
 
+let rec has_free_vars (expr : t) =
+  match expr with
+  | BoundVar _ -> false
+  | FreeVar _ -> true
+  | Const _ -> false
+  | Sort _ -> false
+  | App (f, x) -> has_free_vars f || has_free_vars x
+  | Lam { btype; body; _ } -> has_free_vars btype || has_free_vars body
+  | Forall { btype; body; _ } -> has_free_vars btype || has_free_vars body
+  | Let { btype; value; body; _ } ->
+    has_free_vars btype || has_free_vars value || has_free_vars body
+  | Proj { expr; _ } -> has_free_vars expr
+  | Literal _ -> false
+
 open Nyaya_parser
 
 let getter tbl key excp =

@@ -4,6 +4,13 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
+let well_posed (info : Decl.decl_info) =
+  let rec dup_exist = function
+    | [] -> false
+    | hd :: tl -> List.exists (( = ) hd) tl || dup_exist tl
+  in
+  dup_exist info.uparams |> not && Expr.has_free_vars info.ty |> not
+
 let infer (_env : Env.t) (expr : Expr.t) : Expr.t =
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
