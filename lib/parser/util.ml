@@ -98,3 +98,18 @@ let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =
     Hashtbl.find tbl key
   in
   el |> CCRandom.run
+
+module Uid : sig
+  type t = int
+
+  val mk : unit -> t
+end = struct
+  type t = int
+
+  let counter = ref 0
+
+  let mk () =
+    let id = !counter in
+    incr counter;
+    id
+end
