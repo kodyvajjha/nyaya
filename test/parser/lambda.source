@@ -1,0 +1,24 @@
+prelude
+
+universe u
+variable (α : Type u)
+variable (y : α)
+-- 1. Identity function, simplest binder
+def idNat : α → α := fun x => x
+
+-- 2. Constant function, binder unused
+def const : α → α:= fun x => y
+
+-- 3. Constant function, binder unused
+def const3 : α → α → α → α:= fun x => fun y => fun z => y
+
+-- 4. Shadowing (tests scoping correctness)
+def shadow : α → (α → α) :=
+  fun x => fun x => x
+
+-- 7. Higher-order function
+def applyTwice : (α → α) → α → α :=
+  fun f x => f (f x)
+
+-- 8. Pi abstraction without lambda
+def onlyType := (α : Type) → α → α
