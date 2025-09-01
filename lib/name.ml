@@ -14,6 +14,10 @@ type t =
   | Num of (t * int)
 [@@deriving show]
 
+let of_string str = Str (Anon, str)
+
+let of_num num = Num (Anon, num)
+
 let is_anon t =
   match t with
   | Anon -> true
