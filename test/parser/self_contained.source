@@ -1,0 +1,73 @@
+prelude
+
+/-
+  Goal: a compact testbed that exercises:
+  - Sort / Type / Prop
+  - Π (Forall) and λ (Lam)
+  - application (App), chaining
+  - dependent arrows (result type mentions the binder)
+  - let-bindings (Let)
+  - simple literal usage (String)
+-/
+
+universe u v w
+
+-- Treat types as parameters so we can build Π/λ without importing big libraries
+variable (α : Sort u) (β : Sort v) (γ : Sort w)
+
+-- --- Sort / Type / Prop -----------------------------------------------
+
+-- Prop is Sort 0, and Prop : Sort 1
+def _prop_as_type : Sort 1 := Prop
+
+-- For any u, Sort u : Sort (u+1)
+def _type_succ    : Sort (u+1) := Sort u
+
+-- --- Π / λ / App -------------------------------------------------------
+
+-- Polymorphic identity: ∀ (α : Sort u), α → α
+def my_id : ∀ (α : Sort u), α → α :=
+  fun α x => x
+
+-- Constant function: ∀ {α β}, α → β → α
+def const : ∀ {α : Sort u} {β : Sort v}, α → β → α :=
+  fun x _ => x
+
+-- Flip: (α → β → γ) → β → α → γ
+def my_flip : ∀ {α β γ : Sort u}, (α → β → γ) → β → α → γ :=
+  fun f b a => f a b
+
+-- Application chains (left-associative)
+def app2 : ∀ (α : Sort u), (α → α) → α → α :=
+  fun α f a => f a
+
+def app3 : ∀ (α : Sort u), (α → α → α) → α → α → α :=
+  fun α f a b => f a b
+
+-- --- Dependent arrow ---------------------------------------------------
+
+-- A family P : α → Sort v (dependent codomain)
+variable (P : α → Sort v)
+
+-- Dependent identity: ∀ x, P x → P x
+def depId : ∀ (x : α), P x → P x :=
+  fun x px => px
+
+-- --- Let-binding -------------------------------------------------------
+
+def letExample : ∀ (α : Sort u), α → α :=
+  fun α x =>
+    let y := x
+    y
+
+-- --- Axioms ---------------------------------------------------
+
+axiom A : Sort u
+axiom B : Sort v
+
+-- A dependent family over A
+axiom F : A → Sort w
+
+
+-- Axiomatic dependent element for every a : A
+axiom fA : ∀ a : A, F a
