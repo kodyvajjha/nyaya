@@ -6,6 +6,8 @@ module Logger = Util.MakeLogger (struct
   let header = "Expr"
 end)
 
+exception InstantiateError
+
 type binfo =
   | Default
   | Implicit
@@ -31,7 +33,7 @@ type t =
       name: Name.t;
       expr: t;
       info: binfo;
-      fvarId: int; (* de Bruijn indices*)
+      fvarId: int; (* de Bruijn levels *)
     }
   | Const of {
       name: Name.t;
@@ -84,6 +86,10 @@ let (foo : Bar) := 0; foo
   | Literal of literal
 [@@deriving show]
 
+let sort l = Sort l
+
+let lambda name btype body = Lam { name; btype; binfo = Default; body }
+
 let rec has_free_vars (expr : t) =
   match expr with
   | BoundVar _ -> false
@@ -97,6 +103,109 @@ let rec has_free_vars (expr : t) =
     has_free_vars btype || has_free_vars value || has_free_vars body
   | Proj { expr; _ } -> has_free_vars expr
   | Literal _ -> false
+
+let is_free_var expr =
+  match expr with
+  | FreeVar _ -> true
+  | _ -> false
+
+let get_fvar_id expr =
+  match expr with
+  | FreeVar { fvarId; _ } -> fvarId
+  | _ ->
+    Logger.err "Expr %a is not a free variable" (Failure "get_fvar_id") pp expr
+
+(** Substitute the free var at the expr (has to be a bound variable). *)
+let instantiate ~(free_var : t) ~(expr : t) =
+  let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
+    match expr with
+    | BoundVar i ->
+      if i = offset then
+        free_var
+      else if i > offset then
+        BoundVar (i - 1)
+      else
+        BoundVar i
+    | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
+    | App (f, a) ->
+      App (instantiate_aux free_var f offset, instantiate_aux free_var a offset)
+    | Lam { name; btype; binfo; body } ->
+      Lam
+        {
+          name;
+          btype = instantiate_aux free_var btype offset;
+          binfo;
+          body = instantiate_aux free_var body (offset + 1);
+        }
+    | Forall { name; btype; binfo; body } ->
+      Forall
+        {
+          name;
+          btype = instantiate_aux free_var btype offset;
+          binfo;
+          body = instantiate_aux free_var body (offset + 1);
+        }
+    | Let { name; btype; value; body } ->
+      Let
+        {
+          name;
+          btype = instantiate_aux btype free_var offset;
+          value = instantiate_aux value free_var offset;
+          body = instantiate_aux body free_var (offset + 1);
+        }
+    | Proj { name; nat; expr } ->
+      Proj { name; nat; expr = instantiate_aux free_var expr offset }
+  in
+  if not (is_free_var free_var) then
+    Logger.err "Cannot instantiate as it is not a free variable! : %a"
+      InstantiateError pp free_var
+  else
+    instantiate_aux free_var expr 0
+
+(* Abstract a specific free var (by fvarId) at depth k, producing a body
+   suitable to be wrapped by a binder inserted at that same depth k. *)
+let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
+  match e with
+  | BoundVar i ->
+    (* we are inserting a binder at depth k; bump existing indices >= k *)
+    if i >= k then
+      BoundVar (i + 1)
+    else
+      e
+  | FreeVar fv ->
+    if fv.fvarId = target_id then
+      BoundVar k
+    else
+      e
+  | Const _ | Sort _ | Literal _ -> e
+  | App (f, a) ->
+    App (abstract_fvar ~target_id ~k f, abstract_fvar ~target_id ~k a)
+  | Lam { name; btype; binfo; body } ->
+    Lam
+      {
+        name;
+        btype = abstract_fvar ~target_id ~k btype;
+        binfo;
+        body = abstract_fvar ~target_id ~k:(k + 1) body;
+      }
+  | Forall { name; btype; binfo; body } ->
+    Forall
+      {
+        name;
+        btype = abstract_fvar ~target_id ~k btype;
+        binfo;
+        body = abstract_fvar ~target_id ~k:(k + 1) body;
+      }
+  | Let { name; btype; value; body } ->
+    Let
+      {
+        name;
+        btype = abstract_fvar ~target_id ~k btype;
+        value = abstract_fvar ~target_id ~k value;
+        body = abstract_fvar ~target_id ~k:(k + 1) body;
+      }
+  | Proj { name; nat; expr = e1 } ->
+    Proj { name; nat; expr = abstract_fvar ~target_id ~k e1 }
 
 open Nyaya_parser
 
