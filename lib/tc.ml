@@ -96,7 +96,7 @@ and isDefEq e1 e2 =
 let check (_env : Env.t) (decl : Decl.t) : bool =
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
-    Logger.info "Checking value %a against %a" Expr.pp value Expr.pp info.ty;
+    Logger.debug "Checking value %a against %a" Expr.pp value Expr.pp info.ty;
     isDefEq (infer _env value) info.ty
   | _ ->
     Logger.err "failed checking decl: %a" (Failure "type checking failed")
@@ -113,17 +113,17 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
     try
       match infer env info.ty with
       | Expr.Sort _ ->
-        Logger.info "info.name info.ty : %a %a@." Name.pp info.name Expr.pp
+        Logger.debug "info.name info.ty : %a %a@." Name.pp info.name Expr.pp
           (infer env info.ty);
         true
       | _ ->
-        Logger.info "info.ty : %a@." Expr.pp (infer env info.ty);
+        Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
         false
     with TypeError e ->
       Logger.err "failed inferring: %a" (TypeError e) Expr.pp e
   in
 
-  Logger.info "(no_dup_uparams,no_free_vars,type_is_sort) = (%s,%s,%s)"
+  Logger.debug "(no_dup_uparams,no_free_vars,type_is_sort) = (%s,%s,%s)"
     (string_of_bool no_dup_uparams)
     (string_of_bool no_free_vars)
     (string_of_bool type_is_sort);
@@ -136,17 +136,18 @@ let check_all_well_posed (env : Env.t) : bool =
       let info = Decl.get_decl_info decl in
       let is_well_posed = well_posed env info in
       if not is_well_posed then
-        Logger.info "Declaration %a is not well-posed" Name.pp name;
+        Logger.debug "Declaration %a is not well-posed" Name.pp name;
       acc && is_well_posed)
     env true
 
 let typecheck (env : Env.t) =
   let all_well_posed = check_all_well_posed env in
-  Logger.info "All declarations well-posed: %b@." all_well_posed;
+  Logger.debug "All declarations well-posed: %b@." all_well_posed;
   let iter = env |> Iter.of_hashtbl in
   Iter.iter2
     (fun n d ->
       try check env d |> string_of_bool |> print_endline
-      with TypeError _ ->
-        Logger.info "Type checking failed when checking %a" Name.pp n)
+      with TypeError e ->
+        Logger.err "Type checking failed when checking %a" (TypeError e) Name.pp
+          n)
     iter

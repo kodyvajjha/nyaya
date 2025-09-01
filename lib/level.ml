@@ -103,11 +103,8 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
   | _, IMax (a, Max (b, c)) ->
     leq x (simplify (Max (IMax (a, b), IMax (a, c)))) balance
   | _ ->
-    let err =
-      CCFormat.sprintf "leq : not defined for that case where x,y = (%a,%a)!" pp
-        x pp y
-    in
-    failwith err
+    Logger.err "leq : not defined for that case where x,y = (%a,%a)!"
+      (Failure "leq") pp x pp y
 
 and cases l1 l2 p balance =
   leq (simplify (subst l1 p Zero)) (simplify (subst l2 p Zero)) balance
