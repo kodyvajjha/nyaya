@@ -141,6 +141,8 @@ let check_all_well_posed (env : Env.t) : bool =
     env true
 
 let typecheck (env : Env.t) =
+  let all_well_posed = check_all_well_posed env in
+  Logger.info "All declarations well-posed: %b@." all_well_posed;
   let iter = env |> Iter.of_hashtbl in
   Iter.iter2
     (fun n d ->
