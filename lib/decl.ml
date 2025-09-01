@@ -112,3 +112,18 @@ let get_decl_info (decl : t) : decl_info =
   | Inductive { info; _ } -> info
   | Ctor { info; _ } -> info
   | Rec { info; _ } -> info
+
+let get_type (decl : t) =
+  let info = get_decl_info decl in
+  info.ty
+
+let get_uparams (decl : t) =
+  match decl with
+  | Axiom info -> info.uparams
+  | Def { info; _ } -> info.uparams
+  | Thm { info; _ } -> info.uparams
+  | Opaque { info; _ } -> info.uparams
+  | Quot { info } -> info.uparams
+  | Inductive { info; _ } -> info.uparams
+  | Ctor { info; _ } -> info.uparams
+  | Rec { info; _ } -> info.uparams
