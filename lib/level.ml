@@ -14,6 +14,8 @@ type t =
   | Param of Name.t
 [@@deriving show]
 
+let param x = Param x
+
 let is_zero level =
   match level with
   | Zero -> true
@@ -67,17 +69,30 @@ let rec simplify (level : t) : t =
    | IMax (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
    | Param l -> CCFormat.fprintf fpf "%a" Name.pp l *)
 
-let rec subst (level : t) (p : Name.t) (q : t) =
+(** Substitute [vs] for [ks] in [level]. *)
+let rec subst ~(level : t) ~(ks : t list) ~(vs : t list) =
   match level with
   | Zero -> Zero
-  | Succ l -> Succ (subst l p q)
-  | Max (l1, l2) -> Max (subst l1 p q, subst l2 p q)
-  | IMax (l1, l2) -> IMax (subst l1 p q, subst l2 p q)
-  | Param name ->
-    if name == p then
-      q
-    else
-      Param name
+  | Succ l -> Succ (subst ~level:l ~ks ~vs)
+  | Max (l1, l2) -> Max (subst ~level:l1 ~ks ~vs, subst ~level:l2 ~ks ~vs)
+  | IMax (l1, l2) -> IMax (subst ~level:l1 ~ks ~vs, subst ~level:l2 ~ks ~vs)
+  | Param _ ->
+    let rec lookup ks vs =
+      match ks, vs with
+      | k :: ks', v :: vs' ->
+        if level == k then
+          v
+        else
+          lookup ks' vs'
+      | _ -> level
+    in
+    lookup ks vs
+
+let subst_simp ~level ~ks ~vs = subst ~level ~ks ~vs |> simplify
+
+(** Returns a list of [levels] with [vs] substituted for [ks]. *)
+let subst_levels ~(levels : t list) ~ks ~vs =
+  CCList.map (fun level -> subst_simp ~level ~ks ~vs) levels
 
 let rec leq (x : t) (y : t) (balance : int) : bool =
   match x, y with
@@ -107,10 +122,13 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
       (Failure "leq") pp x pp y
 
 and cases l1 l2 p balance =
-  leq (simplify (subst l1 p Zero)) (simplify (subst l2 p Zero)) balance
+  leq
+    (simplify (subst ~level:l1 ~ks:[ Param p ] ~vs:[ Zero ]))
+    (simplify (subst ~level:l2 ~ks:[ Param p ] ~vs:[ Zero ]))
+    balance
   && leq
-       (simplify (subst l1 p (Succ (Param p))))
-       (simplify (subst l2 p (Succ (Param p))))
+       (simplify (subst ~level:l1 ~ks:[ Param p ] ~vs:[ Succ (Param p) ]))
+       (simplify (subst ~level:l2 ~ks:[ Param p ] ~vs:[ Succ (Param p) ]))
        balance
 
 let ( <= ) l1 l2 = leq l1 l2 0

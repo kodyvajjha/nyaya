@@ -6,10 +6,15 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
-let rec infer (_env : Env.t) (expr : Expr.t) : Expr.t =
+let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
-  | Expr.FreeVar { name; expr; info; fvarId } -> expr
+  | Expr.FreeVar { name; expr; info; fvarId } ->
+    (*
+       infer FVar id binder:
+       binder.type
+    *)
+    expr
   | Expr.Lam { name; btype; binfo; body } ->
     (*
       infer Lambda(binder, body):
@@ -18,7 +23,7 @@ let rec infer (_env : Env.t) (expr : Expr.t) : Expr.t =
        let bodyType := infer $ instantiate(body, binderFVar)
        Pi binder (abstract bodyType binderFVar)
     *)
-    (match infer _env btype with
+    (match infer env btype with
     | Expr.Sort _ ->
       let binder_free_var =
         Expr.FreeVar
@@ -30,7 +35,7 @@ let rec infer (_env : Env.t) (expr : Expr.t) : Expr.t =
           }
       in
       let body_type =
-        infer _env (Expr.instantiate ~free_var:binder_free_var ~expr:body)
+        infer env (Expr.instantiate ~free_var:binder_free_var ~expr:body)
       in
       let target_id = Expr.get_fvar_id binder_free_var in
       Expr.Forall
@@ -43,7 +48,13 @@ let rec infer (_env : Env.t) (expr : Expr.t) : Expr.t =
     | _ ->
       Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp expr)
   | Expr.Forall { name; btype; binfo; body } ->
-    let l = infer_sort_of _env btype in
+    (*
+      infer Pi binder body:
+      let l := inferSortOf binder
+      let r := inferSortOf $ instantiate body (fvar(binder))
+      imax(l, r)
+    *)
+    let l = infer_sort_of env btype in
     let free_var =
       Expr.FreeVar
         {
@@ -53,8 +64,19 @@ let rec infer (_env : Env.t) (expr : Expr.t) : Expr.t =
           fvarId = Nyaya_parser.Util.Uid.mk ();
         }
     in
-    let r = infer_sort_of _env (Expr.instantiate ~free_var ~expr:body) in
-    Expr.sort (Level.IMax (l, r))
+    let r = infer_sort_of env (Expr.instantiate ~free_var ~expr:body) in
+    Expr.sort (Level.IMax (l, r) |> Level.simplify)
+  | Expr.Const { name; uparams } ->
+    (*
+       infer Const name levels:
+       let knownType := environment[name].type
+       substituteLevels (e := knownType) (ks := knownType.uparams) (vs := levels)
+    *)
+    let known_type : Decl.t = Hashtbl.find env name in
+    let known_type_uparams =
+      CCList.map Level.param (Decl.get_uparams known_type)
+    in
+    Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | _ -> Logger.err "failed inferring: %a" (TypeError expr) Expr.pp expr
 
 and infer_sort_of env (expr : Expr.t) =
@@ -93,11 +115,11 @@ and isDefEq e1 e2 =
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
-let check (_env : Env.t) (decl : Decl.t) : bool =
+let check (env : Env.t) (decl : Decl.t) : bool =
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
     Logger.debug "Checking value %a against %a" Expr.pp value Expr.pp info.ty;
-    isDefEq (infer _env value) info.ty
+    isDefEq (infer env value) info.ty
   | _ ->
     Logger.err "failed checking decl: %a" (Failure "type checking failed")
       Decl.pp decl

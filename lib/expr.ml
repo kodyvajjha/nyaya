@@ -207,6 +207,43 @@ let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   | Proj { name; nat; expr = e1 } ->
     Proj { name; nat; expr = abstract_fvar ~target_id ~k e1 }
 
+let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
+  match expr with
+  | BoundVar _ | Literal _ -> expr
+  | Sort l -> Sort (Level.subst_simp ~level:l ~ks ~vs)
+  | FreeVar { name; expr; info; fvarId } ->
+    FreeVar { name; expr = subst_levels expr ks vs; info; fvarId }
+  | Const { name; uparams } ->
+    let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
+    Const { name; uparams = uparams' }
+  | App (f, a) -> App (subst_levels f ks vs, subst_levels a ks vs)
+  | Lam { name; btype; binfo; body } ->
+    Lam
+      {
+        name;
+        btype = subst_levels btype ks vs;
+        binfo;
+        body = subst_levels body ks vs;
+      }
+  | Forall { name; btype; binfo; body } ->
+    Forall
+      {
+        name;
+        btype = subst_levels btype ks vs;
+        binfo;
+        body = subst_levels body ks vs;
+      }
+  | Let { name; btype; value; body } ->
+    Let
+      {
+        name;
+        btype = subst_levels btype ks vs;
+        value = subst_levels value ks vs;
+        body = subst_levels body ks vs;
+      }
+  | Proj { name; nat; expr } ->
+    Proj { name; nat; expr = subst_levels expr ks vs }
+
 open Nyaya_parser
 
 let getter tbl key excp =
