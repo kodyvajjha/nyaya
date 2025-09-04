@@ -23,7 +23,7 @@ let is_zero level =
 
 let is_one level =
   match level with
-  | Succ _ -> true
+  | Succ Zero -> true
   | _ -> false
 
 let is_any_max level =
@@ -50,15 +50,15 @@ let rec simplify (level : t) : t =
   | Succ l -> Succ (simplify l)
   | Max (l1, l2) -> combining (simplify l1, simplify l2)
   | IMax (l1, l2) ->
-    let l_simp = simplify l1 in
-    let r_simp = simplify l2 in
-    if is_zero l_simp || is_one r_simp then
-      r_simp
+    let l' = simplify l1 in
+    let r' = simplify l2 in
+    if is_zero l' || is_one l' then
+      r'
     else (
-      match simplify l2 with
-      | Succ _ as l2_ -> combining (simplify l1, l2_)
-      | Zero -> Zero
-      | l2_ -> IMax (simplify l1, l2_)
+      match r' with
+      | Zero -> r'
+      | Succ _ -> combining (l', r')
+      | _ -> IMax (l', r')
     )
 
 (* let rec pp fpf t =
@@ -106,7 +106,7 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
   (* descend left *)
   | Max (a, b), _ -> leq a y balance && leq b y balance
   (* descend right *)
-  | (Param _ | Zero), Max (a, b) -> leq x a balance || leq y b balance
+  | (Param _ | Zero), Max (a, b) -> leq x a balance || leq x b balance
   (* imax *)
   | IMax (a1, b1), IMax (a2, b2) when a1 == a2 && b1 == b2 -> true
   | IMax (_, Param p), _ -> cases x y p balance
