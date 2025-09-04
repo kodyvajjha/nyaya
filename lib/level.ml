@@ -23,7 +23,7 @@ let is_zero level =
 
 let is_one level =
   match level with
-  | Succ Zero -> true
+  | Succ pred -> is_zero pred
   | _ -> false
 
 let is_any_max level =
