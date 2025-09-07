@@ -2,6 +2,8 @@
 
 exception TypeError of Expr.t
 
+exception Not_well_posed
+
 module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
@@ -76,6 +78,14 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     let known_type_uparams =
       CCList.map Level.param (Decl.get_uparams known_type)
     in
+    Logger.debug "known_type : %a" Decl.pp known_type;
+    Logger.debug "known_type_uparams : %a" (CCList.pp Level.pp)
+      known_type_uparams;
+    Logger.debug "uparams : %a" (CCList.pp Level.pp) uparams;
+    Logger.debug "Result : %a" Expr.pp
+      (Expr.subst_levels
+         (known_type |> Decl.get_type)
+         known_type_uparams uparams);
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | _ -> Logger.err "failed inferring: %a" (TypeError expr) Expr.pp expr
 
@@ -92,6 +102,7 @@ and whnf (expr : Expr.t) : Expr.t =
   | _ -> Logger.err "failed reducing: %a" (TypeError expr) Expr.pp expr
 
 and isDefEq e1 e2 =
+  Logger.debug "checking def eq : %a ===?=== %a" Expr.pp e1 Expr.pp e2;
   match e1, e2 with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
@@ -120,6 +131,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Def { info; value; red_hint = _red_hint } ->
     Logger.debug "Checking value %a against %a" Expr.pp value Expr.pp info.ty;
     isDefEq (infer env value) info.ty
+  | Axiom _ -> true
   | _ ->
     Logger.err "failed checking decl: %a" (Failure "type checking failed")
       Decl.pp decl
@@ -158,7 +170,8 @@ let check_all_well_posed (env : Env.t) : bool =
       let info = Decl.get_decl_info decl in
       let is_well_posed = well_posed env info in
       if not is_well_posed then
-        Logger.debug "Declaration %a is not well-posed" Name.pp name;
+        Logger.err "Declaration %a is not well-posed" Not_well_posed Name.pp
+          name;
       acc && is_well_posed)
     env true
 
@@ -170,6 +183,6 @@ let typecheck (env : Env.t) =
     (fun n d ->
       try check env d |> string_of_bool |> print_endline
       with TypeError e ->
-        Logger.err "Type checking failed when checking %a" (TypeError e) Name.pp
-          n)
+        Logger.err "Type checking failed when checking %a." (TypeError e)
+          Name.pp n)
     iter
