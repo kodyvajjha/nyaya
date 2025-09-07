@@ -179,10 +179,16 @@ let typecheck (env : Env.t) =
   let all_well_posed = check_all_well_posed env in
   Logger.debug "All declarations well-posed: %b@." all_well_posed;
   let iter = env |> Iter.of_hashtbl in
+  let success = ref 0 in
   Iter.iter2
     (fun n d ->
-      try check env d |> string_of_bool |> print_endline
+      try
+        if check env d then
+          success := !success + 1
+        else
+          ()
       with TypeError e ->
         Logger.err "Type checking failed when checking %a." (TypeError e)
           Name.pp n)
-    iter
+    iter;
+  Logger.success "Successfully checked %d declarations in environment." !success

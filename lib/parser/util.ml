@@ -70,6 +70,13 @@ struct
         Logs.info (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
+  let success fmt =
+    CCFormat.set_color_default true;
+    CCFormat.with_color_ksf "green"
+      ~f:(fun str ->
+        Logs.info (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+      fmt
+
   let warn fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
