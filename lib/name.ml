@@ -12,7 +12,6 @@ type t =
   | Anon
   | Str of (t * string)
   | Num of (t * int)
-[@@deriving show]
 
 let of_string str = Str (Anon, str)
 

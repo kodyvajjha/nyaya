@@ -4,6 +4,8 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Level"
 end)
 
+module Fmt = CCFormat
+
 type t =
   | Zero
   | Succ of t
@@ -61,13 +63,13 @@ let rec simplify (level : t) : t =
       | _ -> IMax (l', r')
     )
 
-(* let rec pp fpf t =
-   match t with
-   | Zero -> CCFormat.fprintf fpf "0"
-   | Succ l -> CCFormat.fprintf fpf "%a" pp (simplify l)
-   | Max (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
-   | IMax (_, _) as l -> CCFormat.fprintf fpf "%a" pp (simplify l)
-   | Param l -> CCFormat.fprintf fpf "%a" Name.pp l *)
+let rec pp fpf t =
+  match t with
+  | Zero -> Fmt.fprintf fpf "0"
+  | Succ l -> Fmt.fprintf fpf "(%a + 1)" pp l
+  | Max (l1, l2) -> Fmt.fprintf fpf "max(%a,%a)" pp l1 pp l2
+  | IMax (l1, l2) -> Fmt.fprintf fpf "imax(%a,%a)" pp l1 pp l2
+  | Param l -> Fmt.fprintf fpf "%a" Name.pp l
 
 (** Substitute [vs] for [ks] in [level]. *)
 let rec subst ~(level : t) ~(ks : t list) ~(vs : t list) =
