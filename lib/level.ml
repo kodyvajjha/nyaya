@@ -63,10 +63,20 @@ let rec simplify (level : t) : t =
       | _ -> IMax (l', r')
     )
 
+(** Collapses Succ layers into (base, offset). E.g., [Succ (Succ (Succ u))] will become [(u,3)]. Useful for pretty printing. *)
+let rec peel_succ acc = function
+  | Succ l -> peel_succ (acc + 1) l
+  | l -> l, acc
+
 let rec pp fpf t =
   match t with
   | Zero -> Fmt.fprintf fpf "0"
-  | Succ l -> Fmt.fprintf fpf "(%a + 1)" pp l
+  | Succ l ->
+    (* Count how many Succs in a row *)
+    let base, offset = peel_succ 1 l in
+    (match base with
+    | Zero -> Fmt.fprintf fpf "%d" offset
+    | _ -> Fmt.fprintf fpf "%a + %d" pp base offset)
   | Max (l1, l2) -> Fmt.fprintf fpf "max(%a,%a)" pp l1 pp l2
   | IMax (l1, l2) -> Fmt.fprintf fpf "imax(%a,%a)" pp l1 pp l2
   | Param l -> Fmt.fprintf fpf "%a" Name.pp l
