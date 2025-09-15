@@ -147,6 +147,7 @@ and cases l1 l2 p balance =
        (simplify (subst ~level:l2 ~ks:[ Param p ] ~vs:[ Succ (Param p) ]))
        balance
 
+(** Partial order on levels. *)
 let ( <= ) l1 l2 = leq l1 l2 0
 
 let eq l1 l2 = l1 <= l2 && l2 <= l1

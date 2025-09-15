@@ -32,6 +32,7 @@ let rec pp fpf name =
       Fmt.fprintf fpf "%a.%s" pp n1 str
   | Num (n1, id) -> Fmt.fprintf fpf "%a.%d" pp n1 id
 
+(** Create a name table resolving names by mapping Ast name ids to typed name constructors. *)
 let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
   let resolved_table : (int, t) Hashtbl.t =
     Hashtbl.create (CCList.length ast.items)

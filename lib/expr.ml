@@ -162,8 +162,8 @@ let instantiate ~(free_var : t) ~(expr : t) =
   else
     instantiate_aux free_var expr 0
 
-(* Abstract a specific free var (by fvarId) at depth k, producing a body
-   suitable to be wrapped by a binder inserted at that same depth k. *)
+(** Abstract a specific free var (by [target_id]) at depth [k], producing a body
+   suitable to be wrapped by a binder inserted at that same depth k. Note: This will need to be optimized later. *)
 let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   match e with
   | BoundVar i ->

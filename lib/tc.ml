@@ -136,6 +136,8 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     Logger.err "failed checking decl: %a" (Failure "type checking failed")
       Decl.pp decl
 
+(** We check if any declaration in the environment has 1) duplicate uparams or 2) lingering free variables in the type or 3) the type of its type is a sort. 
+  If yes, we call that declaration well-posed and only typecheck those. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let rec dup_exist = function
     | [] -> false
