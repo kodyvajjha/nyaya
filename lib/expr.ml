@@ -86,6 +86,59 @@ let (foo : Bar) := 0; foo
   | Literal of literal
 [@@deriving show]
 
+module Pp = struct
+  module Fmt = CCFormat
+
+  let gather_lams e =
+    let rec aux running final =
+      match final with
+      | Lam { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+      | _ -> running, final
+    in
+    aux [] e
+
+  let gather_foralls f =
+    let rec aux running final =
+      match final with
+      | Forall { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+      | _ -> running, final
+    in
+    aux [] f
+
+  (* TODO: print brackets according to a set precedence.  *)
+  let rec pp fpf expr =
+    match expr with
+    | Sort u -> Fmt.fprintf fpf "Sort (%a)" Level.pp u
+    | BoundVar i ->
+      (* TODO: maintain a stack of bound var names and print those according to de Bruijn pointer instead of plain indices.*)
+      Fmt.fprintf fpf "#%d" i
+    | FreeVar { name; expr; fvarId; _ } ->
+      Fmt.fprintf fpf "%a##%d : %a" Name.pp name fvarId pp expr
+    | Lam _ as e ->
+      let binders, final = gather_lams e in
+      let pp_binder fpf (name, btype) =
+        (* TODO: print brackets according to binfo. *)
+        Fmt.fprintf fpf "(%a : %a)" Name.pp name pp btype
+      in
+      Fmt.fprintf fpf "@[<hov 2>fun @[<hov>%a@] =>@ %a@]"
+        CCFormat.(list ~sep:(fun fpf _ -> CCFormat.fprintf fpf "@,") pp_binder)
+        binders pp final
+    | Forall _ as f ->
+      let binders, final = gather_foralls f in
+      let pp_binder fpf (name, btype) =
+        (* TODO: print brackets according to binfo. *)
+        Fmt.fprintf fpf "(%a : %a)" Name.pp name pp btype
+      in
+      Fmt.fprintf fpf "@[<hov 2>forall @[%a@] => %a@]"
+        CCFormat.(list pp_binder)
+        binders pp final
+    | Const { name; uparams } ->
+      Fmt.fprintf fpf "%a.{%a}" Name.pp name CCFormat.(list Level.pp) uparams
+    | e -> Fmt.silent fpf e
+end
+
+let pp fpf e = Pp.pp fpf e
+
 let sort l = Sort l
 
 let lambda name btype body = Lam { name; btype; binfo = Default; body }
@@ -163,7 +216,7 @@ let instantiate ~(free_var : t) ~(expr : t) =
     instantiate_aux free_var expr 0
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
-   suitable to be wrapped by a binder inserted at that same depth k. Note: This will need to be optimized later. *)
+   suitable to be wrapped by a binder inserted at that same depth [k]. Note: This will need to be optimized later. *)
 let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   match e with
   | BoundVar i ->
