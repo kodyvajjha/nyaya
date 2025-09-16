@@ -1,5 +1,5 @@
-(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation.
-   Perhaps we could do hashconsing.*)
+(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation. *)
+
 open Nyaya_parser
 
 module Logger = Util.MakeLogger (struct
@@ -89,6 +89,14 @@ let (foo : Bar) := 0; foo
 module Pp = struct
   module Fmt = CCFormat
 
+  let get_apps e =
+    let rec aux head running =
+      match head with
+      | App (f, a) -> aux f (running @ [ a ])
+      | _ -> head, CCList.rev running
+    in
+    aux e []
+
   let gather_lams e =
     let rec aux running final =
       match final with
@@ -114,26 +122,36 @@ module Pp = struct
       Fmt.fprintf fpf "#%d" i
     | FreeVar { name; expr; fvarId; _ } ->
       Fmt.fprintf fpf "%a##%d : %a" Name.pp name fvarId pp expr
+    | App _ as e ->
+      let f, args = get_apps e in
+      Fmt.fprintf fpf "@[<h 2>(%a)@ %a@]" pp f
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@") pp)
+        args
     | Lam _ as e ->
       let binders, final = gather_lams e in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "(%a : %a)" Name.pp name pp btype
+        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
       in
       Fmt.fprintf fpf "@[<hov 2>fun @[<hov>%a@] =>@ %a@]"
-        CCFormat.(list ~sep:(fun fpf _ -> CCFormat.fprintf fpf "@,") pp_binder)
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@") pp_binder)
         binders pp final
     | Forall _ as f ->
       let binders, final = gather_foralls f in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "(%a : %a)" Name.pp name pp btype
+        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
       in
       Fmt.fprintf fpf "@[<hov 2>forall @[%a@] => %a@]"
-        CCFormat.(list pp_binder)
+        Fmt.(list pp_binder)
         binders pp final
     | Const { name; uparams } ->
-      Fmt.fprintf fpf "%a.{%a}" Name.pp name CCFormat.(list Level.pp) uparams
+      Fmt.fprintf fpf "%a.{%a}" Name.pp name
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
+        uparams
+    | Let { name; btype; value; body } ->
+      Fmt.fprintf fpf "@[<hv 2>let %a : %a := %a in@ %a@]" Name.pp name pp btype
+        pp value pp body
     | e -> Fmt.silent fpf e
 end
 
