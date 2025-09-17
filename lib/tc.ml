@@ -129,7 +129,8 @@ and isDefEq e1 e2 =
 let check (env : Env.t) (decl : Decl.t) : bool =
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
-    Logger.debug "Checking value %a against %a" Expr.pp value Expr.pp info.ty;
+    Logger.debug "@[Checking that value @[<h 4> %a@] has type @ @[<hv 4> %a@]@]"
+      Expr.pp value Expr.pp info.ty;
     isDefEq (infer env value) info.ty
   | Axiom _ -> true
   | _ ->

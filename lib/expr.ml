@@ -17,10 +17,10 @@ type binfo =
 
 let binfo_of_ast (info : Ast.info) =
   match info with
-  | Ast.IBD -> Default
-  | Ast.IBI -> Implicit
-  | Ast.IBS -> StrictImplicit
-  | Ast.IBC -> InstanceImplicit
+  | Ast.IBD -> Default (* () *)
+  | Ast.IBI -> Implicit (* {} *)
+  | Ast.IBS -> StrictImplicit (* {{}}*)
+  | Ast.IBC -> InstanceImplicit (* [] *)
 
 type literal =
   | NatLit of Z.t [@printer Z.pp_print]
@@ -134,7 +134,7 @@ module Pp = struct
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
       in
       Fmt.fprintf fpf "@[<hov 2>fun @[<hov>%a@] =>@ %a@]"
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@") pp_binder)
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp_binder)
         binders pp final
     | Forall _ as f ->
       let binders, final = gather_foralls f in
@@ -152,7 +152,12 @@ module Pp = struct
     | Let { name; btype; value; body } ->
       Fmt.fprintf fpf "@[<hv 2>let %a : %a := %a in@ %a@]" Name.pp name pp btype
         pp value pp body
-    | e -> Fmt.silent fpf e
+    | Proj { name; nat; expr } ->
+      Fmt.fprintf fpf "%a@,.%a.%d" Name.pp name pp expr nat
+    | Literal l ->
+      (match l with
+      | NatLit i -> Fmt.fprintf fpf "%a" Z.pp_print i
+      | StrLit s -> Fmt.fprintf fpf "%S" s)
 end
 
 let pp fpf e = Pp.pp fpf e
