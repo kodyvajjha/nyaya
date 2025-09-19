@@ -1,3 +1,3 @@
-; (test
-;  (name init_bindings)
-;  (libraries nyaya containers))
+(tests
+ (names precedence stress)
+ (libraries nyaya containers))
