@@ -18,6 +18,8 @@ type t =
 
 let param x = Param x
 
+let of_string x = param (Name.of_string x)
+
 let is_zero level =
   match level with
   | Zero -> true

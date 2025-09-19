@@ -6,6 +6,8 @@ module Logger = Util.MakeLogger (struct
   let header = "Expr"
 end)
 
+module Fmt = CCFormat
+
 exception InstantiateError
 
 type binfo =
@@ -87,8 +89,6 @@ let (foo : Bar) := 0; foo
 [@@deriving show]
 
 module Pp = struct
-  module Fmt = CCFormat
-
   let get_apps e =
     let rec aux head running =
       match head with
@@ -125,7 +125,7 @@ module Pp = struct
     | App _ as e ->
       let f, args = get_apps e in
       Fmt.fprintf fpf "@[<h 2>(%a)@ %a@]" pp f
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@") pp)
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp)
         args
     | Lam _ as e ->
       let binders, final = gather_lams e in
@@ -146,14 +146,17 @@ module Pp = struct
         Fmt.(list pp_binder)
         binders pp final
     | Const { name; uparams } ->
-      Fmt.fprintf fpf "%a.{%a}" Name.pp name
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
-        uparams
+      if CCList.is_empty uparams then
+        Fmt.fprintf fpf "%a" Name.pp name
+      else
+        Fmt.fprintf fpf "%a.{%a}" Name.pp name
+          Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
+          uparams
     | Let { name; btype; value; body } ->
       Fmt.fprintf fpf "@[<hv 2>let %a : %a := %a in@ %a@]" Name.pp name pp btype
         pp value pp body
     | Proj { name; nat; expr } ->
-      Fmt.fprintf fpf "%a@,.%a.%d" Name.pp name pp expr nat
+      Fmt.fprintf fpf "%a.%a.%d" Name.pp name pp expr nat
     | Literal l ->
       (match l with
       | NatLit i -> Fmt.fprintf fpf "%a" Z.pp_print i
@@ -162,9 +165,21 @@ end
 
 let pp fpf e = Pp.pp fpf e
 
+let to_string e = Fmt.to_string pp e
+
 let sort l = Sort l
 
 let lambda name btype body = Lam { name; btype; binfo = Default; body }
+
+let mk_app f args = CCList.fold_left (fun acc a -> App (acc, a)) f args
+
+let pi x ty body = Forall { name = x; btype = ty; binfo = Default; body }
+
+let letin x ty v b = Let { name = x; btype = ty; value = v; body = b }
+
+let const ?(ups = []) s = Const { name = s; uparams = ups }
+
+let bv i = BoundVar i
 
 let rec has_free_vars (expr : t) =
   match expr with
@@ -325,7 +340,7 @@ open Nyaya_parser
 let getter tbl key excp =
   match CCHashtbl.get tbl key with
   | Some v -> v
-  | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
+  | None -> failwith @@ Fmt.sprintf "Could not find id %d in %s" key excp
 
 let table name_table level_table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
@@ -395,8 +410,7 @@ let table name_table level_table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
         Hashtbl.add resolved_table eid nm;
         nm
       | None ->
-        failwith
-        @@ CCFormat.sprintf "@[expr resolution failed for id %d@.@]" eid)
+        failwith @@ Fmt.sprintf "@[expr resolution failed for id %d@.@]" eid)
   in
 
   (* Resolve every expr *)
