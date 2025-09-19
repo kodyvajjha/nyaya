@@ -152,13 +152,20 @@ module Pp = struct
       Fmt.fprintf fpf "#%d" i
     | FreeVar { name; expr; fvarId; _ } ->
       Fmt.fprintf fpf "%a##%d : %a" Name.pp name fvarId pp expr
+    | Const { name; uparams } ->
+      if CCList.is_empty uparams then
+        Fmt.fprintf fpf "%a" Name.pp name
+      else
+        Fmt.fprintf fpf "%a.@[<h>{%a}@]" Name.pp name
+          Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
+          uparams
     | App _ as e ->
       let f, args = get_apps e in
       Fmt.fprintf fpf "@[<2>%a@ %a@]" pp f
         Fmt.(list ~sep:Fmt.pp_print_space pp)
         args
-    | Lam _ as e ->
-      let binders, final = gather_lams e in
+    | Lam _ as l ->
+      let binders, final = gather_lams l in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[%a : %a@]" Name.pp name pp btype
@@ -175,13 +182,6 @@ module Pp = struct
       Fmt.fprintf fpf "@[<hv 2>forall @[%a@],@ %a@]"
         Fmt.(list ~sep:Fmt.pp_print_space pp_binder)
         binders pp final
-    | Const { name; uparams } ->
-      if CCList.is_empty uparams then
-        Fmt.fprintf fpf "%a" Name.pp name
-      else
-        Fmt.fprintf fpf "%a.@[<h>{%a}@]" Name.pp name
-          Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
-          uparams
     | Let { name; btype; value; body } ->
       Fmt.fprintf fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name pp
         btype pp value pp body
