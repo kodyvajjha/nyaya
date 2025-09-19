@@ -92,16 +92,25 @@ module Pp = struct
   module Prec = struct
     type t =
       | Bot
-      | BVar
-      | Fvar
-      | Const
-      | Sort
-      | Literal
       | Proj
       | App
       | Arrow
+      | Let
+      | Atom
+      | Sort
       | Binder
       | Top
+
+    let rank = function
+      | Top -> 10
+      | Atom -> 6
+      | Proj -> 5
+      | App -> 4
+      | Sort -> 3 (* ensure this is <= App so it gets parens as arg *)
+      | Arrow -> 2
+      | Let -> 1
+      | Binder -> 0
+      | Bot -> -1
   end
 
   let bracks (info : binfo) =
@@ -111,9 +120,9 @@ module Pp = struct
     | InstanceImplicit -> "[", "]"
     | StrictImplicit -> "{{", "}}"
 
-  (** put "()" around [fmt] if needed *)
-  let wrap p1 p2 out fmt =
-    if p1 > p2 then (
+  (** put "()" around [fmt] if needed. Parentheses are needed when the current node binds looser than the surrounding context. *)
+  let wrap here ctx out fmt =
+    if Prec.rank here < Prec.rank ctx then (
       CCFormat.string out "(";
       Format.kfprintf (fun _ -> CCFormat.string out ")") out fmt
     ) else
@@ -143,15 +152,14 @@ module Pp = struct
     in
     aux [] f
 
-  (* TODO: print brackets according to a set precedence.  *)
-  let rec pp fpf expr =
+  let rec pp prec fpf expr =
     match expr with
-    | Sort u -> Fmt.fprintf fpf "Sort %a" Level.pp u
+    | Sort u -> wrap Prec.Sort prec fpf "Sort %a" Level.pp u
     | BoundVar i ->
       (* TODO: maintain a stack of bound var names and print those according to de Bruijn pointer instead of plain indices.*)
       Fmt.fprintf fpf "#%d" i
-    | FreeVar { name; expr; fvarId; _ } ->
-      Fmt.fprintf fpf "%a##%d : %a" Name.pp name fvarId pp expr
+    | FreeVar { name; fvarId; _ } ->
+      Fmt.fprintf fpf "%a##%d" Name.pp name fvarId
     | Const { name; uparams } ->
       if CCList.is_empty uparams then
         Fmt.fprintf fpf "%a" Name.pp name
@@ -161,39 +169,39 @@ module Pp = struct
           uparams
     | App _ as e ->
       let f, args = get_apps e in
-      Fmt.fprintf fpf "@[<2>%a@ %a@]" pp f
-        Fmt.(list ~sep:Fmt.pp_print_space pp)
+      wrap Prec.App prec fpf "@[<2>%a@ %a@]" (pp prec) f
+        Fmt.(list ~sep:Fmt.pp_print_space (pp Prec.Atom))
         args
     | Lam _ as l ->
       let binders, final = gather_lams l in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "@[%a : %a@]" Name.pp name pp btype
+        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
       in
-      Fmt.fprintf fpf "@[<hv 2>fun @[<hov>%a@] =>@ %a@]"
+      wrap Prec.Arrow prec fpf "@[<2>fun @[<hov 2>%a@] =>@ %a@]"
         Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
-        binders pp final
+        binders (pp prec) final
     | Forall _ as f ->
       let binders, final = gather_foralls f in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
+        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
       in
-      Fmt.fprintf fpf "@[<hv 2>forall @[%a@],@ %a@]"
-        Fmt.(list ~sep:Fmt.pp_print_space pp_binder)
-        binders pp final
+      wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@],@]@,@[<hv 2>%a@]@]"
+        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp_binder)
+        binders (pp prec) final
     | Let { name; btype; value; body } ->
-      Fmt.fprintf fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name pp
-        btype pp value pp body
+      wrap Prec.Let prec fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name
+        (pp prec) btype (pp prec) value (pp prec) body
     | Proj { name; nat; expr } ->
-      Fmt.fprintf fpf "%a.%a.%d" Name.pp name pp expr nat
+      wrap Prec.Proj prec fpf "%a.%a.%d" (pp Prec.Proj) expr Name.pp name nat
     | Literal l ->
       (match l with
       | NatLit i -> Fmt.fprintf fpf "%a" Z.pp_print i
       | StrLit s -> Fmt.fprintf fpf "%S" s)
 end
 
-let pp fpf e = Pp.pp fpf e
+let pp fpf e = Pp.pp Pp.Prec.Bot fpf e
 
 let to_string e = Fmt.to_string pp e
 
