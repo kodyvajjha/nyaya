@@ -89,6 +89,36 @@ let (foo : Bar) := 0; foo
 [@@deriving show]
 
 module Pp = struct
+  module Prec = struct
+    type t =
+      | Bot
+      | BVar
+      | Fvar
+      | Const
+      | Sort
+      | Literal
+      | Proj
+      | App
+      | Arrow
+      | Binder
+      | Top
+  end
+
+  let bracks (info : binfo) =
+    match info with
+    | Default -> "(", ")"
+    | Implicit -> "{", "}"
+    | InstanceImplicit -> "[", "]"
+    | StrictImplicit -> "{{", "}}"
+
+  (** put "()" around [fmt] if needed *)
+  let wrap p1 p2 out fmt =
+    if p1 > p2 then (
+      CCFormat.string out "(";
+      Format.kfprintf (fun _ -> CCFormat.string out ")") out fmt
+    ) else
+      Format.kfprintf (fun _ -> ()) out fmt
+
   let get_apps e =
     let rec aux head running =
       match head with
@@ -116,7 +146,7 @@ module Pp = struct
   (* TODO: print brackets according to a set precedence.  *)
   let rec pp fpf expr =
     match expr with
-    | Sort u -> Fmt.fprintf fpf "Sort (%a)" Level.pp u
+    | Sort u -> Fmt.fprintf fpf "Sort %a" Level.pp u
     | BoundVar i ->
       (* TODO: maintain a stack of bound var names and print those according to de Bruijn pointer instead of plain indices.*)
       Fmt.fprintf fpf "#%d" i
@@ -124,17 +154,17 @@ module Pp = struct
       Fmt.fprintf fpf "%a##%d : %a" Name.pp name fvarId pp expr
     | App _ as e ->
       let f, args = get_apps e in
-      Fmt.fprintf fpf "@[<h 2>(%a)@ %a@]" pp f
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp)
+      Fmt.fprintf fpf "@[<2>%a@ %a@]" pp f
+        Fmt.(list ~sep:Fmt.pp_print_space pp)
         args
     | Lam _ as e ->
       let binders, final = gather_lams e in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
+        Fmt.fprintf fpf "@[%a : %a@]" Name.pp name pp btype
       in
-      Fmt.fprintf fpf "@[<hov 2>fun @[<hov>%a@] =>@ %a@]"
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp_binder)
+      Fmt.fprintf fpf "@[<hv 2>fun @[<hov>%a@] =>@ %a@]"
+        Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
         binders pp final
     | Forall _ as f ->
       let binders, final = gather_foralls f in
@@ -142,19 +172,19 @@ module Pp = struct
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name pp btype
       in
-      Fmt.fprintf fpf "@[<hov 2>forall @[%a@] => %a@]"
-        Fmt.(list pp_binder)
+      Fmt.fprintf fpf "@[<hv 2>forall @[%a@],@ %a@]"
+        Fmt.(list ~sep:Fmt.pp_print_space pp_binder)
         binders pp final
     | Const { name; uparams } ->
       if CCList.is_empty uparams then
         Fmt.fprintf fpf "%a" Name.pp name
       else
-        Fmt.fprintf fpf "%a.{%a}" Name.pp name
+        Fmt.fprintf fpf "%a.@[<h>{%a}@]" Name.pp name
           Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
           uparams
     | Let { name; btype; value; body } ->
-      Fmt.fprintf fpf "@[<hv 2>let %a : %a := %a in@ %a@]" Name.pp name pp btype
-        pp value pp body
+      Fmt.fprintf fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name pp
+        btype pp value pp body
     | Proj { name; nat; expr } ->
       Fmt.fprintf fpf "%a.%a.%d" Name.pp name pp expr nat
     | Literal l ->
