@@ -10,20 +10,20 @@ end)
 
 module Pp = struct
   let pp_check fpf (e, ty) =
-    let pp_value fpf e = Format.fprintf fpf "value:@ %a" Expr.pp e in
-    let pp_type fpf ty = Format.fprintf fpf "type:@ %a" Expr.pp ty in
+    let pp_value fpf e = CCFormat.fprintf fpf "value:@ %a" Expr.pp e in
+    let pp_type fpf ty = CCFormat.fprintf fpf "type:@ %a" Expr.pp ty in
 
-    Format.fprintf fpf "@[<v 0>@[check:@]@,@[<hv 2>%a@]@,@[<hv 2>%a@]@]"
+    CCFormat.fprintf fpf "@[<v 0>@[check:@]@,@[<hv 2>%a@]@,@[<hv 2>%a@]@]"
       pp_value e pp_type ty
 
   let pp_defeq fpf (lhs, rhs) =
-    (* match mode with
-       | `Inline ->
-         Format.fprintf fpf "@[<h>defeq: %a == %a@]" Expr.pp lhs Expr.pp rhs
-       | `Block -> *)
     CCFormat.fprintf fpf
       "@[<v 0>@[defeq:@]@,@[<hv 2>expected:@ %a@]@,@[<hv 2>actual:@ %a@]@]"
       Expr.pp lhs Expr.pp rhs
+
+  let pp_failed_inferring fpf expr =
+    CCFormat.fprintf fpf "@[<v 0>failed inferring:@, @[<hov 2> %a@]@]" Expr.pp
+      expr
 end
 
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
@@ -105,7 +105,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
          (known_type |> Decl.get_type)
          known_type_uparams uparams);
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
-  | _ -> Logger.err "failed inferring: %a" (TypeError expr) Expr.pp expr
+  | _ ->
+    Logger.err "@[<v 0>@[failed inferring:@,@[<hv 2> %a@]@]@]" (TypeError expr)
+      Expr.pp expr
 
 and infer_sort_of env (expr : Expr.t) =
   match whnf (infer env expr) with
@@ -175,8 +177,7 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
         false
-    with TypeError e ->
-      Logger.err "failed inferring: %a" (TypeError e) Expr.pp e
+    with TypeError e -> Logger.err "%a" (TypeError e) Pp.pp_failed_inferring e
   in
 
   Logger.debug "(no_dup_uparams,no_free_vars,type_is_sort) = (%s,%s,%s)"
