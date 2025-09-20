@@ -10,8 +10,8 @@ end)
 
 module Pp = struct
   let pp_check fpf (e, ty) =
-    let pp_value fpf e = Format.fprintf fpf "@[<hv 2>value:@ %a@]" Expr.pp e in
-    let pp_type fpf ty = Format.fprintf fpf "@[<hv 2>type :@ %a@]" Expr.pp ty in
+    let pp_value fpf e = Format.fprintf fpf "value:@ %a" Expr.pp e in
+    let pp_type fpf ty = Format.fprintf fpf "type:@ %a" Expr.pp ty in
 
     Format.fprintf fpf "@[<v 0>@[check:@]@,@[<hv 2>%a@]@,@[<hv 2>%a@]@]"
       pp_value e pp_type ty
