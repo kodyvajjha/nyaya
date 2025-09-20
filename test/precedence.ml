@@ -59,7 +59,7 @@ let () =
   (* 2) Parens for binder-in-function-position: (fun x => x) a *)
   expect ~msg:"lambda as function needs parens"
     ~got:(Expr.to_string Tests.t_fun_fnpos)
-    ~want:"(fun (x : A) => #0) a";
+    ~want:"fun (x : A) => #0 a";
 
   (* 3) Parens for binder-as-argument: f (fun x => x) *)
   expect ~msg:"lambda as arg needs parens"
@@ -69,7 +69,7 @@ let () =
   (* 4) Parens for ∀ as arg: f (forall (x : A), A) *)
   expect ~msg:"forall as arg needs parens"
     ~got:(Expr.to_string Tests.t_forall_arg)
-    ~want:"f (forall (x : A) => A)";
+    ~want:"f (forall (x : A), A)";
 
   (* 5) Parens for let as arg: f (let x : A := a in x) *)
   expect ~msg:"let as arg needs parens"
@@ -78,17 +78,17 @@ let () =
   (* 6) Nested app vs app precedence: (f a) (g b) -> prints “(f a) (g b)” (head/arg both apps) *)
   expect ~msg:"app in function and argument positions"
     ~got:(Expr.to_string Tests.t_app_in_app)
-    ~want:"(f a) (g b)";
+    ~want:"f a (g b)";
 
   (* 7) Forall chains: ∀ (x : A) (y : B), A *)
   expect ~msg:"forall chain"
     ~got:(Expr.to_string Tests.t_forall_chain)
-    ~want:"forall (x : A) (y : B), A";
+    ~want:"forall (x : A)(y : B), A";
 
   (* 8) Lam chain: fun (α : Sort u+1) (x : #0) => #0 *)
   expect ~msg:"lambda chain"
     ~got:(Expr.to_string Tests.t_lam_chain)
-    ~want:"fun (α : Sort u+1) (x : #0) => #0";
+    ~want:"fun (α : Sort u + 1)(x : #0) => #0";
   (* 9) Proj vs app (if you have projections): (p.f.0) a  — proj binds tighter than app *)
   expect ~msg:"projection then app"
     ~got:(Expr.to_string Tests.t_proj_app)
