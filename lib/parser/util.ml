@@ -96,6 +96,9 @@ struct
       ~f:(fun str ->
         Logs.debug (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
+
+  let debugf pp x =
+    Logs.debug (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
 end
 
 let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =

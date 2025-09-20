@@ -8,6 +8,24 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
+module Pp = struct
+  let pp_check fpf (e, ty) =
+    let pp_value fpf e = Format.fprintf fpf "@[<hv 2>value:@ %a@]" Expr.pp e in
+    let pp_type fpf ty = Format.fprintf fpf "@[<hv 2>type :@ %a@]" Expr.pp ty in
+
+    Format.fprintf fpf "@[<v 0>@[check:@]@,@[<hv 2>%a@]@,@[<hv 2>%a@]@]"
+      pp_value e pp_type ty
+
+  let pp_defeq fpf (lhs, rhs) =
+    (* match mode with
+       | `Inline ->
+         Format.fprintf fpf "@[<h>defeq: %a == %a@]" Expr.pp lhs Expr.pp rhs
+       | `Block -> *)
+    CCFormat.fprintf fpf
+      "@[<v 0>@[defeq:@]@,@[<hv 2>expected:@ %a@]@,@[<hv 2>actual:@ %a@]@]"
+      Expr.pp lhs Expr.pp rhs
+end
+
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
@@ -102,7 +120,7 @@ and whnf (expr : Expr.t) : Expr.t =
   | _ -> Logger.err "failed reducing: %a" (TypeError expr) Expr.pp expr
 
 and isDefEq e1 e2 =
-  Logger.debug "checking def eq : %a ===?=== %a" Expr.pp e1 Expr.pp e2;
+  Logger.debugf Pp.pp_defeq (e1, e2);
   match e1, e2 with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
@@ -129,8 +147,9 @@ and isDefEq e1 e2 =
 let check (env : Env.t) (decl : Decl.t) : bool =
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
-    Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
-      Expr.pp value Expr.pp info.ty;
+    (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
+       Expr.pp value Expr.pp info.ty; *)
+    Logger.debugf Pp.pp_check (value, info.ty);
     isDefEq (infer env value) info.ty
   | Axiom _ -> true
   | _ ->

@@ -178,7 +178,7 @@ module Pp = struct
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
       in
-      wrap Prec.Arrow prec fpf "@[<2>fun @[<hov 2>%a@] =>@ %a@]"
+      wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>fun @[%a@] => %a@]@]"
         Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
         binders (pp prec) final
     | Forall _ as f ->
@@ -187,8 +187,8 @@ module Pp = struct
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
       in
-      wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@],@]@,@[<hv 2>%a@]@]"
-        Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf "@,") pp_binder)
+      wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@], %a@]@]"
+        Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
         binders (pp prec) final
     | Let { name; btype; value; body } ->
       wrap Prec.Let prec fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name
