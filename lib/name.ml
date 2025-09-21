@@ -22,15 +22,32 @@ let is_anon t =
   | Anon -> true
   | _ -> false
 
+let rec has_seg seg = function
+  | Anon -> false
+  | Str (n, s) -> s = seg || has_seg seg n
+  | Num (n, _) -> has_seg seg n
+
+let rec ends_with_hyg = function
+  | Str (_, "_hyg") -> true
+  | Num (n, _) -> ends_with_hyg n (* allow trailing .<num> *)
+  | Str (n, _) -> ends_with_hyg n
+  | Anon -> false
+
+let is_hyg_name n = has_seg "_@" n && ends_with_hyg n
+
 let rec pp fpf name =
-  match name with
-  | Anon -> Fmt.fprintf fpf ""
-  | Str (n1, str) ->
-    if is_anon n1 then
-      Fmt.fprintf fpf "%s" str
-    else
-      Fmt.fprintf fpf "%a.%s" pp n1 str
-  | Num (n1, id) -> Fmt.fprintf fpf "%a.%d" pp n1 id
+  if is_hyg_name name then
+    Fmt.string fpf "_"
+  else (
+    match name with
+    | Anon -> Fmt.fprintf fpf ""
+    | Str (n1, str) ->
+      if is_anon n1 then
+        Fmt.fprintf fpf "%s" str
+      else
+        Fmt.fprintf fpf "%a.%s" pp n1 str
+    | Num (n1, id) -> Fmt.fprintf fpf "%a.%d" pp n1 id
+  )
 
 (** Create a name table resolving names by mapping Ast name ids to typed name constructors. *)
 let table (ast : Ast.t) : (Ast.nidx, t) Hashtbl.t =
