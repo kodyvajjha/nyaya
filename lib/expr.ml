@@ -268,8 +268,8 @@ let instantiate ~(free_var : t) ~(expr : t) =
   Logger.debugf
     (fun fpf (e1, e2) ->
       CCFormat.fprintf fpf
-        "@[<v 0>@{<yellow>subst:@}@,@[<hov 2>%a@]@,in@,@[<hov 2>%a@]@]" pp e1 pp
-        e2)
+        "@[<v 0>@{<yellow>instantiate:@}@,@[<hov 2>%a@]@,in@,@[<hov 2>%a@]@]" pp
+        e1 pp e2)
     (free_var, expr);
   let foo = expr in
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
@@ -333,8 +333,7 @@ let instantiate ~(free_var : t) ~(expr : t) =
     )
   in
   if not (is_free_var free_var) then
-    Logger.err "Cannot instantiate as it is not a free variable! : %a"
-      InstantiateError pp free_var
+    free_var
   else
     instantiate_aux free_var expr 0
 
