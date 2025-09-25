@@ -11,7 +11,7 @@ end)
 module Pp = struct
   let pp_check fpf (e, ty) =
     let pp_value fpf e = CCFormat.fprintf fpf "value:@ %a" Expr.pp e in
-    let pp_type fpf ty = CCFormat.fprintf fpf "type:@ %a" Expr.pp ty in
+    let pp_type fpf ty = CCFormat.fprintf fpf "type :@ %a" Expr.pp ty in
 
     CCFormat.fprintf fpf "@[<v 0>@[check:@]@,@[<hv 2>%a@]@,@[<hv 2>%a@]@]"
       pp_value e pp_type ty
@@ -21,12 +21,16 @@ module Pp = struct
       "@[<v 0>@[defeq:@]@,@[<hv 2>expected:@ %a@]@,@[<hv 2>actual:@ %a@]@]"
       Expr.pp lhs Expr.pp rhs
 
+  let pp_inferring fpf expr =
+    CCFormat.fprintf fpf "@[<v 0>inferring:@, @[<hov 2> %a@]@]" Expr.pp expr
+
   let pp_failed_inferring fpf expr =
     CCFormat.fprintf fpf "@[<v 0>failed inferring:@, @[<hov 2> %a@]@]" Expr.pp
       expr
 end
 
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
+  Logger.debugf Pp.pp_inferring expr;
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -34,6 +38,12 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
        infer FVar id binder:
        binder.type
     *)
+    Logger.debugf
+      (fun fpf e ->
+        CCFormat.fprintf fpf
+          "@[@[%a@]@, is a free var of known type@, @[<hov 2> %a@]@]" Name.pp
+          name Expr.pp e)
+      expr;
     expr
   | Expr.Lam { name; btype; binfo; body } ->
     (*
@@ -45,6 +55,10 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     (match infer env btype with
     | Expr.Sort _ ->
+      Logger.debugf
+        (fun fpf e ->
+          CCFormat.fprintf fpf "@[binder type %a is a sort@]" Expr.pp e)
+        btype;
       let binder_free_var =
         Expr.FreeVar
           {
@@ -54,6 +68,13 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
             fvarId = Nyaya_parser.Util.Uid.mk ();
           }
       in
+      Logger.debugf
+        (fun fpf (e1, e2) ->
+          CCFormat.fprintf fpf
+            "@[Created a free variable of binder type @[<hov 2> %a@] as @[<hov \
+             2>%a@]@]"
+            Expr.pp e1 Expr.pp e2)
+        (btype, binder_free_var);
       let body_type =
         infer env (Expr.instantiate ~free_var:binder_free_var ~expr:body)
       in
@@ -105,6 +126,21 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
          (known_type |> Decl.get_type)
          known_type_uparams uparams);
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
+  | Expr.App (f, arg) ->
+    (*
+    infer App(f, arg):
+      match (whnf $ infer f) with
+      | Pi binder body => 
+        assert! defEq(binder.type, infer arg)
+        instantiate(body, arg)
+      | _ => error
+    *)
+    (match whnf (infer env f) with
+    | Expr.Forall { btype; body; _ } ->
+      Logger.debugf Pp.pp_defeq (btype, infer env arg);
+      assert (isDefEq btype (infer env arg));
+      Expr.instantiate ~free_var:body ~expr:btype
+    | _ -> Logger.err "Failed infer at app" (TypeError f))
   | _ ->
     Logger.err "@[<v 0>@[failed inferring:@,@[<hv 2> %a@]@]@]" (TypeError expr)
       Expr.pp expr
@@ -119,7 +155,10 @@ and infer_sort_of env (expr : Expr.t) =
 and whnf (expr : Expr.t) : Expr.t =
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
-  | _ -> Logger.err "failed reducing: %a" (TypeError expr) Expr.pp expr
+  | Expr.App (f, arg) as e -> Expr.Reduce.beta e
+  | e ->
+    Logger.warn "not reducing: %a" Expr.pp expr;
+    e
 
 and isDefEq e1 e2 =
   Logger.debugf Pp.pp_defeq (e1, e2);
@@ -143,6 +182,7 @@ and isDefEq e1 e2 =
         (Expr.instantiate ~free_var ~expr:b)
     ) else
       false
+  | Expr.App (f, a), Expr.App (g, b) -> isDefEq f g && isDefEq a b
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
@@ -206,6 +246,7 @@ let typecheck (env : Env.t) =
   Iter.iter2
     (fun n d ->
       try
+        Logger.debug "Typechecking %a" Decl.pp d;
         if check env d then
           success := !success + 1
         else

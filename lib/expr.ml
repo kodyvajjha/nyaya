@@ -88,6 +88,31 @@ let (foo : Bar) := 0; foo
   | Literal of literal
 [@@deriving show]
 
+(** Collect a chain of [App(App(App(f, x_0), x_1) ... x_N)] as [f,[x_0;x_1;x_2;...;x_N]]*)
+let get_apps e =
+  let rec aux head running =
+    match head with
+    | App (f, a) -> aux f (running @ [ a ])
+    | _ -> head, CCList.rev running
+  in
+  aux e []
+
+let gather_lams e =
+  let rec aux running final =
+    match final with
+    | Lam { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+    | _ -> running, final
+  in
+  aux [] e
+
+let gather_foralls f =
+  let rec aux running final =
+    match final with
+    | Forall { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+    | _ -> running, final
+  in
+  aux [] f
+
 module Pp = struct
   module Prec = struct
     type t =
@@ -128,33 +153,13 @@ module Pp = struct
     ) else
       Format.kfprintf (fun _ -> ()) out fmt
 
-  let get_apps e =
-    let rec aux head running =
-      match head with
-      | App (f, a) -> aux f (running @ [ a ])
-      | _ -> head, CCList.rev running
-    in
-    aux e []
-
-  let gather_lams e =
-    let rec aux running final =
-      match final with
-      | Lam { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
-      | _ -> running, final
-    in
-    aux [] e
-
-  let gather_foralls f =
-    let rec aux running final =
-      match final with
-      | Forall { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
-      | _ -> running, final
-    in
-    aux [] f
-
   let rec pp prec fpf expr =
     match expr with
-    | Sort u -> wrap Prec.Sort prec fpf "Sort %a" Level.pp u
+    | Sort u ->
+      if Level.is_zero u then
+        wrap Prec.Sort prec fpf "Prop"
+      else
+        wrap Prec.Sort prec fpf "Sort %a" Level.pp u
     | BoundVar i ->
       (* TODO: maintain a stack of bound var names and print those according to de Bruijn pointer instead of plain indices.*)
       Fmt.fprintf fpf "#%d" i
@@ -209,6 +214,7 @@ let sort l = Sort l
 
 let lambda name btype body = Lam { name; btype; binfo = Default; body }
 
+(** Transform [(f, [x0; x1; ...; xN])] into [App(App(...App(f, x0), x1), ... , xN)]. Note: this is the inverse of [get_apps] above.*)
 let mk_app f args = CCList.fold_left (fun acc a -> App (acc, a)) f args
 
 let pi x ty body = Forall { name = x; btype = ty; binfo = Default; body }
@@ -244,46 +250,87 @@ let get_fvar_id expr =
   | _ ->
     Logger.err "Expr %a is not a free variable" (Failure "get_fvar_id") pp expr
 
-(** Substitute the free var at the expr (has to be a bound variable). *)
+let rec num_loose_bvars expr =
+  match expr with
+  | Sort _ | Const _ | FreeVar _ | Literal _ -> 0
+  | BoundVar i -> i + 1
+  | App (f, a) -> Int.max (num_loose_bvars f) (num_loose_bvars a)
+  | Forall { btype; body; _ } | Lam { btype; body; _ } ->
+    Int.max (num_loose_bvars btype) (num_loose_bvars body - 1)
+  | Let { btype; value; body; _ } ->
+    Int.max
+      (Int.max (num_loose_bvars btype) (num_loose_bvars value))
+      (num_loose_bvars body - 1)
+  | Proj { expr; _ } -> num_loose_bvars expr
+
+(** Substitute the [free_var] at the [expr] (has to be a bound variable). *)
 let instantiate ~(free_var : t) ~(expr : t) =
+  Logger.debugf
+    (fun fpf (e1, e2) ->
+      CCFormat.fprintf fpf
+        "@[<v 0>@{<yellow>subst:@}@,@[<hov 2>%a@]@,in@,@[<hov 2>%a@]@]" pp e1 pp
+        e2)
+    (free_var, expr);
+  let foo = expr in
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
-    match expr with
-    | BoundVar i ->
-      if i = offset then
-        free_var
-      else if i > offset then
-        BoundVar (i - 1)
-      else
-        BoundVar i
-    | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
-    | App (f, a) ->
-      App (instantiate_aux free_var f offset, instantiate_aux free_var a offset)
-    | Lam { name; btype; binfo; body } ->
-      Lam
-        {
-          name;
-          btype = instantiate_aux free_var btype offset;
-          binfo;
-          body = instantiate_aux free_var body (offset + 1);
-        }
-    | Forall { name; btype; binfo; body } ->
-      Forall
-        {
-          name;
-          btype = instantiate_aux free_var btype offset;
-          binfo;
-          body = instantiate_aux free_var body (offset + 1);
-        }
-    | Let { name; btype; value; body } ->
-      Let
-        {
-          name;
-          btype = instantiate_aux btype free_var offset;
-          value = instantiate_aux value free_var offset;
-          body = instantiate_aux body free_var (offset + 1);
-        }
-    | Proj { name; nat; expr } ->
-      Proj { name; nat; expr = instantiate_aux free_var expr offset }
+    if num_loose_bvars expr <= offset then
+      expr
+    else (
+      (* Logger.debugf
+         (fun fpf (e1, e2) ->
+           CCFormat.fprintf fpf
+             "@[<v 0>@{<blue>instantiate offset %d:@}@,\
+              @[<hov 2>%a@] @,\
+              in@,\
+              @[<hov 2>%a@]@]" offset pp e1 pp e2)
+         (free_var, expr); *)
+      match expr with
+      | BoundVar i ->
+        if offset <= i then (
+          Logger.debugf
+            (fun fpf (e1, e2) ->
+              CCFormat.fprintf fpf
+                "@[<v 0>@{<green>instantiated with offset %d:@}@,\
+                 @[<hov 2>%a@]@,\
+                 for @,\
+                 @[<hov 2>%a@] @]@,\
+                 in @,\
+                 @[<hov 2>%a@]@]" offset pp e1 pp e2 pp foo)
+            (free_var, BoundVar i);
+          free_var
+        ) else
+          expr
+      | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
+      | App (f, a) ->
+        App
+          (instantiate_aux free_var f offset, instantiate_aux free_var a offset)
+      | Lam { name; btype; binfo; body } ->
+        Lam
+          {
+            name;
+            btype = instantiate_aux free_var btype offset;
+            binfo;
+            body = instantiate_aux free_var body (offset + 1);
+          }
+      | Forall { name; btype; binfo; body } ->
+        Forall
+          {
+            name;
+            btype = instantiate_aux free_var btype offset;
+            binfo;
+            body = instantiate_aux free_var body (offset + 1);
+          }
+      | Let { name; btype; value; body } ->
+        Let
+          {
+            name;
+            btype = instantiate_aux btype free_var offset;
+            value = instantiate_aux value free_var offset;
+            body = instantiate_aux body free_var (offset + 1);
+          }
+      | Proj { name; nat; expr } ->
+        Proj { name; nat; expr = instantiate_aux free_var expr offset }
+    )
   in
   if not (is_free_var free_var) then
     Logger.err "Cannot instantiate as it is not a free variable! : %a"
@@ -292,7 +339,7 @@ let instantiate ~(free_var : t) ~(expr : t) =
     instantiate_aux free_var expr 0
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
-   suitable to be wrapped by a binder inserted at that same depth [k]. Note: This will need to be optimized later. *)
+   suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later. *)
 let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   match e with
   | BoundVar i ->
@@ -335,6 +382,19 @@ let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
       }
   | Proj { name; nat; expr = e1 } ->
     Proj { name; nat; expr = abstract_fvar ~target_id ~k e1 }
+
+module Reduce = struct
+  let beta e =
+    Logger.debug "@[Beta reducing @[<hov 2> %a@]]" pp e;
+    let rec aux f args =
+      match f, args with
+      | Lam { body; _ }, v :: vs -> aux (instantiate ~free_var:body ~expr:v) vs
+      | _, _ -> mk_app f args
+    in
+
+    let f, args = get_apps e in
+    aux f args
+end
 
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
   match expr with

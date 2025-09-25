@@ -98,6 +98,7 @@ struct
       fmt
 
   let debugf pp x =
+    CCFormat.set_color_default true;
     Logs.debug (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
 end
 
