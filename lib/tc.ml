@@ -36,6 +36,7 @@ module Pp = struct
       expr
 end
 
+(** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   Logger.debugf Pp.pp_inferring expr;
   match (expr : Expr.t) with
@@ -162,6 +163,12 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
           Expr.pp (infer env arg);
       Expr.instantiate ~free_var:body ~expr:btype
     | _ -> Logger.err "Failed infer at app" (TypeError f))
+  | Let { name; btype; value; body } as e ->
+    Logger.debug "Inferring Let : %a" Expr.pp e;
+    if not (isDefEq btype (infer env value)) then
+      Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed") Expr.pp btype
+        Expr.pp (infer env value);
+    infer env (Expr.instantiate ~free_var:value ~expr:body)
   | _ ->
     Logger.err "@[<v 0>@[failed inferring:@,@[<hv 2> %a@]@]@]" (TypeError expr)
       Expr.pp expr
@@ -181,6 +188,7 @@ and whnf (expr : Expr.t) : Expr.t =
     Logger.warn "not reducing: %a" Expr.pp expr;
     e
 
+(* TODO: optimize def eq checking by implementing union-find. *)
 and isDefEq e1 e2 =
   Logger.debugf Pp.pp_defeq (e1, e2);
   match e1, e2 with

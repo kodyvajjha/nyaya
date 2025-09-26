@@ -263,7 +263,7 @@ let rec num_loose_bvars expr =
       (num_loose_bvars body - 1)
   | Proj { expr; _ } -> num_loose_bvars expr
 
-(** Substitute the [free_var] at the [expr] (has to be a bound variable). *)
+(** Substitute the [free_var] at the [expr] (has to be a bound variable). TODO: this needs to be optimized by counting the number of loose bound variables in the expr.  *)
 let instantiate ~(free_var : t) ~(expr : t) =
   Logger.debugf
     (fun fpf (e1, e2) ->
@@ -324,9 +324,9 @@ let instantiate ~(free_var : t) ~(expr : t) =
         Let
           {
             name;
-            btype = instantiate_aux btype free_var offset;
-            value = instantiate_aux value free_var offset;
-            body = instantiate_aux body free_var (offset + 1);
+            btype = instantiate_aux free_var btype offset;
+            value = instantiate_aux free_var value offset;
+            body = instantiate_aux free_var body (offset + 1);
           }
       | Proj { name; nat; expr } ->
         Proj { name; nat; expr = instantiate_aux free_var expr offset }
@@ -338,7 +338,7 @@ let instantiate ~(free_var : t) ~(expr : t) =
     instantiate_aux free_var expr 0
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
-   suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later. *)
+   suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)
 let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   match e with
   | BoundVar i ->
