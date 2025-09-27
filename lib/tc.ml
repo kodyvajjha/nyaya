@@ -155,35 +155,61 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
         instantiate(body, arg)
       | _ => error
     *)
-    (match whnf (infer env f) with
+    (match infer env f with
     | Expr.Forall { btype; body; _ } ->
       Logger.debugf Pp.pp_defeq (btype, infer env arg);
       if not (isDefEq btype (infer env arg)) then
-        Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed") Expr.pp btype
-          Expr.pp (infer env arg);
-      Expr.instantiate ~free_var:body ~expr:btype
+        Logger.err
+          "@[Defeq check failed in expr = %a between @,\
+           btype = %a and@,\
+          \ arg = %a@]" (Failure "failed 1") Expr.pp e Expr.pp btype Expr.pp
+          (infer env arg);
+      Expr.instantiate ~free_var:arg ~expr:body
     | _ -> Logger.err "Failed infer at app" (TypeError f))
   | Let { name; btype; value; body } as e ->
-    Logger.debug "Inferring Let : %a" Expr.pp e;
-    if not (isDefEq btype (infer env value)) then
-      Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed") Expr.pp btype
-        Expr.pp (infer env value);
-    infer env (Expr.instantiate ~free_var:value ~expr:body)
+    (*
+       infer Let binder val body:
+       assert! inferSortOf binder
+       assert! defEq(infer(val), binder.type)
+       infer (instantiate body val)
+    *)
+    (match infer env btype with
+    | Sort _ ->
+      Logger.debug "Inferring Let : %a" Expr.pp e;
+      if not (isDefEq btype (infer env value)) then
+        Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed 2") Expr.pp
+          btype Expr.pp (infer env value);
+      infer env (Expr.instantiate ~free_var:value ~expr:body)
+    | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp e)
   | _ ->
-    Logger.err "@[<v 0>@[failed inferring:@,@[<hv 2> %a@]@]@]" (TypeError expr)
+    Logger.err "@[<v 0>@[failed inferring :@,@[<hv 2> %a@]@]@]" (TypeError expr)
       Expr.pp expr
 
 and infer_sort_of env (expr : Expr.t) =
-  match whnf (infer env expr) with
+  match whnf env (infer env expr) with
   | Sort lvl -> lvl
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort" (TypeError expr) Expr.pp
       expr
 
-and whnf (expr : Expr.t) : Expr.t =
+and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
-  | Expr.App (f, arg) as e -> Expr.Reduce.beta e
+  | Expr.App (f, arg) as e -> (* Beta reduction*) Expr.Reduce.beta e
+  | Expr.Let { name; btype; value; body } ->
+    (* Zeta reduction*)
+    Expr.instantiate ~free_var:value ~expr:body
+  | Expr.Const { name; uparams } ->
+    (* Delta reduction *)
+    let decl = Hashtbl.find env name in
+    let decl_expr = decl |> Decl.get_type in
+    let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
+    Logger.info "known_type : %a" Decl.pp decl;
+    Logger.info "known_type_uparams : @[<v 2>%a@]" (CCList.pp Level.pp)
+      decl_uparams;
+    Logger.info "uparams : @[%a@]" (CCList.pp Level.pp) uparams;
+    (* Logger.debug "Result : %a" Expr.pp; *)
+    Expr.subst_levels decl_expr decl_uparams uparams
   | e ->
     Logger.warn "not reducing: %a" Expr.pp expr;
     e
@@ -245,14 +271,16 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_dup_uparams = dup_exist info.uparams |> not in
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
-    Logger.info "Checking if type is sort";
+    Logger.info "Checking if type %a is sort" Name.pp info.name;
     try
       match infer env info.ty with
       | Expr.Sort _ -> true
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
         false
-    with TypeError e -> Logger.err "%a" (TypeError e) Pp.pp_failed_inferring e
+    with TypeError e ->
+      Logger.err "While inferring %a could not infer type: %a" (TypeError e)
+        Name.pp info.name Pp.pp_failed_inferring e
   in
 
   Logger.debug "(no_dup_uparams,no_free_vars,type_is_sort) = (%s,%s,%s)"
@@ -283,7 +311,7 @@ let typecheck (env : Env.t) =
   Iter.iter2
     (fun n d ->
       try
-        Logger.debug "Typechecking %a" Decl.pp d;
+        Logger.info "Typechecking %a" Decl.pp d;
         if check env d then
           success := !success + 1
         else

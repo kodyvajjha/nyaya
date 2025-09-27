@@ -271,34 +271,23 @@ let instantiate ~(free_var : t) ~(expr : t) =
         "@[<v 0>@{<yellow>instantiate:@}@,@[<hov 2>%a@]@,in@,@[<hov 2>%a@]@]" pp
         e1 pp e2)
     (free_var, expr);
-  let foo = expr in
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
     if num_loose_bvars expr <= offset then
       expr
     else (
-      (* Logger.debugf
-         (fun fpf (e1, e2) ->
-           CCFormat.fprintf fpf
-             "@[<v 0>@{<blue>instantiate offset %d:@}@,\
-              @[<hov 2>%a@] @,\
-              in@,\
-              @[<hov 2>%a@]@]" offset pp e1 pp e2)
-         (free_var, expr); *)
+      Logger.debugf
+        (fun fpf (e1, e2) ->
+          CCFormat.fprintf fpf
+            "@[<v 0>@{<blue>instantiate offset %d:@}@,\
+             @[<hov 2>%a@] @,\
+             in@,\
+             @[<hov 2>%a@]@]" offset pp e1 pp e2)
+        (free_var, expr);
       match expr with
       | BoundVar i ->
-        if offset <= i then (
-          Logger.debugf
-            (fun fpf (e1, e2) ->
-              CCFormat.fprintf fpf
-                "@[<v 0>@{<green>instantiated with offset %d:@}@,\
-                 @[<hov 2>%a@]@,\
-                 for @,\
-                 @[<hov 2>%a@] @]@,\
-                 in @,\
-                 @[<hov 2>%a@]@]" offset pp e1 pp e2 pp foo)
-            (free_var, BoundVar i);
+        if offset <= i then
           free_var
-        ) else
+        else
           expr
       | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
       | App (f, a) ->
@@ -332,10 +321,7 @@ let instantiate ~(free_var : t) ~(expr : t) =
         Proj { name; nat; expr = instantiate_aux free_var expr offset }
     )
   in
-  if not (is_free_var free_var) then
-    free_var
-  else
-    instantiate_aux free_var expr 0
+  instantiate_aux free_var expr 0
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
    suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)
