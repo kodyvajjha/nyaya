@@ -1,4 +1,4 @@
-(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation. *)
+(* TODO: Expressions need to store some data inline or cache it somewhere to prevent prohibitively expensive recomputation. Additionally, we would like to limit retention overhead by using the Ephemeron module to garbage collect away unnecessary exprs after they've been used. *)
 
 open Nyaya_parser
 
