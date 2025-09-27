@@ -202,8 +202,8 @@ module Pp = struct
       wrap Prec.Proj prec fpf "%a.%a.%d" (pp Prec.Proj) expr Name.pp name nat
     | Literal l ->
       (match l with
-      | NatLit i -> Fmt.fprintf fpf "%a" Z.pp_print i
-      | StrLit s -> Fmt.fprintf fpf "%S" s)
+      | NatLit i -> Fmt.fprintf fpf "nat literal %a" Z.pp_print i
+      | StrLit s -> Fmt.fprintf fpf "str literal %S" s)
 end
 
 let pp fpf e = Pp.pp Pp.Prec.Bot fpf e
