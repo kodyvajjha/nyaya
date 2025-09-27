@@ -1,0 +1,9 @@
+prelude
+
+universe u
+
+def foo : ∀ {α : Type u}, α → α := fun x => x
+
+def faa := @foo Prop
+
+def fee := @foo (Sort 10)
