@@ -129,7 +129,7 @@ let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
               !ctor_names
               @ [
                   getter name_table
-                    (get_arr (num_inductives + 8 + i))
+                    (get_arr (num_inductives + 9 + i))
                     "name table getting inductive names";
                 ]
           done;
