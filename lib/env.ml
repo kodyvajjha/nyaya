@@ -134,16 +134,21 @@ let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
                 ]
           done;
           let uparams =
-            let remaining =
-              CCList.map
-                (fun x -> arr.(x))
-                (CCArray.(num_inductives + num_constructors + 8 -- (total - 1))
-                |> CCArray.to_list)
-            in
-            (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
-            CCList.(
-              let+ id = remaining in
-              getter name_table id "name table in inductives")
+            if num_inductives + num_constructors + 9 = total then
+              []
+            else (
+              let remaining =
+                CCList.map
+                  (fun x -> arr.(x))
+                  (CCArray.(
+                     num_inductives + num_constructors + 9 -- (total - 1))
+                  |> CCArray.to_list)
+              in
+              (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
+              CCList.(
+                let+ id = remaining in
+                getter name_table id "name table in inductives")
+            )
           in
           Inductive
             {
