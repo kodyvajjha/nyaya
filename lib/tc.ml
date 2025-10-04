@@ -144,6 +144,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       (Expr.subst_levels
          (known_type |> Decl.get_type)
          known_type_uparams uparams);
+    Logger.debug "Substituting levels %a for %a in %a" (CCList.pp Level.pp)
+      known_type_uparams (CCList.pp Level.pp) uparams Expr.pp
+      (known_type |> Decl.get_type);
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | Expr.App (f, arg) as e ->
     Logger.debug "Inferring App : %a" Expr.pp e;
