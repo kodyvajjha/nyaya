@@ -100,6 +100,10 @@ struct
   let debugf pp x =
     CCFormat.set_color_default true;
     Logs.debug (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
+
+  let infof pp x =
+    CCFormat.set_color_default true;
+    Logs.info (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
 end
 
 let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =
