@@ -158,7 +158,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
         instantiate(body, arg)
       | _ => error
     *)
-    (match infer env f with
+    (match whnf env (infer env f) with
     | Expr.Forall { btype; body; _ } ->
       Logger.debugf Pp.pp_defeq (btype, infer env arg);
       if not (isDefEq btype (infer env arg)) then
