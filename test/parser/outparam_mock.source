@@ -1,0 +1,14 @@
+prelude
+
+universe u
+
+def myoutParam (α : Sort u) : Sort u := α
+
+def foo1 {α : Sort u} {γ : Sort u} {β : (myoutParam (Sort u))}
+    (x : α) (y : β) (f : α → β → γ) : γ :=
+  f x y
+
+-- make α, γ, β type params; β is wrapped in outParam
+def foo2 {α : Sort u} {γ : Sort u} {β : myoutParam (myoutParam (Sort u))}
+    (x : α) (y : β) (f : α → β → γ) : γ :=
+  f x y
