@@ -117,6 +117,13 @@ let get_type (decl : t) =
   let info = get_decl_info decl in
   info.ty
 
+let get_value (decl : t) =
+  match decl with
+  | Def { value; _ } -> Some value
+  | Thm { value; _ } -> Some value
+  | Opaque { value; _ } -> Some value
+  | _ -> None
+
 let get_uparams (decl : t) =
   match decl with
   | Axiom info -> info.uparams
