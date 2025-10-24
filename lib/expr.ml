@@ -169,7 +169,7 @@ module Pp = struct
       if CCList.is_empty uparams then
         Fmt.fprintf fpf "%a" Name.pp name
       else
-        Fmt.fprintf fpf "%a.@[<h>{%a}@]" Name.pp name
+        Fmt.fprintf fpf "@[<h>%a.@[<h>{%a}@]@]" Name.pp name
           Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
           uparams
     | App _ as e ->
