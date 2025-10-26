@@ -25,11 +25,11 @@ module Pp = struct
 
   let pp_defeq fpf (lhs, rhs) =
     CCFormat.fprintf fpf
-      "@[<v 0>@[defeq:@]@,@[<hv 2>expected:@ %a@]@,@[<hv 2>actual:@ %a@]@]"
+      "@[<hov 0>@[defeq:@]@;@[<hv 2>expected:@; %a@]@;@[<hv 2>actual:@; %a@]@]"
       Expr.pp lhs Expr.pp rhs
 
   let pp_inferring fpf expr =
-    CCFormat.fprintf fpf "@[<v 0>inferring:@, @[<hov 2> %a@]@]" Expr.pp expr
+    CCFormat.fprintf fpf "@[<hov 0>Now inferring @[<hov 2>%a@]@]" Expr.pp expr
 
   let pp_failed_inferring fpf expr =
     CCFormat.fprintf fpf "@[<v 0>failed inferring:@, @[<hov 2> %a@]@]" Expr.pp
@@ -46,7 +46,6 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
        infer FVar id binder:
        binder.type
     *)
-    Logger.debug "Inferring FreeVar : %a" Name.pp name;
     Logger.debugf
       (fun fpf e ->
         CCFormat.fprintf fpf
@@ -62,8 +61,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
        let bodyType := infer $ instantiate(body, binderFVar)
        Pi binder (abstract bodyType binderFVar)
     *)
-    Logger.debug "Inferring Lam : %a" Name.pp name;
-    (match infer env btype with
+    (match whnf env (infer env btype) with
     | Expr.Sort _ ->
       Logger.debugf
         (fun fpf e ->
@@ -81,7 +79,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.debugf
         (fun fpf (e1, e2) ->
           CCFormat.fprintf fpf
-            "@[Created a free variable of binder type @[<hov 2> %a@] as @[<hov \
+            "@[<hov 0>Created a free variable of type @[<hov 2>%a@] as @[<hov \
              2>%a@]@]"
             Expr.pp e1 Expr.pp e2)
         (btype, binder_free_var);
@@ -98,15 +96,15 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
         }
     | _ ->
       Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp expr)
-  | Expr.Forall { name; btype; binfo; body } ->
+  | Expr.Forall { name; btype; binfo; body } as _e ->
     (*
       infer Pi binder body:
       let l := inferSortOf binder
       let r := inferSortOf $ instantiate body (fvar(binder))
       imax(l, r)
     *)
-    Logger.debug "Inferring forall : %a" Name.pp name;
     let l = infer_sort_of env btype in
+    Logger.debug "@[Level of %a is %a@]" Expr.pp btype Level.pp l;
     let free_var =
       Expr.FreeVar
         {
@@ -119,7 +117,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     Logger.debugf
       (fun fpf (e1, e2) ->
         CCFormat.fprintf fpf
-          "@[Created a free variable of binder type @[<hov 2> %a@] as @[<hov \
+          "@[<hov 0>Created a free variable of type @[<hov 2>%a@] as @[<hov \
            2>%a@]@]"
           Expr.pp e1 Expr.pp e2)
       (btype, free_var);
@@ -131,25 +129,20 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
        let knownType := environment[name].type
        substituteLevels (e := knownType) (ks := knownType.uparams) (vs := levels)
     *)
-    Logger.debug "Inferring Const : %a" Name.pp name;
+    Logger.debugf
+      (fun fpf t ->
+        CCFormat.fprintf fpf "@[Now inferring constant of name %a@]" Name.pp t)
+      name;
     let known_type : Decl.t = Hashtbl.find env name in
     let known_type_uparams =
       CCList.map Level.param (Decl.get_uparams known_type)
     in
-    Logger.debug "known_type : %a" Decl.pp known_type;
-    Logger.debug "known_type_uparams : @[<v 2>%a@]" (CCList.pp Level.pp)
-      known_type_uparams;
-    Logger.debug "uparams : @[%a@]" (CCList.pp Level.pp) uparams;
-    Logger.debug "Result : %a" Expr.pp
-      (Expr.subst_levels
-         (known_type |> Decl.get_type)
-         known_type_uparams uparams);
-    Logger.debug "Substituting levels %a for %a in %a" (CCList.pp Level.pp)
-      known_type_uparams (CCList.pp Level.pp) uparams Expr.pp
-      (known_type |> Decl.get_type);
-    Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
+    let res =
+      Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
+    in
+    Logger.debug "Inferred constant type : %a" Expr.pp res;
+    res
   | Expr.App (f, arg) as e ->
-    Logger.debug "Inferring App : %a" Expr.pp e;
     (*
     infer App(f, arg):
       match (whnf $ infer f) with
@@ -167,9 +160,12 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
            btype = %a and@,\
           \ arg = %a@]" (Failure "failed 1") Expr.pp e Expr.pp btype Expr.pp
           (infer env arg);
-      Expr.instantiate ~free_var:arg ~expr:body
+      let p = Expr.instantiate ~free_var:arg ~expr:body in
+      Logger.info "Inferred type of %a : %a" Expr.pp e Expr.pp p;
+      p
     | _ -> Logger.err "Failed infer at app" (TypeError f))
   | Let { name; btype; value; body } as e ->
+    Logger.debug "Inferring Let : %a" Expr.pp e;
     (*
        infer Let binder val body:
        assert! inferSortOf binder
@@ -184,6 +180,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
           btype Expr.pp (infer env value);
       infer env (Expr.instantiate ~free_var:value ~expr:body)
     | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp e)
+  | Proj _ -> failwith "PROJ encountered"
   | _ ->
     Logger.err "@[<v 0>@[failed inferring :@,@[<hv 2> %a@]@]@]" (TypeError expr)
       Expr.pp expr
@@ -193,12 +190,35 @@ and infer_sort_of env (expr : Expr.t) =
   | Sort lvl -> lvl
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort" (TypeError expr) Expr.pp
-      expr
+      (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
-  | Expr.App (f, arg) as e -> (* Beta reduction*) Expr.Reduce.beta e
+  | Expr.App (f, arg) ->
+    let f' =
+      (* One-step delta reduction. TODO: this is needs to be modified so that things in the arg position also get potentially delta reduced. *)
+      match f with
+      | Const { name; uparams } ->
+        let decl = Hashtbl.find env name in
+        let decl_expr =
+          decl |> Decl.get_value
+          |> CCOption.get_exn_or "whnf: failed extracting value"
+        in
+        let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
+        let ans = Expr.subst_levels decl_expr decl_uparams uparams in
+        Logger.debugf
+          (fun fpf (t1, t2) ->
+            CCFormat.fprintf fpf
+              "@[<v 0>After delta reduction @[<hov 2>%a@] becomes @[<hov \
+               2>%a@]@]"
+              Expr.pp t1 Expr.pp t2)
+          (f, ans);
+        ans
+      | _ -> f
+    in
+    (* Beta reduction*)
+    Expr.Reduce.beta (App (f', arg))
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~free_var:value ~expr:body
@@ -219,7 +239,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 
 (* TODO: optimize def eq checking by implementing union-find. *)
 and isDefEq e1 e2 =
-  Logger.debugf Pp.pp_defeq (e1, e2);
+  Logger.infof Pp.pp_defeq (e1, e2);
   match e1, e2 with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
@@ -254,7 +274,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Def { info; value; red_hint = _red_hint } ->
     (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
        Expr.pp value Expr.pp info.ty; *)
-    Logger.debugf Pp.pp_check (value, info.ty);
+    Logger.infof Pp.pp_check (value, info.ty);
     isDefEq (infer env value) info.ty
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
@@ -274,10 +294,12 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_dup_uparams = dup_exist info.uparams |> not in
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
-    Logger.info "Checking if type %a is sort" Name.pp info.name;
+    Logger.info "Checking if type %a is sort" Expr.pp info.ty;
     try
       match infer env info.ty with
-      | Expr.Sort _ -> true
+      | Expr.Sort _ ->
+        Logger.info "Type of %a is sort" Name.pp info.name;
+        true
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
         false

@@ -268,26 +268,26 @@ let instantiate ~(free_var : t) ~(expr : t) =
   Logger.debugf
     (fun fpf (e1, e2) ->
       CCFormat.fprintf fpf
-        "@[<v 0>@{<yellow>instantiate:@}@,@[<hov 2>%a@]@,in@,@[<hov 2>%a@]@]" pp
-        e1 pp e2)
+        "@[<v 0>@{<yellow>instantiate:@} @[<hov 2>%a@] in @[<hov 2>%a@]@]" pp e1
+        pp e2)
     (free_var, expr);
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
     if num_loose_bvars expr <= offset then
       expr
     else (
-      Logger.debugf
-        (fun fpf (e1, e2) ->
-          CCFormat.fprintf fpf
-            "@[<v 0>@{<blue>instantiate offset %d:@}@,\
-             @[<hov 2>%a@] @,\
-             in@,\
-             @[<hov 2>%a@]@]" offset pp e1 pp e2)
-        (free_var, expr);
       match expr with
       | BoundVar i ->
-        if offset <= i then
+        if offset <= i then (
+          Logger.debugf
+            (fun fpf (e1, e2) ->
+              CCFormat.fprintf fpf
+                "@[<v 0>@{<blue>At offset %d instantiated:@}@,\
+                 @[<hov 2>%a@] @,\
+                 in@,\
+                 @[<hov 2>%a@]@]" offset pp e1 pp e2)
+            (free_var, expr);
           free_var
-        else
+        ) else
           expr
       | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
       | App (f, a) ->
@@ -321,7 +321,13 @@ let instantiate ~(free_var : t) ~(expr : t) =
         Proj { name; nat; expr = instantiate_aux free_var expr offset }
     )
   in
-  instantiate_aux free_var expr 0
+  let inst = instantiate_aux free_var expr 0 in
+  Logger.debugf
+    (fun fpf t ->
+      CCFormat.fprintf fpf
+        "@[@{<Blue>Type after instantiation@}: @,@[<hov 2>%a@]@]" pp t)
+    inst;
+  inst
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
    suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)
@@ -376,9 +382,17 @@ module Reduce = struct
       | Lam { body; _ }, v :: vs -> aux (instantiate ~free_var:body ~expr:v) vs
       | _, _ -> mk_app f args
     in
-
     let f, args = get_apps e in
-    aux f args
+    let ans = aux f args in
+    Logger.debugf
+      (fun fpf (t1, t2) ->
+        CCFormat.fprintf fpf
+          "@[<hov 0>After beta reduction@;\
+           @[<hov 2>%a@]@;\
+           becomes@;\
+           @[<hov 2>%a@]@]" pp t1 pp t2)
+      (e, ans);
+    ans
 end
 
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
