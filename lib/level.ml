@@ -94,19 +94,15 @@ let rec subst ~(level : t) ~(ks : t list) ~(vs : t list) =
     let rec lookup ks vs =
       match ks, vs with
       | k :: ks', v :: vs' ->
-        if level = k then (
-          Logger.debug "Matched!!! level = %a; k = %a" pp level pp k;
+        if level = k then
           v
-        ) else
+        else
           lookup ks' vs'
       | _ -> level
     in
     lookup ks vs
 
-let subst_simp ~level ~ks ~vs =
-  Logger.debug "Substituting ks:%a for vs:%a in level:%a" (CCList.pp pp) ks
-    (CCList.pp pp) vs pp level;
-  subst ~level ~ks ~vs |> simplify
+let subst_simp ~level ~ks ~vs = subst ~level ~ks ~vs |> simplify
 
 (** Returns a list of [levels] with [vs] substituted for [ks]. *)
 let subst_levels ~(levels : t list) ~ks ~vs =
