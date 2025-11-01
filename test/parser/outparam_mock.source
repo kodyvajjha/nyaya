@@ -12,3 +12,5 @@ def foo1 {α : Sort u} {γ : Sort u} {β : (myoutParam (Sort u))}
 def foo2 {α : Sort u} {γ : Sort u} {β : myoutParam (myoutParam (Sort u))}
     (x : α) (y : β) (f : α → β → γ) : γ :=
   f x y
+
+def foo3 (f : forall (γ : myoutParam (Sort u)), γ → Sort u) (α : Sort u) (x : α):= f α x
