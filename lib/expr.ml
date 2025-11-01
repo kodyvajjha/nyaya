@@ -374,27 +374,6 @@ let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
   | Proj { name; nat; expr = e1 } ->
     Proj { name; nat; expr = abstract_fvar ~target_id ~k e1 }
 
-module Reduce = struct
-  let beta e =
-    Logger.debug "@[Beta reducing @[<hov 2> %a@]]" pp e;
-    let rec aux f args =
-      match f, args with
-      | Lam { body; _ }, v :: vs -> aux (instantiate ~free_var:body ~expr:v) vs
-      | _, _ -> mk_app f args
-    in
-    let f, args = get_apps e in
-    let ans = aux f args in
-    Logger.debugf
-      (fun fpf (t1, t2) ->
-        CCFormat.fprintf fpf
-          "@[<hov 0>After beta reduction@;\
-           @[<hov 2>%a@]@;\
-           becomes@;\
-           @[<hov 2>%a@]@]" pp t1 pp t2)
-      (e, ans);
-    ans
-end
-
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
   match expr with
   | BoundVar _ | Literal _ -> expr

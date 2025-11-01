@@ -36,6 +36,49 @@ module Pp = struct
       expr
 end
 
+module Reduce = struct
+  open Expr
+
+  let beta e =
+    Logger.debug "@[Beta reducing @[<hov 2> %a@]]" pp e;
+    let rec aux f args =
+      match f, args with
+      | Lam { body; _ }, v :: vs -> aux (instantiate ~free_var:body ~expr:v) vs
+      | _, _ -> mk_app f args
+    in
+    let f, args = get_apps e in
+    let ans = aux f args in
+    Logger.debugf
+      (fun fpf (t1, t2) ->
+        CCFormat.fprintf fpf
+          "@[<hov 0>After beta reduction@;\
+           @[<hov 2>%a@]@;\
+           becomes@;\
+           @[<hov 2>%a@]@]" pp t1 pp t2)
+      (e, ans);
+    ans
+
+  let delta_at_head env f =
+    (* One-step delta reduction of the head. *)
+    match f with
+    | Const { name; uparams } ->
+      let decl = Hashtbl.find env name in
+      let decl_expr =
+        decl |> Decl.get_value
+        |> CCOption.get_exn_or "whnf: failed extracting value"
+      in
+      let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
+      let ans = Expr.subst_levels decl_expr decl_uparams uparams in
+      Logger.debugf
+        (fun fpf (t1, t2) ->
+          CCFormat.fprintf fpf
+            "@[<v 0>After delta reduction @[<hov 2>%a@] becomes @[<hov 2>%a@]@]"
+            Expr.pp t1 Expr.pp t2)
+        (f, ans);
+      ans
+    | _ -> f
+end
+
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   Logger.debugf Pp.pp_inferring expr;
@@ -154,7 +197,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     (match whnf env (infer env f) with
     | Expr.Forall { btype; body; _ } ->
       Logger.debugf Pp.pp_defeq (btype, infer env arg);
-      if not (isDefEq btype (infer env arg)) then
+      if not (isDefEq env btype (infer env arg)) then
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
@@ -175,7 +218,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     (match infer env btype with
     | Sort _ ->
       Logger.debug "Inferring Let : %a" Expr.pp e;
-      if not (isDefEq btype (infer env value)) then
+      if not (isDefEq env btype (infer env value)) then
         Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed 2") Expr.pp
           btype Expr.pp (infer env value);
       infer env (Expr.instantiate ~free_var:value ~expr:body)
@@ -196,32 +239,12 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
   | Expr.App (f, arg) ->
-    let f' =
-      (* One-step delta reduction. TODO: this is needs to be modified so that things in the arg position also get potentially delta reduced. *)
-      match f with
-      | Const { name; uparams } ->
-        let decl = Hashtbl.find env name in
-        let decl_expr =
-          decl |> Decl.get_value
-          |> CCOption.get_exn_or "whnf: failed extracting value"
-        in
-        let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
-        let ans = Expr.subst_levels decl_expr decl_uparams uparams in
-        Logger.debugf
-          (fun fpf (t1, t2) ->
-            CCFormat.fprintf fpf
-              "@[<v 0>After delta reduction @[<hov 2>%a@] becomes @[<hov \
-               2>%a@]@]"
-              Expr.pp t1 Expr.pp t2)
-          (f, ans);
-        ans
-      | _ -> f
-    in
+    let f' = Reduce.delta_at_head env f in
     (* Beta reduction*)
-    Expr.Reduce.beta (App (f', arg))
+    Reduce.beta (App (f', arg)) |> whnf env
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
-    Expr.instantiate ~free_var:value ~expr:body
+    Expr.instantiate ~free_var:value ~expr:body |> whnf env
   | Expr.Const { name; uparams } ->
     (* Delta reduction *)
     let decl = Hashtbl.find env name in
@@ -232,20 +255,20 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
       decl_uparams;
     Logger.info "uparams : @[%a@]" (CCList.pp Level.pp) uparams;
     (* Logger.debug "Result : %a" Expr.pp; *)
-    Expr.subst_levels decl_expr decl_uparams uparams
+    Expr.subst_levels decl_expr decl_uparams uparams |> whnf env
   | e ->
     Logger.warn "not reducing: %a" Expr.pp expr;
     e
 
 (* TODO: optimize def eq checking by implementing union-find. *)
-and isDefEq e1 e2 =
+and isDefEq env e1 e2 =
   Logger.infof Pp.pp_defeq (e1, e2);
   match e1, e2 with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
   | ( Expr.Forall { name = n; btype = s; body = a; binfo },
       Expr.Forall { btype = t; body = b; _ } ) ->
-    if isDefEq s t then (
+    if isDefEq env s t then (
       let free_var =
         Expr.FreeVar
           {
@@ -255,16 +278,35 @@ and isDefEq e1 e2 =
             fvarId = Nyaya_parser.Util.Uid.mk ();
           }
       in
-      isDefEq
+      isDefEq env
         (Expr.instantiate ~free_var ~expr:a)
         (Expr.instantiate ~free_var ~expr:b)
     ) else
       false
-  | Expr.App (f, a), Expr.App (g, b) -> isDefEq f g && isDefEq a b
+  | Expr.App (f, a), Expr.App (g, b) ->
+    isDefEq env (Reduce.delta_at_head env f) (Reduce.delta_at_head env g)
+    && isDefEq env a b
   | ( Expr.Const { name = n1; uparams = us },
       Expr.Const { name = n2; uparams = vs } ) ->
     n1 == n2
     && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
+  | ( Expr.Lam { name = n; btype = s; body = a; binfo },
+      Expr.Lam { btype = t; body = b; _ } ) ->
+    if isDefEq env s t then (
+      let free_var =
+        Expr.FreeVar
+          {
+            name = n;
+            expr = s;
+            info = binfo;
+            fvarId = Nyaya_parser.Util.Uid.mk ();
+          }
+      in
+      isDefEq env
+        (Expr.instantiate ~free_var ~expr:a)
+        (Expr.instantiate ~free_var ~expr:b)
+    ) else
+      false
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
@@ -275,7 +317,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
        Expr.pp value Expr.pp info.ty; *)
     Logger.infof Pp.pp_check (value, info.ty);
-    isDefEq (infer env value) info.ty
+    isDefEq env (infer env value) info.ty
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
     true

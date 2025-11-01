@@ -1,5 +1,9 @@
 open Nyaya_parser
 
+module Logger = Util.MakeLogger (struct
+  let header = "Decl"
+end)
+
 type decl_info = {
   name: Name.t;
   uparams: Name.t list;
@@ -122,7 +126,11 @@ let get_value (decl : t) =
   | Def { value; _ } -> Some value
   | Thm { value; _ } -> Some value
   | Opaque { value; _ } -> Some value
-  | _ -> None
+  | Inductive { info; _ } -> Some info.ty
+  | d ->
+    Logger.info "@[Warning: trying to extract value of declaration : @[%a@]@]"
+      pp d;
+    None
 
 let get_uparams (decl : t) =
   match decl with
