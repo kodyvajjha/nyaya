@@ -1,4 +1,5 @@
 (executables
  (public_names nyaya)
  (names main)
- (libraries nyaya nyaya_parser))
+ (libraries nyaya nyaya_parser)
+ (promote (until-clean)))
