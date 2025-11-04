@@ -1,14 +1,3 @@
-(executable
- (name test_main)
- (modules test_main)
+(tests
+ (names precedence test_main)
  (libraries nyaya containers alcotest))
-
-(library
- (name nyaya_tests)
- (modules :standard \ test_main)
- (libraries nyaya containers alcotest))
-
-(rule
- (alias runtest)
- (action
-  (run ./test_main.exe)))

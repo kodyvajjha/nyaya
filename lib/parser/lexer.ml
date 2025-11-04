@@ -28,6 +28,13 @@ let is_def = ref false
 
 let is_ns = ref false
 
+let reset () =
+  is_preamble := true;
+  is_els := false;
+  is_eln := false;
+  is_def := false;
+  is_ns := false
+
 let digit = [%sedlex.regexp? '0' .. '9']
 
 let newline = [%sedlex.regexp? '\n' | "\r\n"]
@@ -169,6 +176,7 @@ and token_body buf =
     token buf
   | eof ->
     Logger.info "Lexed EOF...";
+    reset ();
     EOF
   | _ -> handle_lexer_error buf
 
