@@ -23,4 +23,7 @@ let () =
   let cases =
     export_files () |> List.map (fun f -> Alcotest.test_case f `Quick (run f))
   in
-  Alcotest.run "Nyaya_parser/typechecker" [ "export-files", cases ]
+  Alcotest.run
+    ~argv:[| "ignored"; "--tail-errors=0" |]
+    "Nyaya_parser/typechecker"
+    [ "export-files", cases ]
