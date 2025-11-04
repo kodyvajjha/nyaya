@@ -1,26 +1,11 @@
-(* let export_dir = "../../../test/parser" *)
-
-(* let export_files () =
-   Sys.readdir export_dir |> Array.to_list
-   |> List.filter (fun f ->
-          Filename.check_suffix f ".export" && f <> "init.export")
-   |> List.sort String.compare
-   |> List.map (Filename.concat export_dir) *)
+let export_dir = "../../../test/parser"
 
 let export_files () =
-  [
-    "../../../test/parser/higher_order.export";
-    "../../../test/parser/id.export";
-    "../../../test/parser/id_fvar.export";
-    "../../../test/parser/inductive.export";
-    "../../../test/parser/lambda.export";
-    "../../../test/parser/level_subst.export";
-    (* "../../../test/parser/mutual.export"; *)
-    "../../../test/parser/outparam_mock.export";
-    "../../../test/parser/outparam_mock2.export";
-    "../../../test/parser/self_contained.export";
-    "../../../test/parser/universes.export";
-  ]
+  Sys.readdir export_dir |> Array.to_list
+  |> List.filter (fun f ->
+         Filename.check_suffix f ".export" && f <> "init.export")
+  |> List.sort String.compare
+  |> List.map (Filename.concat export_dir)
 
 let run filename () =
   let open Nyaya_parser in
