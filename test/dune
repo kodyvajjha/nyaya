@@ -1,3 +1,3 @@
 (tests
- (names precedence test_main)
+ (names test_main)
  (libraries nyaya containers alcotest))
