@@ -126,7 +126,9 @@ let get_value (decl : t) =
   | Def { value; _ } -> Some value
   | Thm { value; _ } -> Some value
   | Opaque { value; _ } -> Some value
-  | Inductive { info; _ } -> Some info.ty
+  (* TODO: This needs some figuring out... *)
+  (* | Inductive { info; _ } -> Some info.ty *)
+  (* | Axiom { ty; _ } -> Some ty *)
   | d ->
     Logger.info "@[Warning: trying to extract value of declaration : @[%a@]@]"
       pp d;

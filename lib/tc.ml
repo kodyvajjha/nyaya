@@ -61,15 +61,20 @@ module Reduce = struct
   let delta_at_head env f =
     (* One-step delta reduction of the head. *)
     match f with
-    | Const { name; uparams } ->
+    | Const { name; uparams } as c ->
       let decl = Hashtbl.find env name in
-      let decl_expr =
-        decl |> Decl.get_value
-        |> CCOption.get_exn_or "whnf: failed extracting value"
+      let decl_value = decl |> Decl.get_value in
+      let ans =
+        (* TODO: add a note about this in the notebook. *)
+        match decl_value with
+        | Some v ->
+          let decl_uparams =
+            CCList.map Level.param (decl |> Decl.get_uparams)
+          in
+          Expr.subst_levels v decl_uparams uparams
+        | None -> c
       in
-      let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
-      let ans = Expr.subst_levels decl_expr decl_uparams uparams in
-      Logger.debugf
+      Logger.infof
         (fun fpf (t1, t2) ->
           CCFormat.fprintf fpf
             "@[<v 0>After delta reduction @[<hov 2>%a@] becomes @[<hov 2>%a@]@]"
@@ -244,14 +249,14 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
     Reduce.beta (App (f', arg)) |> whnf env
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
-    Expr.instantiate ~free_var:value ~expr:body |> whnf env
+    Expr.instantiate ~free_var:value ~expr:body
   | Expr.Const { name; uparams } as e ->
     (* Delta reduction *)
-    Reduce.delta_at_head env e |> whnf env
-  (* | Expr.Forall { name; btype; binfo; body } ->
-     (* Reduce the domain type *)
-     Logger.info "Reducing Foralls";
-     Expr.Forall { name; btype = whnf env btype; binfo; body } *)
+    Reduce.delta_at_head env e
+  | Expr.Forall { name; btype; binfo; body } ->
+    (* Reduce the domain type *)
+    Logger.info "Reducing Foralls";
+    Expr.Forall { name; btype = whnf env btype; binfo; body }
   | e ->
     Logger.warn "not reducing: %a" Expr.pp expr;
     e
@@ -374,6 +379,11 @@ let typecheck (env : Env.t) =
   Iter.iter2
     (fun n d ->
       try
+        let module Logger = Nyaya_parser.Util.MakeLogger (struct
+          let header =
+            let info = Decl.get_decl_info d in
+            CCFormat.to_string Name.pp info.name
+        end) in
         Logger.info "Typechecking %a" Decl.pp d;
         if check env d then
           success := !success + 1
