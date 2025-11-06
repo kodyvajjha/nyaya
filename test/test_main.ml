@@ -1,4 +1,16 @@
+module List = CCList
+module Array = CCArray
+
 let export_dir = "../../../test/parser"
+
+let format_test_name path =
+  let basename = Filename.basename path in
+  let len = String.length basename in
+  if len > 7 && String.sub basename (len - 7) 7 = ".export" then (
+    let prefix = String.sub basename 0 (len - 7) in
+    "test/parser/" ^ prefix ^ ".source"
+  ) else
+    "test/parser/" ^ basename
 
 let export_files () =
   Sys.readdir export_dir |> Array.to_list
@@ -21,7 +33,9 @@ let run filename () =
 
 let () =
   let cases =
-    export_files () |> List.map (fun f -> Alcotest.test_case f `Quick (run f))
+    export_files ()
+    |> List.map (fun f ->
+           Alcotest.test_case (format_test_name f) `Quick (run f))
   in
   Alcotest.run
     ~argv:[| "ignored"; "--tail-errors=0" |]
