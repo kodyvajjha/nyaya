@@ -245,17 +245,13 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~free_var:value ~expr:body |> whnf env
-  | Expr.Const { name; uparams } ->
+  | Expr.Const { name; uparams } as e ->
     (* Delta reduction *)
-    let decl = Hashtbl.find env name in
-    let decl_expr = decl |> Decl.get_type in
-    let decl_uparams = CCList.map Level.param (decl |> Decl.get_uparams) in
-    Logger.info "known_type : %a" Decl.pp decl;
-    Logger.info "known_type_uparams : @[<v 2>%a@]" (CCList.pp Level.pp)
-      decl_uparams;
-    Logger.info "uparams : @[%a@]" (CCList.pp Level.pp) uparams;
-    (* Logger.debug "Result : %a" Expr.pp; *)
-    Expr.subst_levels decl_expr decl_uparams uparams |> whnf env
+    Reduce.delta_at_head env e |> whnf env
+  (* | Expr.Forall { name; btype; binfo; body } ->
+     (* Reduce the domain type *)
+     Logger.info "Reducing Foralls";
+     Expr.Forall { name; btype = whnf env btype; binfo; body } *)
   | e ->
     Logger.warn "not reducing: %a" Expr.pp expr;
     e
