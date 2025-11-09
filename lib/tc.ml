@@ -244,6 +244,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
   | Expr.App (f, arg) ->
+    (* TODO: do we need to whnf the arg? *)
     let f' = Reduce.delta_at_head env f in
     let arg' = whnf env arg in
     (* Beta reduction*)
