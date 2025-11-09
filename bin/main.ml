@@ -1,7 +1,7 @@
 let () =
-  let _file_outchannel =
-    Format.formatter_of_out_channel (open_out "output.txt")
-  in
+  (* let _file_outchannel =
+       Format.formatter_of_out_channel (open_out "output.txt")
+     in *)
   let open Nyaya_parser in
   Logs.set_reporter (Lexer.Logger.reporter Format.std_formatter);
   Logs.set_level (Some Logs.Debug);
