@@ -246,7 +246,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.App (f, arg) ->
     let f' = Reduce.delta_at_head env f in
     (* Beta reduction*)
-    Reduce.beta (App (f', arg)) |> whnf env
+    Reduce.beta (App (f', arg))
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~free_var:value ~expr:body
