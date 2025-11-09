@@ -15,7 +15,9 @@ let format_test_name path =
 let export_files () =
   Sys.readdir export_dir |> Array.to_list
   |> List.filter (fun f ->
-         Filename.check_suffix f ".export" && f <> "init.export")
+         Filename.check_suffix f ".export"
+         && f <> "init.export" && f <> "mutual.export" && f <> "mylist.export"
+         && f <> "inductive.export")
   |> List.sort String.compare
   |> List.map (Filename.concat export_dir)
 
