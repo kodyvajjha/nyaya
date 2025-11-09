@@ -1,0 +1,18 @@
+
+
+prelude
+
+universe u
+
+variable (α : Type u) (β : Prop)
+
+inductive MyList (α : Type) where
+  | nil  : MyList α
+  | cons : α → MyList α → MyList α
+
+noncomputable def map {α β : Type} (f : α → β) (xs : MyList α) : MyList β :=
+  @MyList.rec α
+    (motive := fun _ => MyList β)
+    MyList.nil
+    (fun x _ ih => MyList.cons (f x) ih)
+    xs
