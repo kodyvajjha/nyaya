@@ -1,0 +1,17 @@
+-- Some tests taken from nanoda
+
+prelude
+inductive MyUnit : Type
+| mk : MyUnit
+
+def myid {A : Type u} : A → A := fun x => x
+
+def «日本国憲法» : MyUnit → MyUnit := myid
+
+def testDoubleFrench : MyUnit → MyUnit := fun («正当に選挙された») => «正当に選挙された»
+
+def noodle : MyUnit → MyUnit := fun («𰻝𰻝面») => «𰻝𰻝面»
+
+def «शिशुपालवध» (x : MyUnit) : MyUnit := x
+
+def «سَوَاحِلِيّ» (f : MyUnit → MyUnit) (x : MyUnit) : MyUnit := f x
