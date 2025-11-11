@@ -216,8 +216,8 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
-          \ arg = %a@]" (Failure "failed 1") Expr.pp e Expr.pp btype Expr.pp
-          (infer env arg);
+          \ inferred arg = %a@]" (Failure "failed 1") Expr.pp e Expr.pp btype
+          Expr.pp (infer env arg);
       let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
       Logger.debug "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
       p
@@ -240,6 +240,10 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
         (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
     | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp e)
   | Proj _ -> failwith "PROJ encountered"
+  | Literal lit ->
+    (match lit with
+    | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
+    | Expr.StrLit _ -> Expr.const (Name.of_string "String"))
   | _ ->
     Logger.err "@[<v 0>@[failed inferring :@,@[<hv 2> %a@]@]@]" (TypeError expr)
       Expr.pp expr
@@ -305,7 +309,11 @@ and isDefEq env e1 e2 =
     && isDefEq env a b
   | ( Expr.Const { name = n1; uparams = us },
       Expr.Const { name = n2; uparams = vs } ) ->
-    n1 == n2
+    (* We test for structural equality of names here and not pointer equality
+       since there are names which are not pointer equal (e.g., we infer Nat
+       literals as Const("Nat",[]))
+    *)
+    n1 = n2
     && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
   | ( Expr.Lam { name = n; btype = s; body = a; binfo },
       Expr.Lam { btype = t; body = b; _ } ) ->
