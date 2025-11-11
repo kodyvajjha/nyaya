@@ -1,4 +1,13 @@
-type t = (Name.t, Decl.t) Hashtbl.t
+module type LOGGER = Nyaya_parser.Util.LOGGER
+
+type t = {
+  tbl: (Name.t, Decl.t) Hashtbl.t;
+  logger: (module LOGGER);
+}
+
+let logger (env : t) = env.logger
+
+let with_logger (env : t) (logger : (module LOGGER)) = { env with logger }
 
 let pp fpf t =
   CCFormat.fprintf fpf "@[Total unique declarations in environment: %d@.@]"
@@ -15,7 +24,11 @@ module Logger = Util.MakeLogger (struct
   let header = "Env"
 end)
 
-let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
+let table
+    ?(logger =
+      (module Util.MakeLogger (struct
+        let header = "Env"
+      end) : LOGGER)) expr_table name_table rec_rule_table (ast : Ast.t) : t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let decl_table = Ast.Hashed.decls ast in
   let resolve (nid : int) =
@@ -213,7 +226,7 @@ let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) decl_table;
   Logger.info "Finished environment construction. Total number of mappings: %d"
     (Hashtbl.length decl_table);
-  resolved_table
+  { tbl = resolved_table; logger }
 
 let mk (ast : Ast.t) : t =
   let name_table = Name.table ast in

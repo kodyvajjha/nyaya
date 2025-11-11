@@ -32,10 +32,27 @@ module Location = struct
       pp_location pos lexeme
 end
 
+module type LOGGER = sig
+  val reporter : CCFormat.t -> Logs.reporter
+
+  val info : ('a, Format.formatter, unit, unit) format4 -> 'a
+
+  val warn : ('a, Format.formatter, unit, unit) format4 -> 'a
+
+  val err : ('a, Format.formatter, unit, 'b) format4 -> exn -> 'a
+
+  val debug : ('a, Format.formatter, unit, unit) format4 -> 'a
+
+  val debugf : (CCFormat.t -> 'a -> unit) -> 'a -> unit
+
+  val infof : (CCFormat.t -> 'a -> unit) -> 'a -> unit
+
+  val success : ('a, Format.formatter, unit, unit) format4 -> 'a
+end
+
 module MakeLogger (Data : sig
   val header : string
-end) =
-struct
+end) : LOGGER = struct
   module Format = CCFormat
 
   let timestamp () =
