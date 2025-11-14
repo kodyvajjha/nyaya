@@ -332,6 +332,7 @@ and isDefEq env e1 e2 =
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
     ) else
       false
+  | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) -> Z.equal n1 n2
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
