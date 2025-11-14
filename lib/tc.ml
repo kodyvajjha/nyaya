@@ -408,13 +408,11 @@ let typecheck (env : Env.t) =
   Iter.iter2
     (fun n d ->
       try
-        (* Logger.info "Typechecking %a" Decl.pp d; *)
-        let env =
-          Env.with_logger env
-            (module Nyaya_parser.Util.MakeLogger (struct
-              let header = CCFormat.to_string Name.pp n
-            end) : Env.LOGGER)
-        in
+        let module DeclLogger : Env.LOGGER =
+        Nyaya_parser.Util.MakeLogger (struct
+          let header = CCFormat.to_string Name.pp n
+        end) in
+        let env = Env.with_logger env (module DeclLogger) in
         if check env d then
           success := !success + 1
         else
