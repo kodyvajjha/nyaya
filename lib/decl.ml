@@ -130,7 +130,7 @@ let get_value (decl : t) =
   (* | Inductive { info; _ } -> Some info.ty *)
   (* | Axiom { ty; _ } -> Some ty *)
   | d ->
-    Logger.info "@[Warning: trying to extract value of declaration : @[%a@]@]"
+    Logger.debug "@[Warning: trying to extract value of declaration : @[%a@]@]"
       pp d;
     None
 

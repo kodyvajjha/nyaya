@@ -76,7 +76,7 @@ module Reduce = struct
           Expr.subst_levels v decl_uparams uparams
         | None -> c
       in
-      Logger.debugf
+      Logger.infof
         (fun fpf (t1, t2) ->
           CCFormat.fprintf fpf
             "@[<v 0>After delta reduction@,\
@@ -221,7 +221,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
       Logger.debug "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
       p
-    | _ -> Logger.err "Failed infer at app" (TypeError f))
+    | e ->
+      Logger.err "Failed infer at app, got @[%a@] instead of a forall"
+        (TypeError f) Expr.pp e)
   | Let { name; btype; value; body } as e ->
     Logger.debug "Inferring Let : %a" Expr.pp e;
     (*
