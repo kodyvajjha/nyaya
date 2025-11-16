@@ -76,7 +76,7 @@ module Reduce = struct
           Expr.subst_levels v decl_uparams uparams
         | None -> c
       in
-      Logger.infof
+      Logger.debugf
         (fun fpf (t1, t2) ->
           CCFormat.fprintf fpf
             "@[<v 0>After delta reduction@,\
@@ -349,6 +349,13 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     let ans = isDefEq env (infer env value) info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
     ans
+  | Thm { info; value } ->
+    (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
+       Expr.pp value Expr.pp info.ty; *)
+    Logger.debugf Pp.pp_check (value, info.ty);
+    let ans = isDefEq env (infer env value) info.ty in
+    Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
+    ans
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
     true
@@ -388,38 +395,32 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
     (string_of_bool type_is_sort);
   no_dup_uparams && no_free_vars && type_is_sort
 
-(** Check well-posedness of all declarations in the environment *)
-let check_all_well_posed (env : Env.t) : bool =
-  Hashtbl.fold
-    (fun name decl acc ->
-      let info = Decl.get_decl_info decl in
-      let is_well_posed = well_posed env info in
-      if not is_well_posed then
-        Logger.err "Declaration %a is not well-posed" Not_well_posed Name.pp
-          name
-      else
-        Logger.info "Declaration %a is well-posed." Name.pp name;
-      acc && is_well_posed)
-    env.tbl true
-
 let typecheck (env : Env.t) =
-  let all_well_posed = check_all_well_posed env in
-  Logger.info "All declarations well-posed: %b@." all_well_posed;
   let iter = env.tbl |> Iter.of_hashtbl in
   let success = ref 0 in
   Iter.iter2
     (fun n d ->
+      let module DeclLogger : Env.LOGGER = Nyaya_parser.Util.MakeLogger (struct
+        let header = CCFormat.to_string Name.pp n
+      end) in
+      let env = Env.with_logger env (module DeclLogger) in
+      let info = Decl.get_decl_info d in
+      (* Check well-posedness. *)
+      let is_well_posed = well_posed env info in
+      if not is_well_posed then
+        DeclLogger.err "Declaration %a is not well-posed" Not_well_posed Name.pp
+          n
+      else
+        DeclLogger.info "Declaration %a is well-posed." Name.pp n;
+      (* Decl is well-posed, so perform typechecking. *)
       try
-        let module DeclLogger : Env.LOGGER =
-        Nyaya_parser.Util.MakeLogger (struct
-          let header = CCFormat.to_string Name.pp n
-        end) in
-        let env = Env.with_logger env (module DeclLogger) in
         if check env d then
           success := !success + 1
         else
           ()
       with TypeError e ->
+        Logger.success "Failed after checking %d declarations in environment."
+          !success;
         Logger.err "Type checking failed when checking %a." (TypeError e)
           Name.pp n)
     iter;
