@@ -1,0 +1,9 @@
+prelude
+universe u v
+
+structure MyProd (α : Type u) (β : Type v) where
+  fst : α
+  snd : β
+
+def swap : MyProd α β → MyProd β α :=
+  fun xy => MyProd.mk (MyProd.snd xy) (MyProd.fst xy)
