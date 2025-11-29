@@ -144,3 +144,10 @@ let get_uparams (decl : t) =
   | Inductive { info; _ } -> info.uparams
   | Ctor { info; _ } -> info.uparams
   | Rec { info; _ } -> info.uparams
+
+let get_inductive_ctors (decl : t) =
+  match decl with
+  | Inductive { ctor_names; _ } -> ctor_names
+  | _ ->
+    Logger.err "Failed to collect constructors of non-inductive declaration."
+      (Failure "")

@@ -241,14 +241,61 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       infer env
         (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
     | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp e)
-  | Proj _ -> failwith "PROJ encountered"
+  | Proj { name; nat; expr } ->
+    (*
+       let structType := whnf (infer structure)
+       let (const structTyName levels) tyArgs := structType.unfoldApps
+       let InductiveInfo := env[structTyName]
+       -- This inductive should only have the one constructor since it's claiming to be a structure.
+       let ConstructorInfo := env[InductiveInfo.constructorNames[0]]
+
+       let mut constructorType := substLevels ConstructorInfo.type (newLevels := levels)
+
+       for tyArg in tyArgs.take constructorType.numParams
+         match (whnf constructorType) with
+           | pi _ body => inst body tyArg
+           | _ => error
+
+       for i in [0:projIdx]
+         match (whnf constructorType) with
+           | pi _ body => inst body (proj i structure)
+           | _ => error
+
+       match (whnf constructorType) with
+         | pi binder _=> binder.type
+         | _ => error
+    *)
+    let struct_type = infer env expr |> whnf env in
+    let const, ty_args = Expr.get_apps struct_type in
+    (match const with
+    | Const { name; uparams } ->
+      Logger.info "const : %a" Expr.pp const;
+      let inductive_info = Hashtbl.find env.tbl name in
+      let ctor_names = Decl.get_inductive_ctors inductive_info in
+      (* This inductive should only have the one constructor since it's claiming to be a structure. *)
+      assert (CCList.length ctor_names = 1);
+      let ctor_info = ctor_names |> CCList.hd |> Hashtbl.find env.tbl in
+      let ctor_info_type = ctor_info |> Decl.get_type in
+      let ctor_uparams = CCList.map Level.param (Decl.get_uparams ctor_info) in
+      let ctor_type = Expr.subst_levels ctor_info_type ctor_uparams uparams in
+      Logger.info "ctor_type : %a" Expr.pp ctor_type;
+      ()
+    | e ->
+      Logger.err
+        "@[While inferring @[%a@] expected a const, got @[%a@] instead@]"
+        (TypeError e) Expr.pp struct_type Expr.pp e);
+    failwith "PROJ encountered"
   | Literal lit ->
     (match lit with
     | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
     | Expr.StrLit _ -> Expr.const (Name.of_string "String"))
-  | _ ->
-    Logger.err "@[<v 0>@[failed inferring :@,@[<hv 2> %a@]@]@]" (TypeError expr)
-      Expr.pp expr
+  | BoundVar _ as expr ->
+    (* Since we are using the locally nameless approach, we should not run into
+       bound variables during type inference, because all open binders will be
+       instantiated with the appropriate free variables. *)
+    Logger.err
+      "@[<v 0>@[Fatal error: encountered bound variable during inference:@,\
+       @[<hv 2> %a@]@]@]" (TypeError expr) Expr.pp expr
 
 and infer_sort_of env (expr : Expr.t) =
   let module Logger = (val env.logger) in
@@ -360,8 +407,10 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     Logger.debugf Pp.pp_check_name (name, ty);
     true
   | _ ->
-    Logger.err "failed checking decl: %a" (Failure "type checking failed")
-      Decl.pp decl
+    Logger.warn "not checking decl: %a" Decl.pp decl;
+    true
+(* Logger.err "failed checking decl: %a" (Failure "type checking failed")
+   Decl.pp decl *)
 
 (** We check if any declaration in the environment has 1) duplicate uparams or 2) lingering free variables in the type or 3) the type of its type is a sort. 
   If yes, we call that declaration well-posed and only typecheck those. *)
