@@ -422,6 +422,8 @@ and isDefEq env e1 e2 =
     ) else
       false
   | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) -> Z.equal n1 n2
+  | Proj { nat = n1; expr = e1; _ }, Proj { nat = n2; expr = e2; _ } ->
+    n1 == n2 && isDefEq env e1 e2
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
