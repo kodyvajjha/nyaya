@@ -1,3 +1,5 @@
+(* TODO: Refactor this whole module to replace manual match/error with Result.bind + projection helper. *)
+
 [@@@warning "-27"]
 
 exception TypeError of Expr.t
