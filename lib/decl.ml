@@ -149,5 +149,13 @@ let get_inductive_ctors (decl : t) =
   match decl with
   | Inductive { ctor_names; _ } -> ctor_names
   | _ ->
-    Logger.err "Failed to collect constructors of non-inductive declaration."
+    Logger.err
+      "Attempting to collect constructors of non-inductive declaration."
+      (Failure "")
+
+let get_inductive_num_params (decl : t) =
+  match decl with
+  | Inductive { num_params; _ } -> num_params
+  | _ ->
+    Logger.err "Attempting to collect num_params of non-inductive declaration."
       (Failure "")
