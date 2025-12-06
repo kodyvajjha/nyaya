@@ -274,19 +274,57 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.info "const : %a" Expr.pp const;
       let inductive_info = Hashtbl.find env.tbl name in
       let ctor_names = Decl.get_inductive_ctors inductive_info in
+      let ctor_num_params = Decl.get_inductive_num_params inductive_info in
       (* This inductive should only have the one constructor since it's claiming to be a structure. *)
       assert (CCList.length ctor_names = 1);
       let ctor_info = ctor_names |> CCList.hd |> Hashtbl.find env.tbl in
       let ctor_info_type = ctor_info |> Decl.get_type in
       let ctor_uparams = CCList.map Level.param (Decl.get_uparams ctor_info) in
-      let ctor_type = Expr.subst_levels ctor_info_type ctor_uparams uparams in
-      Logger.info "ctor_type : %a" Expr.pp ctor_type;
-      ()
+      let ctor_type =
+        ref (Expr.subst_levels ctor_info_type ctor_uparams uparams)
+      in
+      Logger.info "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
+      Logger.info "ctor_type : %a" Expr.pp !ctor_type;
+      let ty_param_args = CCList.take ctor_num_params ty_args in
+      for i = 0 to CCList.length ty_param_args - 1 do
+        let for_ty = whnf env !ctor_type in
+        match for_ty with
+        | Forall { body; _ } ->
+          let ty_arg = CCList.nth ty_param_args i in
+          ctor_type :=
+            Expr.instantiate ~logger:env.logger ~free_var:ty_arg ~expr:body ()
+        | _ ->
+          Logger.err
+            "Constructor type instantiation failed: expected Forall type but \
+             got %a"
+            (TypeError for_ty) Expr.pp for_ty
+      done;
+      (* Now, instantiate the projections *)
+      for i = 0 to nat - 1 do
+        let for_ty = whnf env !ctor_type in
+        match for_ty with
+        | Forall { body; _ } ->
+          let proj_expr = Expr.Proj { name; nat = i; expr } in
+          ctor_type :=
+            Expr.instantiate ~logger:env.logger ~free_var:proj_expr ~expr:body
+              ()
+        | _ ->
+          Logger.err
+            "Projection type instantiation failed: expected Forall type but \
+             got %a"
+            (TypeError for_ty) Expr.pp for_ty
+      done;
+      (* Now, the next binder's type is the projection type *)
+      let final_ty = whnf env !ctor_type in
+      (match final_ty with
+      | Forall { btype; _ } -> btype
+      | _ ->
+        Logger.err "Final type error: expected Forall type but got %a"
+          (TypeError final_ty) Expr.pp final_ty)
     | e ->
       Logger.err
         "@[While inferring @[%a@] expected a const, got @[%a@] instead@]"
-        (TypeError e) Expr.pp struct_type Expr.pp e);
-    failwith "PROJ encountered"
+        (TypeError e) Expr.pp struct_type Expr.pp e)
   | Literal lit ->
     (match lit with
     | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
