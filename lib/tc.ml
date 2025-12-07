@@ -424,6 +424,23 @@ and isDefEq env e1 e2 =
   | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) -> Z.equal n1 n2
   | Proj { nat = n1; expr = e1; _ }, Proj { nat = n2; expr = e2; _ } ->
     n1 == n2 && isDefEq env e1 e2
+  | ( Expr.Let { name = n1; btype = s1; value = v1; body = a },
+      Expr.Let { name = n2; btype = s2; value = v2; body = b } ) ->
+    if isDefEq env s1 s2 && isDefEq env v1 v2 then (
+      let free_var =
+        Expr.FreeVar
+          {
+            name = n1;
+            expr = s1;
+            info = Expr.Default;
+            fvarId = Nyaya_parser.Util.Uid.mk ();
+          }
+      in
+      isDefEq env
+        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
+        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
+    ) else
+      false
   | _ ->
     Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
 
