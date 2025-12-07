@@ -100,12 +100,20 @@ end) : LOGGER = struct
         Logs.warn (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
       fmt
 
-  let err fmt e =
+  let err fmt exn =
+    (* Grab backtrace for the most recently raised exception *)
+    let bt = Printexc.get_raw_backtrace () in
+    let bt_s = Printexc.raw_backtrace_to_string bt in
+
     CCFormat.set_color_default true;
     CCFormat.with_color_ksf "red"
-      ~f:(fun str ->
-        Logs.err (fun m -> m "%s" str ~header:Data.header ~tags:stamp);
-        raise e)
+      ~f:(fun msg ->
+        (* Log the original message, the exception, and the backtrace *)
+        Logs.err (fun m ->
+            m "@[<v 0>%s@,Exception: %s@,@[<v 2>Backtrace:@,%s@]@]" msg
+              (Printexc.to_string exn) bt_s ~header:Data.header ~tags:stamp);
+        (* Re-raise, preserving backtrace *)
+        Printexc.raise_with_backtrace exn bt)
       fmt
 
   let debug fmt =
