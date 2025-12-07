@@ -4,6 +4,8 @@
 
 exception TypeError of Expr.t
 
+exception Defeq_failure
+
 exception Not_well_posed
 
 module Logger = Nyaya_parser.Util.MakeLogger (struct
@@ -442,7 +444,7 @@ and isDefEq env e1 e2 =
     ) else
       false
   | _ ->
-    Logger.err "failed def eq: %a =?= %a" (TypeError e1) Expr.pp e1 Expr.pp e2
+    Logger.err "failed def eq: %a =?= %a" Defeq_failure Expr.pp e1 Expr.pp e2
 
 let check (env : Env.t) (decl : Decl.t) : bool =
   let module Logger = (val env.logger) in
