@@ -216,7 +216,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     (match whnf env (infer env f) with
     | Expr.Forall { btype; body; _ } ->
       Logger.debugf Pp.pp_defeq (btype, infer env arg);
-      if not (isDefEq env btype (infer env arg)) then
+      if not (isDefEq env btype (infer env arg |> whnf env)) then
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
