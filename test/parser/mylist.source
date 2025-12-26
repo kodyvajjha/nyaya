@@ -10,9 +10,17 @@ inductive MyList (α : Type) where
   | nil  : MyList α
   | cons : α → MyList α → MyList α
 
+def my_id {α : Type} (x : α) := x
+
+
 noncomputable def map {α β : Type} (f : α → β) (xs : MyList α) : MyList β :=
   @MyList.rec α
     (motive := fun _ => MyList β)
     MyList.nil
     (fun x _ ih => MyList.cons (f x) ih)
     xs
+
+inductive Eq {α : Type} : α → α → Prop where
+  | refl (a : α) : Eq a a
+
+theorem map_id {α : Type}: @Eq (MyList α) (map my_id MyList.nil) MyList.nil := @Eq.refl _ _
