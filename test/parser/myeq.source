@@ -2,7 +2,12 @@
 
 prelude
 
-universe u
-
 inductive MyEq {α : Type} : α → α → Prop where
   | refl (a : α) : MyEq a a
+
+inductive MyEq' : Prop → Prop → Prop where
+  | refl (a : Prop) : MyEq' a a
+
+inductive Either'' : Type u → Type v → Type (max u v + 1) where
+  | left : {α : Type u} → {β : Type v} → α → Either'' α β
+  | right : β → Either'' α β
