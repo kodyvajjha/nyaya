@@ -1,0 +1,8 @@
+
+
+prelude
+
+universe u
+
+inductive MyEq {α : Type} : α → α → Prop where
+  | refl (a : α) : MyEq a a

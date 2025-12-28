@@ -4,7 +4,7 @@ prelude
 
 universe u
 
-variable (α : Type u) (β : Prop)
+-- variable (α : Type u) (β : Prop)
 
 inductive MyList (α : Type) where
   | nil  : MyList α
@@ -20,7 +20,7 @@ noncomputable def map {α β : Type} (f : α → β) (xs : MyList α) : MyList �
     (fun x _ ih => MyList.cons (f x) ih)
     xs
 
-inductive Eq {α : Type} : α → α → Prop where
-  | refl (a : α) : Eq a a
+inductive MyEq {α : Type} : α → α → Prop where
+  | refl (a : α) : MyEq a a
 
-theorem map_id {α : Type}: @Eq (MyList α) (map my_id MyList.nil) MyList.nil := @Eq.refl _ _
+theorem map_id {α : Type}: @MyEq (MyList α) (map my_id MyList.nil) MyList.nil := @MyEq.refl _ _
