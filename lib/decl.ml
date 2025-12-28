@@ -87,6 +87,15 @@ type t =
       all_names: Name.t list;
       ctor_names: Name.t list;
     }
+      (** 
+      From [https://lean-lang.org/doc/reference/latest/The-Type-System/Inductive-Types/#inductive-datatypes-parameters-and-indices]: 
+
+      Type constructors may take two kinds of arguments: parameters and
+      indices. Parameters must be used consistently in the entire definition;
+      all occurrences of the type constructor in each constructor in the
+      declaration must take precisely the same argument. Indices may vary among 
+      the occurrences of the type constructor. All parameters must precede all 
+      indices in the type constructor's signature. *)
   | Ctor of {
       info: decl_info;
       inductive_name: Name.t;
