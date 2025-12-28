@@ -44,7 +44,7 @@ module Reduce = struct
   open Expr
 
   let beta e =
-    Logger.debug "@[Beta reducing @[<hov 2> %a@]]" pp e;
+    Logger.debug "@[Beta reducing @[<hov 2> %a@]@]" pp e;
     let rec aux f args =
       match f, args with
       | Lam { body; _ }, v :: vs ->
