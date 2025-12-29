@@ -1,0 +1,9 @@
+prelude
+
+inductive MyEq : Prop → Prop → Prop where
+  | refl (a : Prop) : MyEq a a
+
+set_option inductive.autoPromoteIndices false
+
+inductive MyEq' : Prop → Prop → Prop where
+  | refl (a : Prop) : MyEq' a a
