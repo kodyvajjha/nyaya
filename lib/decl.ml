@@ -117,6 +117,11 @@ type t =
     }
 [@@deriving show]
 
+let is_rec decl =
+  match decl with
+  | Rec _ -> true
+  | _ -> false
+
 (** Helper to extract decl_info from any declaration *)
 let get_decl_info (decl : t) : decl_info =
   match decl with
