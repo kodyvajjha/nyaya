@@ -77,6 +77,9 @@ type t =
       value: Expr.t;
     }
   | Quot of { info: decl_info }
+      (**  
+        parameter ----v         v---- index
+  inductive Nat.le (n : Nat) : Nat → Prop   *)
   | Inductive of {
       info: decl_info;
       is_reflexive: bool;
