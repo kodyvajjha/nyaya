@@ -479,15 +479,12 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   Logger.info "@[Now type-checking %a.@]" Decl.pp decl;
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
-    (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
-       Expr.pp value Expr.pp info.ty; *)
+    (* TODO: definitions should be unfolded according to reducibility hints. *)
     Logger.debugf Pp.pp_check (value, info.ty);
     let ans = isDefEq env (infer env value) info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
     ans
   | Thm { info; value } ->
-    (* Logger.debug "@[<v 2>@.Checking value @,@[<2>%a@] against @,@[<2>%a@]@]"
-       Expr.pp value Expr.pp info.ty; *)
     Logger.debugf Pp.pp_check (value, info.ty);
     let ans = isDefEq env (infer env value) info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
