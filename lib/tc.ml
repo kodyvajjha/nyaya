@@ -446,6 +446,34 @@ and isDefEq env e1 e2 =
   | _ ->
     Logger.err "failed def eq: %a =?= %a" Defeq_failure Expr.pp e1 Expr.pp e2
 
+(* TODO: complete ctor checks. *)
+let check_ctor (decl : Decl.t) (env : Env.t) =
+  match decl with
+  | Decl.Ctor { num_params; inductive_name; _ } as c ->
+    let inductive = Hashtbl.find env.tbl inductive_name in
+    Logger.debug "Ctor : %a" Decl.pp c;
+    Logger.debug "Associated inductive : %a" Decl.pp inductive;
+    assert (num_params = Decl.get_inductive_num_params inductive);
+    (* The constructor's type/telescope has to share the same parameters as the
+       type of the inductive being declared. *)
+    let ensure_same_params = true in
+    (* For the non-parameter elements of the constructor type's telescope, the
+       binder type must actually be a type (must infer as Sort _). *)
+    let non_param_as_sort = true in
+    (* For any non-parameter element of the constructor type's telescope, the
+       element's inferred sort must be less than or equal to the inductive type's
+       sort, or the inductive type being declared has to be a prop. *)
+    let sort_le_inductive_sort = true in
+    (* No argument to the constructor may contain a non-positive occurrence of
+       the type being declared *)
+    let non_positive = true in
+    (* The end of the constructor's telescope must be a valid application of
+       arguments to the type being declared *)
+    let end_of_telescope_match = true in
+    ensure_same_params && non_param_as_sort && sort_le_inductive_sort
+    && non_positive && end_of_telescope_match
+  | _ -> Logger.err "Ctor check called on non-ctor declaration" (Failure "")
+
 let check (env : Env.t) (decl : Decl.t) : bool =
   let module Logger = (val env.logger) in
   Logger.info "@[Now type-checking %a.@]" Decl.pp decl;
@@ -467,11 +495,14 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
     true
+  | Ctor { info; inductive_name; _ } as d -> check_ctor d env
+  | Rec _ -> (* TODO: what goes here? *) true
+  | Inductive _ -> (* TODO: what goes here? *) true
   | _ ->
-    Logger.warn "not checking decl: %a" Decl.pp decl;
-    true
-(* Logger.err "failed checking decl: %a" (Failure "type checking failed")
-   Decl.pp decl *)
+    (* Logger.warn "not checking decl: %a" Decl.pp decl;
+       true *)
+    Logger.err "failed checking decl: %a" (Failure "type checking failed")
+      Decl.pp decl
 
 (** We check if any declaration in the environment has 1) duplicate uparams or 2) lingering free variables in the type or 3) the type of its type is a sort. 
   If yes, we call that declaration well-posed and only typecheck those. *)
