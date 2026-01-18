@@ -122,6 +122,11 @@ let is_rec decl =
   | Rec _ -> true
   | _ -> false
 
+let is_ctor decl =
+  match decl with
+  | Ctor _ -> true
+  | _ -> false
+
 (** Helper to extract decl_info from any declaration *)
 let get_decl_info (decl : t) : decl_info =
   match decl with
@@ -176,3 +181,10 @@ let get_inductive_num_params (decl : t) =
   | _ ->
     Logger.err "Attempting to collect num_params of non-inductive declaration."
       (Failure "")
+
+let get_rec_rules (decl : t) =
+  match decl with
+  | Rec { rules; _ } -> rules
+  | _ ->
+    Logger.err "Attempting to get rec rules of a non-recursor declaration"
+      (Failure "get_rec_rules")
