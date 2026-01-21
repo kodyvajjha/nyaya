@@ -204,14 +204,19 @@ let table
                 ]
           done;
           let is_k = arr.(8 + num_inductives + num_rules) in
+          let uparams = ref [] in
+          for i = 9 + num_inductives + num_rules to CCList.length l - 1 do
+            uparams :=
+              !uparams
+              @ [ getter name_table arr.(i) "Name table in rec uparams" ]
+          done;
           Rec
             {
-              info = { name; uparams = []; ty };
+              info = { name; uparams = !uparams; ty };
               num_params;
               num_idx;
               num_motives;
               num_minors;
-              (* TODO: resolve rec rules*)
               rules = CCList.rev !rules;
               is_K = CCBool.of_int is_k;
             }
