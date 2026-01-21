@@ -282,17 +282,17 @@ let instantiate
     else (
       match expr with
       | BoundVar i ->
-        if offset <= i then (
-          Logger.debugf
-            (fun fpf (e1, e2) ->
-              CCFormat.fprintf fpf
-                "@[<v 0>@{<blue>At offset %d instantiated:@}@,\
-                 @[<hov 2>%a@] @,\
-                 in@,\
-                 @[<hov 2>%a@]@]" offset pp e1 pp e2)
-            (free_var, expr);
+        if offset <= i then
+          (* Logger.debugf
+             (fun fpf (e1, e2) ->
+               CCFormat.fprintf fpf
+                 "@[<v 0>@{<blue>At offset %d instantiated:@}@,\
+                  @[<hov 2>%a@] @,\
+                  in@,\
+                  @[<hov 2>%a@]@]" offset pp e1 pp e2)
+             (free_var, expr); *)
           free_var
-        ) else
+        else
           expr
       | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
       | App (f, a) ->
