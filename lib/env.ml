@@ -176,6 +176,7 @@ let table
             }
         | Ast.Decl.Recursor l ->
           let arr = CCArray.of_list l in
+          let total = CCArray.length arr in
           let name = getter name_table arr.(0) "name table in Rec" in
           let ty = getter expr_table arr.(1) "expr table in Rec" in
           let num_inductives = arr.(2) in
@@ -204,15 +205,30 @@ let table
                 ]
           done;
           let is_k = arr.(8 + num_inductives + num_rules) in
-          let uparams = ref [] in
-          for i = 9 + num_inductives + num_rules to CCList.length l - 1 do
-            uparams :=
-              !uparams
-              @ [ getter name_table arr.(i) "Name table in rec uparams" ]
-          done;
+          (* for i = 9 + num_inductives + num_rules to CCList.length l - 1 do
+               uparams :=
+                 !uparams
+                 @ [ getter name_table arr.(i) "Name table in rec uparams" ]
+             done; *)
+          let uparams =
+            if num_inductives + num_rules + 9 = total then
+              []
+            else (
+              let remaining =
+                CCList.map
+                  (fun x -> arr.(x))
+                  (CCArray.(num_inductives + num_rules + 9 -- (total - 1))
+                  |> CCArray.to_list)
+              in
+              (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
+              CCList.(
+                let+ id = remaining in
+                getter name_table id "name table in inductives")
+            )
+          in
           Rec
             {
-              info = { name; uparams = !uparams; ty };
+              info = { name; uparams; ty };
               num_params;
               num_idx;
               num_motives;
