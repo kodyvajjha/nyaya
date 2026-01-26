@@ -48,7 +48,7 @@ module Reduce = struct
     let rec aux f args =
       match f, args with
       | Lam { body; _ }, v :: vs ->
-        aux (instantiate ~free_var:body ~expr:v ()) vs
+        aux (instantiate ~free_var:v ~expr:body ()) vs
       | _, _ -> mk_app f args
     in
     let f, args = get_apps e in
