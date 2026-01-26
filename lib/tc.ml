@@ -95,7 +95,7 @@ end
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.debugf Pp.pp_inferring expr;
+  Logger.infof Pp.pp_inferring expr;
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -215,15 +215,16 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     (match whnf env (infer env f) with
     | Expr.Forall { btype; body; _ } ->
-      Logger.debugf Pp.pp_defeq (btype, infer env arg);
-      if not (isDefEq env btype (infer env arg |> whnf env)) then
+      let arg_type = infer env arg in
+      Logger.debugf Pp.pp_defeq (btype, arg_type);
+      if not (isDefEq env btype arg_type) then
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
-          \ inferred arg = %a@]" (Failure "failed 1") Expr.pp e Expr.pp btype
-          Expr.pp (infer env arg);
+          \ inferred arg type = %a.@]" (Failure "failed 1") Expr.pp e Expr.pp
+          btype Expr.pp arg_type;
       let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
-      Logger.debug "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
+      Logger.info "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
       p
     | e ->
       Logger.err "Failed infer at app, got @[%a@] instead of a forall"
@@ -365,17 +366,18 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
     Reduce.delta_at_head env e
   | Expr.Forall { name; btype; binfo; body } ->
     (* Reduce the domain type *)
-    Logger.debug "Reducing Foralls";
     Expr.Forall { name; btype = whnf env btype; binfo; body }
   | e ->
     Logger.debug "not reducing: %a" Expr.pp expr;
     e
 
-(* TODO: optimize def eq checking by implementing union-find. *)
+(* TODO: optimize def eq checking by implementing union-find.
+   TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
+*)
 and isDefEq env e1 e2 =
   let module Logger = (val env.logger) in
   Logger.debugf Pp.pp_defeq (e1, e2);
-  match e1, e2 with
+  match e1 |> whnf env, e2 |> whnf env with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
   | ( Expr.Forall { name = n; btype = s; body = a; binfo },
