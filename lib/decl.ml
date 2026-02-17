@@ -143,6 +143,10 @@ let get_type (decl : t) =
   let info = get_decl_info decl in
   info.ty
 
+let get_name (decl : t) =
+  let info = get_decl_info decl in
+  info.name
+
 let get_value (decl : t) =
   match decl with
   | Def { value; _ } -> Some value
