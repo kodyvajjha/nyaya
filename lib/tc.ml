@@ -90,6 +90,57 @@ module Reduce = struct
         (f, ans);
       ans
     | _ -> f
+
+  let iota_at_head (env : Env.t) (e : Expr.t) whnf : Expr.t =
+    let module Logger = (val env.logger) in
+    let hd, args = Expr.get_apps e in
+    match hd with
+    | Expr.Const { name = rec_name; _ } ->
+      (* Look up decl for the head constant *)
+      let decl =
+        try Hashtbl.find env.tbl rec_name
+        with Not_found -> (* unknown constant *) raise Not_found
+      in
+      (match decl with
+      | Decl.Rec { num_params; num_idx; num_motives; num_minors; rules; _ } ->
+        let major_idx = num_params + num_idx + num_motives + num_minors in
+        if List.length args <= major_idx then
+          e
+        else (
+          let major = List.nth args major_idx in
+          let major_whnf = whnf env major in
+          let maj_hd, maj_args = Expr.get_apps major_whnf in
+          match maj_hd with
+          | Expr.Const { name = ctor_name; _ } ->
+            (* Find matching reduction rule *)
+            let rule_opt =
+              List.find_opt
+                (fun (r : Decl.Rec_rule.t) -> r.ctor_name = ctor_name)
+                rules
+            in
+            (match rule_opt with
+            | None ->
+              (* Not a constructor the recursor knows about *)
+              e
+            | Some rule ->
+              (* Apply rule.value to:
+                 - all recursor args *before* the major premise
+                 - then the major's constructor arguments
+
+                 This matches the typical export encoding where each rule
+                 is lambda-bound over (params/idx/motives/minors) and then ctor args.
+              *)
+              let prefix = CCList.take major_idx args in
+              let new_args = prefix @ maj_args in
+              let red = Expr.mk_app rule.value new_args in
+              Logger.debug "iota: %a" Expr.pp red;
+              red)
+          | _ ->
+            (* major isn't constructor-headed *)
+            e
+        )
+      | _ -> e)
+    | _ -> e
 end
 
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
@@ -352,12 +403,20 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
   match expr with
   | Expr.Sort u -> Expr.Sort (Level.simplify u)
-  | Expr.App (f, arg) ->
-    (* TODO: do we need to whnf the arg? *)
-    let f' = Reduce.delta_at_head env f in
-    let arg' = whnf env arg in
-    (* Beta reduction*)
-    Reduce.beta (App (f', arg'))
+  | Expr.App (f, arg) as e ->
+    let hd, args = Expr.get_apps e in
+    let hd' =
+      match hd with
+      | Expr.Const _ -> Reduce.delta_at_head env hd
+      | _ -> whnf env hd
+    in
+    let e1 = Expr.mk_app hd' args in
+    let e2 = Reduce.beta e1 in
+
+    (* Now attempt iota at head *)
+    let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
+    Logger.info "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
+    e3
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
