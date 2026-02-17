@@ -151,9 +151,9 @@ let get_value (decl : t) =
   (* TODO: This needs some figuring out... *)
   (* | Inductive { info; _ } -> Some info.ty *)
   (* | Axiom { ty; _ } -> Some ty *)
-  | d ->
-    Logger.debug "@[Warning: trying to extract value of declaration : @[%a@]@]"
-      pp d;
+  | _d ->
+    (* Logger.debug "@[Warning: trying to extract value of declaration : @[%a@]@]"
+       pp d; *)
     None
 
 let get_uparams (decl : t) =
