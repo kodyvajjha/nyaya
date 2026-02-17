@@ -445,7 +445,10 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
     Logger.info "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
-    e3
+    if e3 = e then
+      e3
+    else
+      whnf env e3
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
