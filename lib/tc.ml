@@ -123,18 +123,47 @@ module Reduce = struct
               (* Not a constructor the recursor knows about *)
               e
             | Some rule ->
+              (**
+                 The major premise is constructor-headed at this point, so
+                 [maj_args] contains *all* arguments of that constructor
+                 application — including constructor parameters (e.g. the
+                 implicit type parameter [α] in [MyList.nil α]).
+
+                 But the recursor's [prefix] already contains the recursor
+                 parameters/indices/motives/minors, which themselves include
+                 those constructor parameters.
+
+                 If we append all of [maj_args], params are passed twice and we
+                 over-apply the rule RHS (example bug: [MyList.nil α α]), which
+                 later shows up as confusing defeq failures.
+
+                 So for iota reduction we must append only the constructor
+                 *field* arguments (the final [rule.ctor_num_args] arguments),
+                 not all constructor arguments.
+              *)
               (* Apply rule.value to:
                  - all recursor args *before* the major premise
-                 - then the major's constructor arguments
+                 - then only the constructor FIELD arguments
 
                  This matches the typical export encoding where each rule
                  is lambda-bound over (params/idx/motives/minors) and then ctor args.
               *)
               let prefix = CCList.take major_idx args in
-              let new_args = prefix @ maj_args in
-              let red = Expr.mk_app rule.value new_args in
-              Logger.debug "iota: %a" Expr.pp red;
-              red)
+              let maj_num_args = List.length maj_args in
+              if maj_num_args < rule.ctor_num_args then
+                (* Malformed constructor application: don't reduce. *)
+                e
+              else (
+                let field_args =
+                  maj_args |> List.rev
+                  |> CCList.take rule.ctor_num_args
+                  |> List.rev
+                in
+                let new_args = prefix @ field_args in
+                let red = Expr.mk_app rule.value new_args in
+                Logger.debug "iota: %a" Expr.pp red;
+                red
+              ))
           | _ ->
             (* major isn't constructor-headed *)
             e
