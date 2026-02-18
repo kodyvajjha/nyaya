@@ -175,7 +175,7 @@ end
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.infof Pp.pp_inferring expr;
+  Logger.debugf Pp.pp_inferring expr;
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -304,7 +304,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
           \ inferred arg type = %a.@]" (Failure "failed 1") Expr.pp e Expr.pp
           btype Expr.pp arg_type;
       let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
-      Logger.info "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
+      Logger.debug "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
       p
     | e ->
       Logger.err "Failed infer at app, got @[%a@] instead of a forall"
@@ -354,7 +354,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     let const, ty_args = Expr.get_apps struct_type in
     (match const with
     | Const { name; uparams } ->
-      Logger.info "const : %a" Expr.pp const;
+      Logger.debug "const : %a" Expr.pp const;
       let inductive_info = Hashtbl.find env.tbl name in
       let ctor_names = Decl.get_inductive_ctors inductive_info in
       let ctor_num_params = Decl.get_inductive_num_params inductive_info in
@@ -366,8 +366,8 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
       let ctor_type =
         ref (Expr.subst_levels ctor_info_type ctor_uparams uparams)
       in
-      Logger.info "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
-      Logger.info "ctor_type : %a" Expr.pp !ctor_type;
+      Logger.debug "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
+      Logger.debug "ctor_type : %a" Expr.pp !ctor_type;
       let ty_param_args = CCList.take ctor_num_params ty_args in
       for i = 0 to CCList.length ty_param_args - 1 do
         let for_ty = whnf env !ctor_type in
@@ -444,7 +444,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
-    Logger.info "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
+    Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
     if e3 = e then
       e3
     else
@@ -569,7 +569,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
 
 let check (env : Env.t) (decl : Decl.t) : bool =
   let module Logger = (val env.logger) in
-  Logger.info "@[Now type-checking %a.@]" Decl.pp decl;
+  Logger.debug "@[Now type-checking %a.@]" Decl.pp decl;
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
     (* TODO: definitions should be unfolded according to reducibility hints. *)
@@ -598,7 +598,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   If yes, we call that declaration well-posed and only typecheck those. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let module Logger = (val env.logger) in
-  Logger.info "Checking if %a is well-posed." Name.pp info.name;
+  Logger.debug "Checking if %a is well-posed." Name.pp info.name;
   let rec dup_exist = function
     | [] -> false
     | hd :: tl -> List.exists (( = ) hd) tl || dup_exist tl
@@ -606,11 +606,11 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_dup_uparams = dup_exist info.uparams |> not in
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
-    Logger.info "Checking if type %a is sort" Expr.pp info.ty;
+    Logger.debug "Checking if type %a is sort" Expr.pp info.ty;
     try
       match infer env info.ty with
       | Expr.Sort _ ->
-        Logger.info "Type of %a is sort" Name.pp info.name;
+        Logger.debug "Type of %a is sort" Name.pp info.name;
         true
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
@@ -642,11 +642,12 @@ let typecheck (env : Env.t) =
         DeclLogger.err "Declaration %a is not well-posed" Not_well_posed Name.pp
           n
       else
-        DeclLogger.info "Declaration %a is well-posed." Name.pp n;
+        DeclLogger.success "Declaration %a is well-posed." Name.pp n;
       (* Decl is well-posed, so perform typechecking. *)
       try
         if check env d then
-          success := !success + 1
+          (DeclLogger.success "Type checked decl %a." Name.pp (Decl.get_name d);
+          success := !success + 1)
         else
           ()
       with TypeError e ->
