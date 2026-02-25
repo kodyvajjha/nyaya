@@ -29,7 +29,9 @@ type literal =
   | StrLit of string
 [@@deriving show]
 
-type t =
+type t = expr Hc.hash_consed
+
+and expr =
   | BoundVar of int
   | FreeVar of {
       name: Name.t;
@@ -86,12 +88,99 @@ let (foo : Bar) := 0; foo
       expr: t;
     }
   | Literal of literal
-[@@deriving show]
+
+let node (e : t) = e.node
+
+let tag (e : t) = e.tag
+
+module E = struct
+  type t = expr
+
+  let equal_hc (x : t Hc.hash_consed) (y : t Hc.hash_consed) = x == y
+
+  let hash_level (l : Level.t) = Hashtbl.hash (Level.simplify l)
+
+  let hash_uparams (uparams : Level.t list) =
+    Hashtbl.hash (CCList.map Level.simplify uparams)
+
+  let equal x y =
+    match (x, y : expr * expr) with
+    | BoundVar i, BoundVar j -> i = j
+    | FreeVar fx, FreeVar fy ->
+      fx.fvarId = fy.fvarId && fx.name = fy.name && fx.info = fy.info
+      && equal_hc fx.expr fy.expr
+    | Const cx, Const cy ->
+      cx.name = cy.name && CCList.equal Level.eq cx.uparams cy.uparams
+    | Sort lx, Sort ly -> Level.eq lx ly
+    | App (f1, a1), App (f2, a2) -> equal_hc f1 f2 && equal_hc a1 a2
+    | Lam l1, Lam l2 ->
+      l1.name = l2.name && l1.binfo = l2.binfo && equal_hc l1.btype l2.btype
+      && equal_hc l1.body l2.body
+    | Forall f1, Forall f2 ->
+      f1.name = f2.name && f1.binfo = f2.binfo && equal_hc f1.btype f2.btype
+      && equal_hc f1.body f2.body
+    | Let z1, Let z2 ->
+      z1.name = z2.name && equal_hc z1.btype z2.btype
+      && equal_hc z1.value z2.value && equal_hc z1.body z2.body
+    | Proj p1, Proj p2 ->
+      p1.name = p2.name && p1.nat = p2.nat && equal_hc p1.expr p2.expr
+    | Literal (NatLit n1), Literal (NatLit n2) -> Z.equal n1 n2
+    | Literal (StrLit s1), Literal (StrLit s2) -> String.equal s1 s2
+    | _, _ -> false
+
+  let hash = function
+    | BoundVar i -> Hashtbl.hash (0, i)
+    | FreeVar { name; expr; info; fvarId } ->
+      Hashtbl.hash (1, name, tag expr, info, fvarId)
+    | Const { name; uparams } -> Hashtbl.hash (2, name, hash_uparams uparams)
+    | Sort l -> Hashtbl.hash (3, hash_level l)
+    | App (f, a) -> Hashtbl.hash (4, tag f, tag a)
+    | Lam { name; btype; binfo; body } ->
+      Hashtbl.hash (5, name, tag btype, binfo, tag body)
+    | Forall { name; btype; binfo; body } ->
+      Hashtbl.hash (6, name, tag btype, binfo, tag body)
+    | Let { name; btype; value; body } ->
+      Hashtbl.hash (7, name, tag btype, tag value, tag body)
+    | Proj { name; nat; expr } -> Hashtbl.hash (8, name, nat, tag expr)
+    | Literal (NatLit n) -> Hashtbl.hash (9, Z.to_bits n)
+    | Literal (StrLit s) -> Hashtbl.hash (10, s)
+end
+
+module HExpr = Hc.Make (E)
+
+let sort l = HExpr.hashcons (Sort l)
+
+let lambda name btype binfo body =
+  HExpr.hashcons (Lam { name; btype; binfo; body })
+
+let app f e = HExpr.hashcons (App (f, e))
+
+(** Transform [(f, [x0; x1; ...; xN])] into [App(App(...App(f, x0), x1), ... , xN)]. Note: this is the inverse of [get_apps] above.*)
+let mk_app f args = CCList.fold_left (fun acc a -> app acc a) f args
+
+let pi name btype binfo body =
+  HExpr.hashcons (Forall { name; btype; binfo; body })
+
+let letin name btype value body =
+  HExpr.hashcons (Let { name; btype; value; body })
+
+let const ?(ups = []) s = HExpr.hashcons (Const { name = s; uparams = ups })
+
+let bv i = HExpr.hashcons (BoundVar i)
+
+let fvar name expr info fvarId =
+  HExpr.hashcons (FreeVar { name; expr; info; fvarId })
+
+let proj x i e = HExpr.hashcons (Proj { name = x; nat = i; expr = e })
+
+let natlit i = HExpr.hashcons (Literal (NatLit i))
+
+let strlit s = HExpr.hashcons (Literal (StrLit s))
 
 (** Collect a chain of [App(App(App(f, x_0), x_1) ... x_N)] as [f,[x_0;x_1;x_2;...;x_N]]*)
 let get_apps e =
   let rec aux head running =
-    match head with
+    match node head with
     | App (f, a) -> aux f (running @ [ a ])
     | _ -> head, CCList.rev running
   in
@@ -99,7 +188,7 @@ let get_apps e =
 
 let gather_lams e =
   let rec aux running final =
-    match final with
+    match node final with
     | Lam { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
     | _ -> running, final
   in
@@ -107,7 +196,7 @@ let gather_lams e =
 
 let gather_foralls f =
   let rec aux running final =
-    match final with
+    match node final with
     | Forall { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
     | _ -> running, final
   in
@@ -154,7 +243,7 @@ module Pp = struct
       Format.kfprintf (fun _ -> ()) out fmt
 
   let rec pp prec fpf expr =
-    match expr with
+    match node expr with
     | Sort u ->
       if Level.is_zero u then
         wrap Prec.Sort prec fpf "Prop"
@@ -172,13 +261,13 @@ module Pp = struct
         Fmt.fprintf fpf "@[<h>%a.@[<h>{%a}@]@]" Name.pp name
           Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf ",") Level.pp)
           uparams
-    | App _ as e ->
-      let f, args = get_apps e in
+    | App _ ->
+      let f, args = get_apps expr in
       wrap Prec.App prec fpf "@[<2>%a@ %a@]" (pp prec) f
         Fmt.(list ~sep:Fmt.pp_print_space (pp Prec.Atom))
         args
-    | Lam _ as l ->
-      let binders, final = gather_lams l in
+    | Lam _ ->
+      let binders, final = gather_lams expr in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
@@ -186,8 +275,8 @@ module Pp = struct
       wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>fun @[%a@] => %a@]@]"
         Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
         binders (pp prec) final
-    | Forall _ as f ->
-      let binders, final = gather_foralls f in
+    | Forall _ ->
+      let binders, final = gather_foralls expr in
       let pp_binder fpf (name, btype) =
         (* TODO: print brackets according to binfo. *)
         Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
@@ -210,23 +299,8 @@ let pp fpf e = Pp.pp Pp.Prec.Bot fpf e
 
 let to_string e = Fmt.to_string pp e
 
-let sort l = Sort l
-
-let lambda name btype body = Lam { name; btype; binfo = Default; body }
-
-(** Transform [(f, [x0; x1; ...; xN])] into [App(App(...App(f, x0), x1), ... , xN)]. Note: this is the inverse of [get_apps] above.*)
-let mk_app f args = CCList.fold_left (fun acc a -> App (acc, a)) f args
-
-let pi x ty body = Forall { name = x; btype = ty; binfo = Default; body }
-
-let letin x ty v b = Let { name = x; btype = ty; value = v; body = b }
-
-let const ?(ups = []) s = Const { name = s; uparams = ups }
-
-let bv i = BoundVar i
-
 let rec has_free_vars (expr : t) =
-  match expr with
+  match node expr with
   | BoundVar _ -> false
   | FreeVar _ -> true
   | Const _ -> false
@@ -245,13 +319,13 @@ let is_free_var expr =
   | _ -> false
 
 let get_fvar_id expr =
-  match expr with
+  match node expr with
   | FreeVar { fvarId; _ } -> fvarId
   | _ ->
     Logger.err "Expr %a is not a free variable" (Failure "get_fvar_id") pp expr
 
 let rec num_loose_bvars expr =
-  match expr with
+  match node expr with
   | Sort _ | Const _ | FreeVar _ | Literal _ -> 0
   | BoundVar i -> i + 1
   | App (f, a) -> Int.max (num_loose_bvars f) (num_loose_bvars a)
@@ -280,7 +354,7 @@ let instantiate
     if num_loose_bvars expr <= offset then
       expr
     else (
-      match expr with
+      match node expr with
       | BoundVar i ->
         if offset <= i then
           (* Logger.debugf
@@ -296,34 +370,26 @@ let instantiate
           expr
       | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
       | App (f, a) ->
-        App
-          (instantiate_aux free_var f offset, instantiate_aux free_var a offset)
+        app
+          (instantiate_aux free_var f offset)
+          (instantiate_aux free_var a offset)
       | Lam { name; btype; binfo; body } ->
-        Lam
-          {
-            name;
-            btype = instantiate_aux free_var btype offset;
-            binfo;
-            body = instantiate_aux free_var body (offset + 1);
-          }
+        lambda name
+          (instantiate_aux free_var btype offset)
+          binfo
+          (instantiate_aux free_var body (offset + 1))
       | Forall { name; btype; binfo; body } ->
-        Forall
-          {
-            name;
-            btype = instantiate_aux free_var btype offset;
-            binfo;
-            body = instantiate_aux free_var body (offset + 1);
-          }
+        pi name
+          (instantiate_aux free_var btype offset)
+          binfo
+          (instantiate_aux free_var body (offset + 1))
       | Let { name; btype; value; body } ->
-        Let
-          {
-            name;
-            btype = instantiate_aux free_var btype offset;
-            value = instantiate_aux free_var value offset;
-            body = instantiate_aux free_var body (offset + 1);
-          }
+        letin name
+          (instantiate_aux free_var btype offset)
+          (instantiate_aux free_var value offset)
+          (instantiate_aux free_var body (offset + 1))
       | Proj { name; nat; expr } ->
-        Proj { name; nat; expr = instantiate_aux free_var expr offset }
+        proj name nat (instantiate_aux free_var expr offset)
     )
   in
   let inst = instantiate_aux free_var expr 0 in
@@ -337,84 +403,57 @@ let instantiate
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
    suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)
 let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
-  match e with
+  match node e with
   | BoundVar i ->
     (* we are inserting a binder at depth k; bump existing indices >= k *)
     if i >= k then
-      BoundVar (i + 1)
+      bv (i + 1)
     else
       e
   | FreeVar fv ->
     if fv.fvarId = target_id then
-      BoundVar k
+      bv k
     else
       e
   | Const _ | Sort _ | Literal _ -> e
   | App (f, a) ->
-    App (abstract_fvar ~target_id ~k f, abstract_fvar ~target_id ~k a)
+    app (abstract_fvar ~target_id ~k f) (abstract_fvar ~target_id ~k a)
   | Lam { name; btype; binfo; body } ->
-    Lam
-      {
-        name;
-        btype = abstract_fvar ~target_id ~k btype;
-        binfo;
-        body = abstract_fvar ~target_id ~k:(k + 1) body;
-      }
+    lambda name
+      (abstract_fvar ~target_id ~k btype)
+      binfo
+      (abstract_fvar ~target_id ~k:(k + 1) body)
   | Forall { name; btype; binfo; body } ->
-    Forall
-      {
-        name;
-        btype = abstract_fvar ~target_id ~k btype;
-        binfo;
-        body = abstract_fvar ~target_id ~k:(k + 1) body;
-      }
+    pi name
+      (abstract_fvar ~target_id ~k btype)
+      binfo
+      (abstract_fvar ~target_id ~k:(k + 1) body)
   | Let { name; btype; value; body } ->
-    Let
-      {
-        name;
-        btype = abstract_fvar ~target_id ~k btype;
-        value = abstract_fvar ~target_id ~k value;
-        body = abstract_fvar ~target_id ~k:(k + 1) body;
-      }
+    letin name
+      (abstract_fvar ~target_id ~k btype)
+      (abstract_fvar ~target_id ~k value)
+      (abstract_fvar ~target_id ~k:(k + 1) body)
   | Proj { name; nat; expr = e1 } ->
-    Proj { name; nat; expr = abstract_fvar ~target_id ~k e1 }
+    proj name nat (abstract_fvar ~target_id ~k e1)
 
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
-  match expr with
+  match node expr with
   | BoundVar _ | Literal _ -> expr
-  | Sort l -> Sort (Level.subst_simp ~level:l ~ks ~vs)
+  | Sort l -> sort (Level.subst_simp ~level:l ~ks ~vs)
   | FreeVar { name; expr; info; fvarId } ->
-    FreeVar { name; expr = subst_levels expr ks vs; info; fvarId }
+    fvar name (subst_levels expr ks vs) info fvarId
   | Const { name; uparams } ->
     let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
-    Const { name; uparams = uparams' }
-  | App (f, a) -> App (subst_levels f ks vs, subst_levels a ks vs)
+    const name ~ups:uparams'
+  | App (f, a) -> app (subst_levels f ks vs) (subst_levels a ks vs)
   | Lam { name; btype; binfo; body } ->
-    Lam
-      {
-        name;
-        btype = subst_levels btype ks vs;
-        binfo;
-        body = subst_levels body ks vs;
-      }
+    lambda name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
   | Forall { name; btype; binfo; body } ->
-    Forall
-      {
-        name;
-        btype = subst_levels btype ks vs;
-        binfo;
-        body = subst_levels body ks vs;
-      }
+    pi name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
   | Let { name; btype; value; body } ->
-    Let
-      {
-        name;
-        btype = subst_levels btype ks vs;
-        value = subst_levels value ks vs;
-        body = subst_levels body ks vs;
-      }
-  | Proj { name; nat; expr } ->
-    Proj { name; nat; expr = subst_levels expr ks vs }
+    letin name (subst_levels btype ks vs) (subst_levels value ks vs)
+      (subst_levels body ks vs)
+  | Proj { name; nat; expr } -> proj name nat (subst_levels expr ks vs)
 
 open Nyaya_parser
 
@@ -434,43 +473,44 @@ let table name_table level_table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
         let open CCOption in
         let+ expr = Hashtbl.find_opt expr_table eid in
         match expr with
-        | Ast.Expr.EVExpr { num; _ } -> BoundVar num
+        | Ast.Expr.EVExpr { num; _ } -> bv num
         | Ast.Expr.ESExpr { uid; _ } ->
-          Sort (getter level_table uid "level table in ES")
+          sort (getter level_table uid "level table in ES")
         | Ast.Expr.ECExpr { nid; uids; _ } ->
           let name = getter name_table nid "name table in EC" in
           let uparams =
             CCList.(
               uids >|= fun id -> getter level_table id "level table in EC")
           in
-          Const { name; uparams }
-        | Ast.Expr.EAExpr { eid2; eid3; _ } -> App (resolve eid2, resolve eid3)
+          const name ~ups:uparams
+        | Ast.Expr.EAExpr { eid2; eid3; _ } -> app (resolve eid2) (resolve eid3)
         | Ast.Expr.ELExpr { info; nid; eid2; eid3; _ } ->
           let name = getter name_table nid "name table in EL" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
-          Lam { name; binfo; btype; body }
+          lambda name btype binfo body
         | Ast.Expr.EPExpr { info; nid; eid2; eid3; _ } ->
           let name = getter name_table nid "name table in EP" in
           let binfo = binfo_of_ast info in
           let btype = resolve eid2 in
           let body = resolve eid3 in
-          Forall { name; binfo; btype; body }
+          pi name btype binfo body
         | Ast.Expr.EZExpr { nid; eid2; eid3; eid4; _ } ->
           let name = getter name_table nid "name table in EZ" in
           let btype = resolve eid2 in
           let value = resolve eid3 in
           let body = resolve eid4 in
-          Let { name; btype; value; body }
+          letin name btype value body
+          (* Let { name; btype; value; body } *)
         | Ast.Expr.EJExpr { nid; num; eid2; _ } ->
           let name = getter name_table nid "name table in EJ" in
           let nat = num in
           let expr = resolve eid2 in
-          Proj { name; nat; expr }
+          proj name nat expr
         | Ast.Expr.ELNExpr { num; _ } ->
           let nat = Z.of_string num in
-          Literal (NatLit nat)
+          natlit nat
         | Ast.Expr.ELSExpr { hexhex; _ } ->
           let str =
             let bytes = Bytes.create (List.length hexhex) in
@@ -481,7 +521,7 @@ let table name_table level_table (ast : Ast.t) : (Ast.eidx, t) Hashtbl.t =
               hexhex;
             Bytes.to_string bytes
           in
-          Literal (StrLit str)
+          strlit str
         | Ast.Expr.EMExpr _ ->
           failwith "Do not know how to resolve #EM just yet!!"
       in
