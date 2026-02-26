@@ -100,7 +100,8 @@ let get_apps e =
 let gather_lams e =
   let rec aux running final =
     match final with
-    | Lam { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+    | Lam { name; btype; binfo; body } ->
+      aux (running @ [ name, btype, binfo ]) body
     | _ -> running, final
   in
   aux [] e
@@ -108,7 +109,8 @@ let gather_lams e =
 let gather_foralls f =
   let rec aux running final =
     match final with
-    | Forall { name; btype; body; _ } -> aux (running @ [ name, btype ]) body
+    | Forall { name; btype; binfo; body } ->
+      aux (running @ [ name, btype, binfo ]) body
     | _ -> running, final
   in
   aux [] f
@@ -174,23 +176,25 @@ module Pp = struct
           uparams
     | App _ as e ->
       let f, args = get_apps e in
-      wrap Prec.App prec fpf "@[<2>%a@ %a@]" (pp prec) f
+      wrap Prec.App prec fpf "@[<2>%a@ %a@]" (pp Prec.App) f
         Fmt.(list ~sep:Fmt.pp_print_space (pp Prec.Atom))
         args
     | Lam _ as l ->
       let binders, final = gather_lams l in
-      let pp_binder fpf (name, btype) =
-        (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
+      let pp_binder fpf (name, btype, binfo) =
+        let lbr, rbr = bracks binfo in
+        Fmt.fprintf fpf "@[%s%a : %a%s@]" lbr Name.pp name (pp Prec.Binder)
+          btype rbr
       in
       wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>fun @[%a@] => %a@]@]"
         Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
         binders (pp prec) final
     | Forall _ as f ->
       let binders, final = gather_foralls f in
-      let pp_binder fpf (name, btype) =
-        (* TODO: print brackets according to binfo. *)
-        Fmt.fprintf fpf "@[(%a : %a)@]" Name.pp name (pp Prec.Binder) btype
+      let pp_binder fpf (name, btype, binfo) =
+        let lbr, rbr = bracks binfo in
+        Fmt.fprintf fpf "@[%s%a : %a%s@]" lbr Name.pp name (pp Prec.Binder)
+          btype rbr
       in
       wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@], %a@]@]"
         Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
