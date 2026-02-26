@@ -498,7 +498,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   let frame = WhnfTrace.enter env expr in
   match whnf_impl env expr frame with
   | ans ->
-    WhnfTrace.leave env frame ans;
+    WhnfTrace.leave env frame (TraceUtil.expr_summary ans);
     ans
   | exception exn ->
     let backtrace = Printexc.get_raw_backtrace () in
