@@ -46,22 +46,19 @@ module InferTrace = struct
     incr next_id;
     stack := frame :: !stack;
     if not elide_ok then
-      Logger.info "[i#%d d=%d p=%s] -> %s" id (CCList.length !stack)
-        (current_path ()) (expr_summary expr);
+      Logger.info "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
     frame
 
   let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
     let module Logger = (val env.logger) in
     stack := CCList.tl_safe !stack;
     if not elide_ok then
-      Logger.info "[i#%d d=%d p=%s] <- ok %s" frame.id (CCList.length !stack)
-        (current_path ()) (expr_summary ty)
+      Logger.info "[i#%d p=%s] <- ok %s" frame.id (current_path ()) (expr_summary ty)
 
   let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
     let module Logger = (val env.logger) in
     stack := CCList.tl_safe !stack;
-    Logger.app "[i#%d d=%d p=%s] !! %s expr=%s" frame.id (CCList.length !stack)
-      (current_path ())
+    Logger.app "[i#%d p=%s] !! %s expr=%s" frame.id (current_path ())
       (Printexc.to_string exn) (expr_summary frame.expr)
 
   let reset () =
