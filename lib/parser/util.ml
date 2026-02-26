@@ -149,3 +149,116 @@ end = struct
     incr counter;
     id
 end
+
+module MakeRecTrace (Cfg : sig
+  type ctx
+  type input
+
+  val tag : string
+  val enabled_env : string option
+  val elide_ok_env : string option
+  val only_env : string option
+  val summarize : input -> string
+  val log : ctx -> string -> unit
+end) = struct
+  type frame = {
+    id: int;
+    input: Cfg.input;
+    enabled: bool;
+  }
+
+  let stack : frame list ref = ref []
+
+  let next_id = ref 0
+
+  let parse_bool_env k =
+    match Sys.getenv_opt k with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let enabled =
+    match Cfg.enabled_env with
+    | None -> true
+    | Some k -> parse_bool_env k
+
+  let elide_ok =
+    match Cfg.elide_ok_env with
+    | None -> false
+    | Some k -> parse_bool_env k
+
+  let only =
+    match Cfg.only_env with
+    | None -> None
+    | Some k -> Sys.getenv_opt k
+
+  let contains_substring ~needle haystack =
+    let needle_len = String.length needle in
+    needle_len > 0
+    &&
+    let rec go i =
+      if i + needle_len > String.length haystack then
+        false
+      else if String.sub haystack i needle_len = needle then
+        true
+      else
+        go (i + 1)
+    in
+    go 0
+
+  let current_path () =
+    !stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let parent_enabled () = List.exists (fun frame -> frame.enabled) !stack
+
+  let should_enable input =
+    enabled
+    &&
+    match only with
+    | None -> true
+    | Some needle when needle = "" -> true
+    | Some needle ->
+      parent_enabled () || contains_substring ~needle (Cfg.summarize input)
+
+  let enter (ctx : Cfg.ctx) (input : Cfg.input) : frame =
+    let id = !next_id in
+    incr next_id;
+    let frame = { id; input; enabled = should_enable input } in
+    stack := frame :: !stack;
+    if frame.enabled && not elide_ok then
+      Cfg.log ctx
+        (CCFormat.sprintf "[%s#%d d=%d p=%s] -> %s" Cfg.tag id
+           (List.length !stack - 1) (current_path ()) (Cfg.summarize input));
+    frame
+
+  let step (ctx : Cfg.ctx) (frame : frame) (label : string) (input : Cfg.input) : unit =
+    if frame.enabled then
+      Cfg.log ctx
+        (CCFormat.sprintf "[%s#%d p=%s] .. %s %s" Cfg.tag frame.id
+           (current_path ()) label (Cfg.summarize input))
+
+  let branch (ctx : Cfg.ctx) (frame : frame) (label : string) : unit =
+    if frame.enabled then
+      Cfg.log ctx
+        (CCFormat.sprintf "[%s#%d p=%s] .. branch %s" Cfg.tag frame.id
+           (current_path ()) label)
+
+  let leave (ctx : Cfg.ctx) (frame : frame) (outcome : string) : unit =
+    stack := CCList.tl !stack;
+    if frame.enabled && not elide_ok then
+      Cfg.log ctx
+        (CCFormat.sprintf "[%s#%d d=%d p=%s] <- %s" Cfg.tag frame.id
+           (List.length !stack) (current_path ()) outcome)
+
+  let leave_failure (ctx : Cfg.ctx) (frame : frame) (exn : exn) : unit =
+    stack := CCList.tl !stack;
+    if frame.enabled then
+      Cfg.log ctx
+        (CCFormat.sprintf "[%s#%d p=%s] !! %s input=%s" Cfg.tag frame.id
+           (current_path ()) (Printexc.to_string exn) (Cfg.summarize frame.input))
+
+  let reset () =
+    stack := [];
+    next_id := 0
+end
