@@ -12,6 +12,73 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
+module InferTrace = struct
+  type frame = {
+    id: int;
+    expr: Expr.t;
+    parent_id: int option;
+    started_at: float;
+  }
+
+  let stack : frame list ref = ref []
+
+  let next_id = ref 0
+
+  let truncate ?(max_len = 140) s =
+    if String.length s <= max_len then
+      s
+    else String.sub s 0 (max_len - 3) ^ "..."
+
+  let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
+
+  let current_path () =
+    !stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let enter (env : Env.t) (expr : Expr.t) : frame =
+    let module Logger = (val env.logger) in
+    let parent_id = !stack |> CCList.head_opt |> CCOption.map (fun x -> x.id) in
+    let id = !next_id in
+    let frame = { id; expr; parent_id; started_at = Unix.gettimeofday () } in
+    incr next_id;
+    stack := frame :: !stack;
+    Logger.info
+      "[infer#%d depth=%d parent=%s path=%s] ENTER expr=%s"
+      id
+      (CCList.length !stack)
+      (match parent_id with None -> "root" | Some p -> string_of_int p)
+      (current_path ())
+      (expr_summary expr);
+    frame
+
+  let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
+    let module Logger = (val env.logger) in
+    let duration_ms = (Unix.gettimeofday () -. frame.started_at) *. 1000.0 in
+    stack := CCList.tl_safe !stack;
+    Logger.info
+      "[infer#%d depth=%d path=%s] EXIT ok in %.2fms type=%s"
+      frame.id
+      (CCList.length !stack)
+      (current_path ()) duration_ms
+      (expr_summary ty)
+
+  let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
+    let module Logger = (val env.logger) in
+    let duration_ms = (Unix.gettimeofday () -. frame.started_at) *. 1000.0 in
+    stack := CCList.tl_safe !stack;
+    Logger.warn
+      "[infer#%d depth=%d path=%s] EXIT exn in %.2fms exn=%s"
+      frame.id
+      (CCList.length !stack)
+      (current_path ()) duration_ms
+      (Printexc.to_string exn)
+
+  let reset () =
+    stack := [];
+    next_id := 0
+end
+
 module Pp = struct
   let pp_check fpf (e, ty) =
     let pp_value fpf e = CCFormat.fprintf fpf "value:@ %a" Expr.pp e in
@@ -174,8 +241,17 @@ end
 
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
+  let frame = InferTrace.enter env expr in
+  match infer_impl env expr with
+  | ty ->
+    InferTrace.leave_success env frame ty;
+    ty
+  | exception exn ->
+    InferTrace.leave_failure env frame exn;
+    raise exn
+
+and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.infof Pp.pp_inferring expr;
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -635,6 +711,7 @@ let typecheck (env : Env.t) =
         let header = CCFormat.to_string Name.pp n
       end) in
       let env = Env.with_logger env (module DeclLogger) in
+      InferTrace.reset ();
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
