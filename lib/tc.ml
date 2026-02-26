@@ -12,6 +12,60 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
+module InferTrace = struct
+  type frame = {
+    id: int;
+    expr: Expr.t;
+  }
+
+  let stack : frame list ref = ref []
+
+  let next_id = ref 0
+
+  let elide_ok =
+    match Sys.getenv_opt "NYAYA_INFER_TRACE_ELIDE_OK" with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let truncate ?(max_len = 100) s =
+    if String.length s <= max_len then
+      s
+    else String.sub s 0 (max_len - 3) ^ "..."
+
+  let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
+
+  let current_path () =
+    !stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let enter (env : Env.t) (expr : Expr.t) : frame =
+    let module Logger = (val env.logger) in
+    let id = !next_id in
+    let frame = { id; expr } in
+    incr next_id;
+    stack := frame :: !stack;
+    if not elide_ok then
+      Logger.info "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
+    frame
+
+  let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
+    let module Logger = (val env.logger) in
+    stack := CCList.tl_safe !stack;
+    if not elide_ok then
+      Logger.info "[i#%d p=%s] <- ok %s" frame.id (current_path ()) (expr_summary ty)
+
+  let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
+    let module Logger = (val env.logger) in
+    stack := CCList.tl_safe !stack;
+    Logger.app "[i#%d p=%s] !! %s expr=%s" frame.id (current_path ())
+      (Printexc.to_string exn) (expr_summary frame.expr)
+
+  let reset () =
+    stack := [];
+    next_id := 0
+end
+
 module Pp = struct
   let pp_check fpf (e, ty) =
     let pp_value fpf e = CCFormat.fprintf fpf "value:@ %a" Expr.pp e in
@@ -174,8 +228,18 @@ end
 
 (** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
+  let frame = InferTrace.enter env expr in
+  match infer_impl env expr with
+  | ty ->
+    InferTrace.leave_success env frame ty;
+    ty
+  | exception exn ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    InferTrace.leave_failure env frame exn;
+    Printexc.raise_with_backtrace exn backtrace
+
+and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.infof Pp.pp_inferring expr;
   match (expr : Expr.t) with
   | Expr.Sort u -> Expr.Sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -635,6 +699,7 @@ let typecheck (env : Env.t) =
         let header = CCFormat.to_string Name.pp n
       end) in
       let env = Env.with_logger env (module DeclLogger) in
+      InferTrace.reset ();
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
