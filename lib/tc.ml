@@ -27,7 +27,7 @@ module InferTrace = struct
     | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
     | _ -> false
 
-  let truncate ?(max_len = 100) s =
+  let truncate ?(max_len = 400) s =
     if String.length s <= max_len then
       s
     else String.sub s 0 (max_len - 3) ^ "..."
@@ -46,18 +46,18 @@ module InferTrace = struct
     incr next_id;
     stack := frame :: !stack;
     if not elide_ok then
-      Logger.info "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
+      Logger.app "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
     frame
 
   let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
     let module Logger = (val env.logger) in
-    stack := CCList.tl_safe !stack;
+    stack := CCList.tl !stack;
     if not elide_ok then
       Logger.info "[i#%d p=%s] <- ok %s" frame.id (current_path ()) (expr_summary ty)
 
   let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
     let module Logger = (val env.logger) in
-    stack := CCList.tl_safe !stack;
+    stack := CCList.tl !stack;
     Logger.app "[i#%d p=%s] !! %s expr=%s" frame.id (current_path ())
       (Printexc.to_string exn) (expr_summary frame.expr)
 
@@ -508,7 +508,7 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
-    Logger.info "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
+    Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
     if e3 = e then
       e3
     else
@@ -638,12 +638,16 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Def { info; value; red_hint = _red_hint } ->
     (* TODO: definitions should be unfolded according to reducibility hints. *)
     Logger.debugf Pp.pp_check (value, info.ty);
-    let ans = isDefEq env (infer env value) info.ty in
+    let inf = (infer env value) in
+    Logger.app "Inference complete";
+    let ans = isDefEq env inf info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
     ans
   | Thm { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
-    let ans = isDefEq env (infer env value) info.ty in
+    let inf = (infer env value) in
+    Logger.app "Inference complete";
+    let ans = isDefEq env (inf) info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
     ans
   | Axiom { name; uparams; ty } ->
