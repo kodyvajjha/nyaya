@@ -247,8 +247,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
     InferTrace.leave_success env frame ty;
     ty
   | exception exn ->
+    let backtrace = Printexc.get_raw_backtrace () in
     InferTrace.leave_failure env frame exn;
-    raise exn
+    Printexc.raise_with_backtrace exn backtrace
 
 and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
