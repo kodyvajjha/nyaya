@@ -37,6 +37,8 @@ module type LOGGER = sig
 
   val info : ('a, Format.formatter, unit, unit) format4 -> 'a
 
+  val app : ('a, Format.formatter, unit, unit) format4 -> 'a
+
   val warn : ('a, Format.formatter, unit, unit) format4 -> 'a
 
   val err : ('a, Format.formatter, unit, 'b) format4 -> exn -> 'a
@@ -55,49 +57,43 @@ module MakeLogger (Data : sig
 end) : LOGGER = struct
   module Format = CCFormat
 
-  let timestamp () =
-    let now = Unix.gettimeofday () in
-    let tm = Unix.localtime now in
-    CCFormat.sprintf "%02d:%02d:%02d" tm.Unix.tm_hour tm.Unix.tm_min
-      tm.Unix.tm_sec
-
-  let stamp_tag : string Logs.Tag.def =
-    Logs.Tag.def "stamp" ~doc:"Time stamp" CCFormat.pp_print_string
-
-  let stamp = Logs.Tag.(empty |> add stamp_tag (timestamp ()))
-
   let reporter ppf =
     let report _src level ~over k msgf =
       let k _ =
         over ();
         k ()
       in
-      let with_stamp h _tags k ppf fmt =
-        Format.kfprintf k ppf
-          ("%a[%s] @[" ^^ fmt ^^ "@]@.")
-          Logs.pp_header (level, h) (timestamp ())
+      let with_header h _tags k ppf fmt =
+        Format.kfprintf k ppf ("%a @[" ^^ fmt ^^ "@]@.")
+          Logs.pp_header (level, h)
       in
-      msgf @@ fun ?header ?tags fmt -> with_stamp header tags k ppf fmt
+      msgf @@ fun ?header ?tags fmt -> with_header header tags k ppf fmt
     in
     { Logs.report }
 
   let info fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.info (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+        Logs.info (fun m -> m "%s" str ~header:Data.header))
+      fmt
+
+  let app fmt =
+    CCFormat.ksprintf
+      ~f:(fun str ->
+        Logs.app (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let success fmt =
     CCFormat.set_color_default true;
     CCFormat.with_color_ksf "green"
       ~f:(fun str ->
-        Logs.info (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+        Logs.info (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let warn fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.warn (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+        Logs.warn (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let err fmt exn =
@@ -111,7 +107,7 @@ end) : LOGGER = struct
         (* Log the original message, the exception, and the backtrace *)
         Logs.err (fun m ->
             m "@[<v 0>%s@,Exception: %s@,@[<v 2>Backtrace:@,%s@]@]" msg
-              (Printexc.to_string exn) bt_s ~header:Data.header ~tags:stamp);
+              (Printexc.to_string exn) bt_s ~header:Data.header);
         (* Re-raise, preserving backtrace *)
         Printexc.raise_with_backtrace exn bt)
       fmt
@@ -119,16 +115,16 @@ end) : LOGGER = struct
   let debug fmt =
     CCFormat.ksprintf
       ~f:(fun str ->
-        Logs.debug (fun m -> m "%s" str ~header:Data.header ~tags:stamp))
+        Logs.debug (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let debugf pp x =
     CCFormat.set_color_default true;
-    Logs.debug (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
+    Logs.debug (fun m -> m ~header:Data.header "%a" pp x)
 
   let infof pp x =
     CCFormat.set_color_default true;
-    Logs.info (fun m -> m ~header:Data.header ~tags:stamp "%a" pp x)
+    Logs.info (fun m -> m ~header:Data.header "%a" pp x)
 end
 
 let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =

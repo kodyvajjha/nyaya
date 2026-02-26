@@ -16,15 +16,18 @@ module InferTrace = struct
   type frame = {
     id: int;
     expr: Expr.t;
-    parent_id: int option;
-    started_at: float;
   }
 
   let stack : frame list ref = ref []
 
   let next_id = ref 0
 
-  let truncate ?(max_len = 140) s =
+  let elide_ok =
+    match Sys.getenv_opt "NYAYA_INFER_TRACE_ELIDE_OK" with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let truncate ?(max_len = 100) s =
     if String.length s <= max_len then
       s
     else String.sub s 0 (max_len - 3) ^ "..."
@@ -38,41 +41,28 @@ module InferTrace = struct
 
   let enter (env : Env.t) (expr : Expr.t) : frame =
     let module Logger = (val env.logger) in
-    let parent_id = !stack |> CCList.head_opt |> CCOption.map (fun x -> x.id) in
     let id = !next_id in
-    let frame = { id; expr; parent_id; started_at = Unix.gettimeofday () } in
+    let frame = { id; expr } in
     incr next_id;
     stack := frame :: !stack;
-    Logger.info
-      "[infer#%d depth=%d parent=%s path=%s] ENTER expr=%s"
-      id
-      (CCList.length !stack)
-      (match parent_id with None -> "root" | Some p -> string_of_int p)
-      (current_path ())
-      (expr_summary expr);
+    if not elide_ok then
+      Logger.info "[i#%d d=%d p=%s] -> %s" id (CCList.length !stack)
+        (current_path ()) (expr_summary expr);
     frame
 
   let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
     let module Logger = (val env.logger) in
-    let duration_ms = (Unix.gettimeofday () -. frame.started_at) *. 1000.0 in
     stack := CCList.tl_safe !stack;
-    Logger.info
-      "[infer#%d depth=%d path=%s] EXIT ok in %.2fms type=%s"
-      frame.id
-      (CCList.length !stack)
-      (current_path ()) duration_ms
-      (expr_summary ty)
+    if not elide_ok then
+      Logger.info "[i#%d d=%d p=%s] <- ok %s" frame.id (CCList.length !stack)
+        (current_path ()) (expr_summary ty)
 
   let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
     let module Logger = (val env.logger) in
-    let duration_ms = (Unix.gettimeofday () -. frame.started_at) *. 1000.0 in
     stack := CCList.tl_safe !stack;
-    Logger.warn
-      "[infer#%d depth=%d path=%s] EXIT exn in %.2fms exn=%s"
-      frame.id
-      (CCList.length !stack)
-      (current_path ()) duration_ms
-      (Printexc.to_string exn)
+    Logger.app "[i#%d d=%d p=%s] !! %s expr=%s" frame.id (CCList.length !stack)
+      (current_path ())
+      (Printexc.to_string exn) (expr_summary frame.expr)
 
   let reset () =
     stack := [];
