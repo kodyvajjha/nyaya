@@ -100,7 +100,7 @@ module Reduce = struct
   let beta e =
     Logger.debug "@[Beta reducing @[<hov 2> %a@]@]" pp e;
     let rec aux f args =
-      match f, args with
+      match node f, args with
       | Lam { body; _ }, v :: vs ->
         aux (instantiate ~free_var:v ~expr:body ()) vs
       | _, _ -> mk_app f args
@@ -120,8 +120,8 @@ module Reduce = struct
   let delta_at_head (env : Env.t) f =
     let module Logger = (val env.logger) in
     (* One-step delta reduction of the head. *)
-    match f with
-    | Const { name; uparams } as c ->
+    match node f with
+    | Const { name; uparams }  ->
       let decl = Hashtbl.find env.tbl name in
       let decl_value = decl |> Decl.get_value in
       let ans =
@@ -132,7 +132,7 @@ module Reduce = struct
             CCList.map Level.param (decl |> Decl.get_uparams)
           in
           Expr.subst_levels v decl_uparams uparams
-        | None -> c
+        | None -> f
       in
       Logger.debugf
         (fun fpf (t1, t2) ->
@@ -148,7 +148,7 @@ module Reduce = struct
   let iota_at_head (env : Env.t) (e : Expr.t) whnf : Expr.t =
     let module Logger = (val env.logger) in
     let hd, args = Expr.get_apps e in
-    match hd with
+    match Expr.node hd with
     | Expr.Const { name = rec_name; _ } ->
       (* Look up decl for the head constant *)
       let decl =
@@ -164,7 +164,7 @@ module Reduce = struct
           let major = List.nth args major_idx in
           let major_whnf = whnf env major in
           let maj_hd, maj_args = Expr.get_apps major_whnf in
-          match maj_hd with
+          match node maj_hd with
           | Expr.Const { name = ctor_name; _ } ->
             (* Find matching reduction rule *)
             let rule_opt =
@@ -240,8 +240,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
 
 and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  match (expr : Expr.t) with
-  | Expr.Sort u -> Expr.Sort (Level.Succ u)
+  Logger.infof Pp.pp_inferring expr;
+  match Expr.node expr with
+  | Expr.Sort u -> Expr.sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
     (*
        infer FVar id binder:
@@ -262,20 +263,14 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
        let bodyType := infer $ instantiate(body, binderFVar)
        Pi binder (abstract bodyType binderFVar)
     *)
-    (match whnf env (infer env btype) with
+    (match whnf env (infer env btype) |> Expr.node with
     | Expr.Sort _ ->
       Logger.debugf
         (fun fpf e ->
           CCFormat.fprintf fpf "@[binder type %a is a sort@]" Expr.pp e)
         btype;
       let binder_free_var =
-        Expr.FreeVar
-          {
-            name;
-            expr = btype;
-            info = binfo;
-            fvarId = Nyaya_parser.Util.Uid.mk ();
-          }
+        Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) 
       in
       Logger.debugf
         (fun fpf (e1, e2) ->
@@ -290,16 +285,10 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
              ~expr:body ())
       in
       let target_id = Expr.get_fvar_id binder_free_var in
-      Expr.Forall
-        {
-          name;
-          btype;
-          binfo;
-          body = Expr.abstract_fvar ~target_id ~k:0 body_type;
-        }
+      Expr.pi name btype binfo (Expr.abstract_fvar ~target_id ~k:0 body_type)
     | _ ->
       Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp expr)
-  | Expr.Forall { name; btype; binfo; body } as _e ->
+  | Expr.Forall { name; btype; binfo; body } ->
     (*
       infer Pi binder body:
       let l := inferSortOf binder
@@ -309,13 +298,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     let l = infer_sort_of env btype in
     Logger.debug "@[Level of %a is %a@]" Expr.pp btype Level.pp l;
     let free_var =
-      Expr.FreeVar
-        {
-          name;
-          expr = btype;
-          info = binfo;
-          fvarId = Nyaya_parser.Util.Uid.mk ();
-        }
+      Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
     in
     Logger.debugf
       (fun fpf (e1, e2) ->
@@ -348,7 +331,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     in
     Logger.debug "Inferred constant type : %a" Expr.pp res;
     res
-  | Expr.App (f, arg) as e ->
+  | Expr.App (f, arg) ->
     (*
     infer App(f, arg):
       match (whnf $ infer f) with
@@ -357,7 +340,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
         instantiate(body, arg)
       | _ => error
     *)
-    (match whnf env (infer env f) with
+    (match whnf env (infer env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
       let arg_type = infer env arg in
       Logger.debugf Pp.pp_defeq (btype, arg_type);
@@ -365,31 +348,31 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
-          \ inferred arg type = %a.@]" (Failure "failed 1") Expr.pp e Expr.pp
+          \ inferred arg type = %a.@]" (Failure "failed 1") Expr.pp expr Expr.pp
           btype Expr.pp arg_type;
       let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
-      Logger.info "Inferred type of %a to be %a" Expr.pp e Expr.pp p;
+      Logger.debug "Inferred type of %a to be %a" Expr.pp expr Expr.pp p;
       p
     | e ->
       Logger.err "Failed infer at app, got @[%a@] instead of a forall"
-        (TypeError f) Expr.pp e)
-  | Let { name; btype; value; body } as e ->
-    Logger.debug "Inferring Let : %a" Expr.pp e;
+        (TypeError f) Expr.pp expr)
+  | Let { name; btype; value; body }  ->
+    Logger.debug "Inferring Let : %a" Expr.pp expr;
     (*
        infer Let binder val body:
        assert! inferSortOf binder
        assert! defEq(infer(val), binder.type)
        infer (instantiate body val)
     *)
-    (match infer env btype with
+    (match infer env btype |> Expr.node with
     | Sort _ ->
-      Logger.debug "Inferring Let : %a" Expr.pp e;
+      Logger.debug "Inferring Let : %a" Expr.pp expr;
       if not (isDefEq env btype (infer env value)) then
         Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed 2") Expr.pp
           btype Expr.pp (infer env value);
       infer env
         (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
-    | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp e)
+    | _ -> Logger.err "binder type is not a sort: %a" (TypeError expr) Expr.pp expr)
   | Proj { name; nat; expr } ->
     (*
        let structType := whnf (infer structure)
@@ -416,9 +399,9 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     let struct_type = infer env expr |> whnf env in
     let const, ty_args = Expr.get_apps struct_type in
-    (match const with
+    (match const |> Expr.node with
     | Const { name; uparams } ->
-      Logger.info "const : %a" Expr.pp const;
+      Logger.debug "const : %a" Expr.pp const;
       let inductive_info = Hashtbl.find env.tbl name in
       let ctor_names = Decl.get_inductive_ctors inductive_info in
       let ctor_num_params = Decl.get_inductive_num_params inductive_info in
@@ -430,12 +413,12 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let ctor_type =
         ref (Expr.subst_levels ctor_info_type ctor_uparams uparams)
       in
-      Logger.info "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
-      Logger.info "ctor_type : %a" Expr.pp !ctor_type;
+      Logger.debug "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
+      Logger.debug "ctor_type : %a" Expr.pp !ctor_type;
       let ty_param_args = CCList.take ctor_num_params ty_args in
       for i = 0 to CCList.length ty_param_args - 1 do
         let for_ty = whnf env !ctor_type in
-        match for_ty with
+        match for_ty |> Expr.node with
         | Forall { body; _ } ->
           let ty_arg = CCList.nth ty_param_args i in
           ctor_type :=
@@ -449,9 +432,9 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       (* Now, instantiate the projections *)
       for i = 0 to nat - 1 do
         let for_ty = whnf env !ctor_type in
-        match for_ty with
+        match for_ty |> Expr.node with
         | Forall { body; _ } ->
-          let proj_expr = Expr.Proj { name; nat = i; expr } in
+          let proj_expr = Expr.proj name i expr  in
           ctor_type :=
             Expr.instantiate ~logger:env.logger ~free_var:proj_expr ~expr:body
               ()
@@ -463,20 +446,20 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       done;
       (* Now, the next binder's type is the projection type *)
       let final_ty = whnf env !ctor_type in
-      (match final_ty with
+      (match final_ty |> Expr.node with
       | Forall { btype; _ } -> btype
       | _ ->
         Logger.err "Final type error: expected Forall type but got %a"
           (TypeError final_ty) Expr.pp final_ty)
-    | e ->
+    | _ ->
       Logger.err
         "@[While inferring @[%a@] expected a const, got @[%a@] instead@]"
-        (TypeError e) Expr.pp struct_type Expr.pp e)
+        (TypeError expr) Expr.pp struct_type Expr.pp expr)
   | Literal lit ->
     (match lit with
     | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
     | Expr.StrLit _ -> Expr.const (Name.of_string "String"))
-  | BoundVar _ as expr ->
+  | BoundVar _ ->
     (* Since we are using the locally nameless approach, we should not run into
        bound variables during type inference, because all open binders will be
        instantiated with the appropriate free variables. *)
@@ -486,20 +469,21 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
 
 and infer_sort_of env (expr : Expr.t) =
   let module Logger = (val env.logger) in
-  match whnf env (infer env expr) with
+  match whnf env (infer env expr) |> Expr.node with
   | Sort lvl -> lvl
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort" (TypeError expr) Expr.pp
       (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
+  Logger.debug "Whnf : %a" Expr.pp expr;
   let module Logger = (val env.logger) in
-  match expr with
-  | Expr.Sort u -> Expr.Sort (Level.simplify u)
-  | Expr.App (f, arg) as e ->
-    let hd, args = Expr.get_apps e in
+  match expr |> Expr.node with
+  | Expr.Sort u -> Expr.sort (Level.simplify u)
+  | Expr.App (f, arg) ->
+    let hd, args = Expr.get_apps expr in
     let hd' =
-      match hd with
+      match hd |> Expr.node with
       | Expr.Const _ -> Reduce.delta_at_head env hd
       | _ -> whnf env hd
     in
@@ -509,22 +493,22 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
     Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
-    if e3 = e then
+    if e3 = expr then
       e3
     else
       whnf env e3
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
-  | Expr.Const { name; uparams } as e ->
+  | Expr.Const { name; uparams }  ->
     (* Delta reduction *)
-    Reduce.delta_at_head env e
+    Reduce.delta_at_head env expr
   | Expr.Forall { name; btype; binfo; body } ->
     (* Reduce the domain type *)
-    Expr.Forall { name; btype = whnf env btype; binfo; body }
-  | e ->
+    Expr.pi name (whnf env btype) binfo body 
+  | _ ->
     Logger.debug "not reducing: %a" Expr.pp expr;
-    e
+    expr
 
 (* TODO: optimize def eq checking by implementing union-find.
    TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
@@ -532,20 +516,14 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 and isDefEq env e1 e2 =
   let module Logger = (val env.logger) in
   Logger.debugf Pp.pp_defeq (e1, e2);
-  match e1 |> whnf env, e2 |> whnf env with
+  match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
   | ( Expr.Forall { name = n; btype = s; body = a; binfo },
       Expr.Forall { btype = t; body = b; _ } ) ->
     if isDefEq env s t then (
       let free_var =
-        Expr.FreeVar
-          {
-            name = n;
-            expr = s;
-            info = binfo;
-            fvarId = Nyaya_parser.Util.Uid.mk ();
-          }
+        Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
       in
       isDefEq env
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
@@ -567,13 +545,7 @@ and isDefEq env e1 e2 =
       Expr.Lam { btype = t; body = b; _ } ) ->
     if isDefEq env s t then (
       let free_var =
-        Expr.FreeVar
-          {
-            name = n;
-            expr = s;
-            info = binfo;
-            fvarId = Nyaya_parser.Util.Uid.mk ();
-          }
+        Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
       in
       isDefEq env
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
@@ -587,13 +559,7 @@ and isDefEq env e1 e2 =
       Expr.Let { name = n2; btype = s2; value = v2; body = b } ) ->
     if isDefEq env s1 s2 && isDefEq env v1 v2 then (
       let free_var =
-        Expr.FreeVar
-          {
-            name = n1;
-            expr = s1;
-            info = Expr.Default;
-            fvarId = Nyaya_parser.Util.Uid.mk ();
-          }
+        Expr.fvar n1 s1 Expr.Default (Nyaya_parser.Util.Uid.mk ())
       in
       isDefEq env
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
@@ -633,7 +599,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
 
 let check (env : Env.t) (decl : Decl.t) : bool =
   let module Logger = (val env.logger) in
-  Logger.info "@[Now type-checking %a.@]" Decl.pp decl;
+  Logger.debug "@[Now type-checking %a.@]" Decl.pp decl;
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
     (* TODO: definitions should be unfolded according to reducibility hints. *)
@@ -666,7 +632,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   If yes, we call that declaration well-posed and only typecheck those. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let module Logger = (val env.logger) in
-  Logger.info "Checking if %a is well-posed." Name.pp info.name;
+  Logger.debug "Checking if %a is well-posed." Name.pp info.name;
   let rec dup_exist = function
     | [] -> false
     | hd :: tl -> List.exists (( = ) hd) tl || dup_exist tl
@@ -674,11 +640,11 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_dup_uparams = dup_exist info.uparams |> not in
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
-    Logger.info "Checking if type %a is sort" Expr.pp info.ty;
+    Logger.debug "Checking if type %a is sort" Expr.pp info.ty;
     try
-      match infer env info.ty with
+      match infer env info.ty |> Expr.node with
       | Expr.Sort _ ->
-        Logger.info "Type of %a is sort" Name.pp info.name;
+        Logger.debug "Type of %a is sort" Name.pp info.name;
         true
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
@@ -711,11 +677,12 @@ let typecheck (env : Env.t) =
         DeclLogger.err "Declaration %a is not well-posed" Not_well_posed Name.pp
           n
       else
-        DeclLogger.info "Declaration %a is well-posed." Name.pp n;
+        DeclLogger.success "Declaration %a is well-posed." Name.pp n;
       (* Decl is well-posed, so perform typechecking. *)
       try
         if check env d then
-          success := !success + 1
+          (DeclLogger.success "Type checked decl %a." Name.pp (Decl.get_name d);
+          success := !success + 1)
         else
           ()
       with TypeError e ->
