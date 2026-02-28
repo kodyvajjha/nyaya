@@ -66,6 +66,70 @@ module InferTrace = struct
     next_id := 0
 end
 
+module RecTrace = struct
+  type frame = {
+    id: int;
+    summary: string;
+  }
+
+  type t = {
+    enabled: bool;
+    mutable stack: frame list;
+    mutable next_id: int;
+    label: string;
+  }
+
+  let enabled_from_env name =
+    match Sys.getenv_opt name with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let mk ~label ~env =
+    { enabled = enabled_from_env env; stack = []; next_id = 0; label }
+
+  let current_path t =
+    t.stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let enter (env : Env.t) (t : t) (summary : string) : frame option =
+    if not t.enabled then
+      None
+    else
+      let module Logger = (val env.logger) in
+      let id = t.next_id in
+      t.next_id <- t.next_id + 1;
+      let frame = { id; summary } in
+      t.stack <- frame :: t.stack;
+      Logger.app "[%s#%d p=%s] -> %s" t.label id (current_path t) summary;
+      Some frame
+
+  let leave (env : Env.t) (t : t) (frame : frame option) (result : string) =
+    match frame with
+    | None -> ()
+    | Some frame ->
+      let module Logger = (val env.logger) in
+      t.stack <- CCList.tl t.stack;
+      Logger.app "[%s#%d p=%s] <- %s" t.label frame.id (current_path t) result
+
+  let leave_exn (env : Env.t) (t : t) (frame : frame option) (exn : exn) =
+    match frame with
+    | None -> ()
+    | Some frame ->
+      let module Logger = (val env.logger) in
+      t.stack <- CCList.tl t.stack;
+      Logger.app "[%s#%d p=%s] !! %s expr=%s" t.label frame.id (current_path t)
+        (Printexc.to_string exn) frame.summary
+
+  let reset t =
+    t.stack <- [];
+    t.next_id <- 0
+end
+
+let whnf_trace = RecTrace.mk ~label:"w" ~env:"NYAYA_WHNF_TRACE"
+
+let defeq_trace = RecTrace.mk ~label:"d" ~env:"NYAYA_DEFEQ_TRACE"
+
 module Pp = struct
   let pp_check fpf (e, ty) =
     let pp_value fpf e = CCFormat.fprintf fpf "value:@ %a" Expr.pp e in
@@ -476,98 +540,132 @@ and infer_sort_of env (expr : Expr.t) =
       (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
-  Logger.debug "Whnf : %a" Expr.pp expr;
-  let module Logger = (val env.logger) in
-  match expr |> Expr.node with
-  | Expr.Sort u -> Expr.sort (Level.simplify u)
-  | Expr.App (f, arg) ->
-    let hd, args = Expr.get_apps expr in
-    let hd' =
-      match hd |> Expr.node with
-      | Expr.Const _ -> Reduce.delta_at_head env hd
-      | _ -> whnf env hd
-    in
-    let e1 = Expr.mk_app hd' args in
-    let e2 = Reduce.beta e1 in
+  let frame = RecTrace.enter env whnf_trace (CCFormat.asprintf "%a" Expr.pp expr) in
+  let finish ok =
+    RecTrace.leave env whnf_trace frame (CCFormat.asprintf "%a" Expr.pp ok);
+    ok
+  in
+  let fail exn =
+    let backtrace = Printexc.get_raw_backtrace () in
+    RecTrace.leave_exn env whnf_trace frame exn;
+    Printexc.raise_with_backtrace exn backtrace
+  in
+  try
+    Logger.debug "Whnf : %a" Expr.pp expr;
+    let module Logger = (val env.logger) in
+    let out =
+      match expr |> Expr.node with
+      | Expr.Sort u -> Expr.sort (Level.simplify u)
+      | Expr.App (f, arg) ->
+        let hd, args = Expr.get_apps expr in
+        let hd' =
+          match hd |> Expr.node with
+          | Expr.Const _ -> Reduce.delta_at_head env hd
+          | _ -> whnf env hd
+        in
+        let e1 = Expr.mk_app hd' args in
+        let e2 = Reduce.beta e1 in
 
-    (* Now attempt iota at head *)
-    let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
-    Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
-    if e3 = expr then
-      e3
-    else
-      whnf env e3
-  | Expr.Let { name; btype; value; body } ->
-    (* Zeta reduction*)
-    Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
-  | Expr.Const { name; uparams }  ->
-    (* Delta reduction *)
-    Reduce.delta_at_head env expr
-  | Expr.Forall { name; btype; binfo; body } ->
-    (* Reduce the domain type *)
-    Expr.pi name (whnf env btype) binfo body 
-  | _ ->
-    Logger.debug "not reducing: %a" Expr.pp expr;
-    expr
+        (* Now attempt iota at head *)
+        let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
+        Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
+        if e3 = expr then
+          e3
+        else
+          whnf env e3
+      | Expr.Let { name; btype; value; body } ->
+        (* Zeta reduction*)
+        Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
+      | Expr.Const { name; uparams } ->
+        (* Delta reduction *)
+        Reduce.delta_at_head env expr
+      | Expr.Forall { name; btype; binfo; body } ->
+        (* Reduce the domain type *)
+        Expr.pi name (whnf env btype) binfo body
+      | _ ->
+        Logger.debug "not reducing: %a" Expr.pp expr;
+        expr
+    in
+    finish out
+  with exn -> fail exn
 
 (* TODO: optimize def eq checking by implementing union-find.
    TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
 *)
 and isDefEq env e1 e2 =
-  let module Logger = (val env.logger) in
-  Logger.debugf Pp.pp_defeq (e1, e2);
-  match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
-  | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
-  | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
-  | ( Expr.Forall { name = n; btype = s; body = a; binfo },
-      Expr.Forall { btype = t; body = b; _ } ) ->
-    if isDefEq env s t then (
-      let free_var =
-        Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
-      in
-      isDefEq env
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
-    ) else
-      false
-  | Expr.App (f, a), Expr.App (g, b) ->
-    isDefEq env (Reduce.delta_at_head env f) (Reduce.delta_at_head env g)
-    && isDefEq env a b
-  | ( Expr.Const { name = n1; uparams = us },
-      Expr.Const { name = n2; uparams = vs } ) ->
-    (* We test for structural equality of names here and not pointer equality
-       since there are names which are not pointer equal (e.g., we infer Nat
-       literals as Const("Nat",[]))
-    *)
-    n1 = n2
-    && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
-  | ( Expr.Lam { name = n; btype = s; body = a; binfo },
-      Expr.Lam { btype = t; body = b; _ } ) ->
-    if isDefEq env s t then (
-      let free_var =
-        Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
-      in
-      isDefEq env
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
-    ) else
-      false
-  | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) -> Z.equal n1 n2
-  | Proj { nat = n1; expr = e1; _ }, Proj { nat = n2; expr = e2; _ } ->
-    n1 == n2 && isDefEq env e1 e2
-  | ( Expr.Let { name = n1; btype = s1; value = v1; body = a },
-      Expr.Let { name = n2; btype = s2; value = v2; body = b } ) ->
-    if isDefEq env s1 s2 && isDefEq env v1 v2 then (
-      let free_var =
-        Expr.fvar n1 s1 Expr.Default (Nyaya_parser.Util.Uid.mk ())
-      in
-      isDefEq env
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
-    ) else
-      false
-  | _ ->
-    Logger.err "failed def eq: %a =?= %a" Defeq_failure Expr.pp e1 Expr.pp e2
+  let frame =
+    RecTrace.enter env defeq_trace
+      (CCFormat.asprintf "%a =?= %a" Expr.pp e1 Expr.pp e2)
+  in
+  let finish ok =
+    RecTrace.leave env defeq_trace frame (if ok then "true" else "false");
+    ok
+  in
+  let fail exn =
+    let backtrace = Printexc.get_raw_backtrace () in
+    RecTrace.leave_exn env defeq_trace frame exn;
+    Printexc.raise_with_backtrace exn backtrace
+  in
+  try
+    let module Logger = (val env.logger) in
+    Logger.debugf Pp.pp_defeq (e1, e2);
+    let out =
+      match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
+      | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
+      | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } ->
+        f1 = f2
+      | ( Expr.Forall { name = n; btype = s; body = a; binfo },
+          Expr.Forall { btype = t; body = b; _ } ) ->
+        if isDefEq env s t then (
+          let free_var =
+            Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
+          in
+          isDefEq env
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
+        ) else
+          false
+      | Expr.App (f, a), Expr.App (g, b) ->
+        isDefEq env (Reduce.delta_at_head env f) (Reduce.delta_at_head env g)
+        && isDefEq env a b
+      | ( Expr.Const { name = n1; uparams = us },
+          Expr.Const { name = n2; uparams = vs } ) ->
+        (* We test for structural equality of names here and not pointer equality
+           since there are names which are not pointer equal (e.g., we infer Nat
+           literals as Const("Nat",[]))
+        *)
+        n1 = n2
+        && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
+      | ( Expr.Lam { name = n; btype = s; body = a; binfo },
+          Expr.Lam { btype = t; body = b; _ } ) ->
+        if isDefEq env s t then (
+          let free_var =
+            Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
+          in
+          isDefEq env
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
+        ) else
+          false
+      | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) -> Z.equal n1 n2
+      | Proj { nat = n1; expr = e1; _ }, Proj { nat = n2; expr = e2; _ } ->
+        n1 == n2 && isDefEq env e1 e2
+      | ( Expr.Let { name = n1; btype = s1; value = v1; body = a },
+          Expr.Let { name = n2; btype = s2; value = v2; body = b } ) ->
+        if isDefEq env s1 s2 && isDefEq env v1 v2 then (
+          let free_var =
+            Expr.fvar n1 s1 Expr.Default (Nyaya_parser.Util.Uid.mk ())
+          in
+          isDefEq env
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ())
+        ) else
+          false
+      | _ ->
+        Logger.err "failed def eq: %a =?= %a" Defeq_failure Expr.pp e1 Expr.pp e2
+    in
+    finish out
+  with exn -> fail exn
 
 (* TODO: complete ctor checks. *)
 let check_ctor (decl : Decl.t) (env : Env.t) =
@@ -670,6 +768,8 @@ let typecheck (env : Env.t) =
       end) in
       let env = Env.with_logger env (module DeclLogger) in
       InferTrace.reset ();
+      RecTrace.reset whnf_trace;
+      RecTrace.reset defeq_trace;
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
