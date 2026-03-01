@@ -15,34 +15,17 @@ end)
 module InferTrace = struct
   type frame = {
     id: int;
-    summary: string;
+    expr: Expr.t;
   }
 
-  type t = {
-    enabled: bool;
-    elide_ok: bool;
-    label: string;
-    stack: frame list ref;
-    next_id: int ref;
-  }
+  let stack : frame list ref = ref []
 
-  let enabled_from_env name =
-    match Sys.getenv_opt name with
+  let next_id = ref 0
+
+  let elide_ok =
+    match Sys.getenv_opt "NYAYA_INFER_TRACE_ELIDE_OK" with
     | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
     | _ -> false
-
-  let mk ?(enabled = true) ?(elide_ok = false) ~label () =
-    { enabled; elide_ok; label; stack = ref []; next_id = ref 0 }
-
-  let infer =
-    mk ~enabled:true
-      ~elide_ok:(enabled_from_env "NYAYA_INFER_TRACE_ELIDE_OK") ~label:"i" ()
-
-  let whnf =
-    mk ~enabled:(enabled_from_env "NYAYA_WHNF_TRACE") ~label:"w" ()
-
-  let defeq =
-    mk ~enabled:(enabled_from_env "NYAYA_DEFEQ_TRACE") ~label:"d" ()
 
   let truncate ?(max_len = 400) s =
     if String.length s <= max_len then
@@ -51,73 +34,101 @@ module InferTrace = struct
 
   let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
 
-  let current_path t =
-    !(t.stack)
+  let current_path () =
+    !stack
     |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
     |> String.concat ">"
 
-  let enter_raw (env : Env.t) (t : t) (summary : string) : frame option =
+  let enter (env : Env.t) (expr : Expr.t) : frame =
+    let module Logger = (val env.logger) in
+    let id = !next_id in
+    let frame = { id; expr } in
+    incr next_id;
+    stack := frame :: !stack;
+    if not elide_ok then
+      Logger.app "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
+    frame
+
+  let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
+    let module Logger = (val env.logger) in
+    stack := CCList.tl !stack;
+    if not elide_ok then
+      Logger.info "[i#%d p=%s] <- ok %s" frame.id (current_path ()) (expr_summary ty)
+
+  let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
+    let module Logger = (val env.logger) in
+    stack := CCList.tl !stack;
+    Logger.app "[i#%d p=%s] !! %s expr=%s" frame.id (current_path ())
+      (Printexc.to_string exn) (expr_summary frame.expr)
+
+  let reset () =
+    stack := [];
+    next_id := 0
+end
+
+module RecTrace = struct
+  type frame = {
+    id: int;
+    summary: string;
+  }
+
+  type t = {
+    enabled: bool;
+    mutable stack: frame list;
+    mutable next_id: int;
+    label: string;
+  }
+
+  let enabled_from_env name =
+    match Sys.getenv_opt name with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let mk ~label ~env =
+    { enabled = enabled_from_env env; stack = []; next_id = 0; label }
+
+  let current_path t =
+    t.stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let enter (env : Env.t) (t : t) (summary : string) : frame option =
     if not t.enabled then
       None
     else
       let module Logger = (val env.logger) in
-      let id = !(t.next_id) in
+      let id = t.next_id in
+      t.next_id <- t.next_id + 1;
       let frame = { id; summary } in
-      t.next_id := !(t.next_id) + 1;
-      t.stack := frame :: !(t.stack);
-      if not t.elide_ok then
-        Logger.app "[%s#%d p=%s] -> %s" t.label id (current_path t) summary;
+      t.stack <- frame :: t.stack;
+      Logger.app "[%s#%d p=%s] -> %s" t.label id (current_path t) summary;
       Some frame
 
-  let leave_raw (env : Env.t) (t : t) (frame : frame option) (result : string) : unit =
+  let leave (env : Env.t) (t : t) (frame : frame option) (result : string) =
     match frame with
     | None -> ()
     | Some frame ->
       let module Logger = (val env.logger) in
-      t.stack := CCList.tl !(t.stack);
-      if not t.elide_ok then
-        Logger.app "[%s#%d p=%s] <- %s" t.label frame.id (current_path t)
-          result
+      t.stack <- CCList.tl t.stack;
+      Logger.app "[%s#%d p=%s] <- %s" t.label frame.id (current_path t) result
 
-  let leave_exn_raw (env : Env.t) (t : t) (frame : frame option) (exn : exn) : unit =
+  let leave_exn (env : Env.t) (t : t) (frame : frame option) (exn : exn) =
     match frame with
     | None -> ()
     | Some frame ->
       let module Logger = (val env.logger) in
-      t.stack := CCList.tl !(t.stack);
+      t.stack <- CCList.tl t.stack;
       Logger.app "[%s#%d p=%s] !! %s expr=%s" t.label frame.id (current_path t)
         (Printexc.to_string exn) frame.summary
 
-  let enter (env : Env.t) (expr : Expr.t) : frame =
-    let module Logger = (val env.logger) in
-    match enter_raw env infer (expr_summary expr) with
-    | Some frame -> frame
-    | None ->
-      Logger.err "Infer trace unexpectedly disabled" (Failure "infer trace")
-
-  let enter_aux (env : Env.t) (t : t) (summary : string) : frame option =
-    enter_raw env t (truncate summary)
-
-  let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
-    leave_raw env infer (Some frame) ("ok " ^ expr_summary ty)
-
-  let leave_aux (env : Env.t) (t : t) (frame : frame option) (result : string) : unit =
-    leave_raw env t frame (truncate result)
-
-  let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
-    leave_exn_raw env infer (Some frame) exn
-
-  let leave_aux_exn (env : Env.t) (t : t) (frame : frame option) (exn : exn) : unit =
-    leave_exn_raw env t frame exn
-
-  let reset () =
-    infer.stack := [];
-    infer.next_id := 0
-
-  let reset_aux (t : t) =
-    t.stack := [];
-    t.next_id := 0
+  let reset t =
+    t.stack <- [];
+    t.next_id <- 0
 end
+
+let whnf_trace = RecTrace.mk ~label:"w" ~env:"NYAYA_WHNF_TRACE"
+
+let defeq_trace = RecTrace.mk ~label:"d" ~env:"NYAYA_DEFEQ_TRACE"
 
 module Pp = struct
   let pp_check fpf (e, ty) =
@@ -529,15 +540,14 @@ and infer_sort_of env (expr : Expr.t) =
       (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
-  let frame = InferTrace.enter_aux env InferTrace.whnf (CCFormat.asprintf "%a" Expr.pp expr) in
+  let frame = RecTrace.enter env whnf_trace (CCFormat.asprintf "%a" Expr.pp expr) in
   let finish ok =
-    InferTrace.leave_aux env InferTrace.whnf frame
-      (CCFormat.asprintf "%a" Expr.pp ok);
+    RecTrace.leave env whnf_trace frame (CCFormat.asprintf "%a" Expr.pp ok);
     ok
   in
   let fail exn =
     let backtrace = Printexc.get_raw_backtrace () in
-    InferTrace.leave_aux_exn env InferTrace.whnf frame exn;
+    RecTrace.leave_exn env whnf_trace frame exn;
     Printexc.raise_with_backtrace exn backtrace
   in
   try
@@ -584,17 +594,16 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 *)
 and isDefEq env e1 e2 =
   let frame =
-    InferTrace.enter_aux env InferTrace.defeq
+    RecTrace.enter env defeq_trace
       (CCFormat.asprintf "%a =?= %a" Expr.pp e1 Expr.pp e2)
   in
   let finish ok =
-    InferTrace.leave_aux env InferTrace.defeq frame
-      (if ok then "true" else "false");
+    RecTrace.leave env defeq_trace frame (if ok then "true" else "false");
     ok
   in
   let fail exn =
     let backtrace = Printexc.get_raw_backtrace () in
-    InferTrace.leave_aux_exn env InferTrace.defeq frame exn;
+    RecTrace.leave_exn env defeq_trace frame exn;
     Printexc.raise_with_backtrace exn backtrace
   in
   try
@@ -759,8 +768,8 @@ let typecheck (env : Env.t) =
       end) in
       let env = Env.with_logger env (module DeclLogger) in
       InferTrace.reset ();
-      InferTrace.reset_aux InferTrace.whnf;
-      InferTrace.reset_aux InferTrace.defeq;
+      RecTrace.reset whnf_trace;
+      RecTrace.reset defeq_trace;
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
