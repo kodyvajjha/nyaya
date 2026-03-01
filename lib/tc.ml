@@ -12,59 +12,67 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
-module InferTrace = struct
-  type frame = {
-    id: int;
-    expr: Expr.t;
-  }
+let truncate ?(max_len = 400) s =
+  if String.length s <= max_len then
+    s
+  else String.sub s 0 (max_len - 3) ^ "..."
 
-  let stack : frame list ref = ref []
+let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
 
-  let next_id = ref 0
+module InferTrace = Nyaya_parser.Util.MakeTrace (struct
+  type env = Env.t
 
-  let elide_ok =
-    match Sys.getenv_opt "NYAYA_INFER_TRACE_ELIDE_OK" with
-    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
-    | _ -> false
+  type input = Expr.t
 
-  let truncate ?(max_len = 400) s =
-    if String.length s <= max_len then
-      s
-    else String.sub s 0 (max_len - 3) ^ "..."
+  type output = Expr.t
 
-  let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
+  let env_logger env = env.Env.logger
 
-  let current_path () =
-    !stack
-    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
-    |> String.concat ">"
+  let kind = "i"
 
-  let enter (env : Env.t) (expr : Expr.t) : frame =
-    let module Logger = (val env.logger) in
-    let id = !next_id in
-    let frame = { id; expr } in
-    incr next_id;
-    stack := frame :: !stack;
-    if not elide_ok then
-      Logger.app "[i#%d p=%s] -> %s" id (current_path ()) (expr_summary expr);
-    frame
+  let elide_ok_env = "NYAYA_INFER_TRACE_ELIDE_OK"
 
-  let leave_success (env : Env.t) (frame : frame) (ty : Expr.t) : unit =
-    let module Logger = (val env.logger) in
-    stack := CCList.tl !stack;
-    if not elide_ok then
-      Logger.info "[i#%d p=%s] <- ok %s" frame.id (current_path ()) (expr_summary ty)
+  let input_summary = expr_summary
 
-  let leave_failure (env : Env.t) (frame : frame) (exn : exn) : unit =
-    let module Logger = (val env.logger) in
-    stack := CCList.tl !stack;
-    Logger.app "[i#%d p=%s] !! %s expr=%s" frame.id (current_path ())
-      (Printexc.to_string exn) (expr_summary frame.expr)
+  let output_summary = expr_summary
+end)
 
-  let reset () =
-    stack := [];
-    next_id := 0
-end
+module WhnfTrace = Nyaya_parser.Util.MakeTrace (struct
+  type env = Env.t
+
+  type input = Expr.t
+
+  type output = Expr.t
+
+  let env_logger env = env.Env.logger
+
+  let kind = "w"
+
+  let elide_ok_env = "NYAYA_WHNF_TRACE_ELIDE_OK"
+
+  let input_summary = expr_summary
+
+  let output_summary = expr_summary
+end)
+
+module DefEqTrace = Nyaya_parser.Util.MakeTrace (struct
+  type env = Env.t
+
+  type input = Expr.t * Expr.t
+
+  type output = bool
+
+  let env_logger env = env.Env.logger
+
+  let kind = "d"
+
+  let elide_ok_env = "NYAYA_DEFEQ_TRACE_ELIDE_OK"
+
+  let input_summary (lhs, rhs) =
+    truncate (CCFormat.asprintf "%a =?= %a" Expr.pp lhs Expr.pp rhs)
+
+  let output_summary = string_of_bool
+end)
 
 module Pp = struct
   let pp_check fpf (e, ty) =
@@ -476,6 +484,17 @@ and infer_sort_of env (expr : Expr.t) =
       (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
+  let frame = WhnfTrace.enter env expr in
+  match whnf_impl env expr with
+  | e ->
+    WhnfTrace.leave_success env frame e;
+    e
+  | exception exn ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    WhnfTrace.leave_failure env frame exn;
+    Printexc.raise_with_backtrace exn backtrace
+
+and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   Logger.debug "Whnf : %a" Expr.pp expr;
   let module Logger = (val env.logger) in
   match expr |> Expr.node with
@@ -514,6 +533,17 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
    TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
 *)
 and isDefEq env e1 e2 =
+  let frame = DefEqTrace.enter env (e1, e2) in
+  match isDefEq_impl env e1 e2 with
+  | ans ->
+    DefEqTrace.leave_success env frame ans;
+    ans
+  | exception exn ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    DefEqTrace.leave_failure env frame exn;
+    Printexc.raise_with_backtrace exn backtrace
+
+and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
   Logger.debugf Pp.pp_defeq (e1, e2);
   match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
@@ -670,6 +700,8 @@ let typecheck (env : Env.t) =
       end) in
       let env = Env.with_logger env (module DeclLogger) in
       InferTrace.reset ();
+      WhnfTrace.reset ();
+      DefEqTrace.reset ();
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
