@@ -94,6 +94,69 @@ module Pp = struct
       expr
 end
 
+module LoopProbe = struct
+  type counter = {
+    mutable ticks: int;
+    mutable reports: int;
+  }
+
+  type config = {
+    budget: int option;
+    trace_every: int option;
+  }
+
+  let mk_counter () = { ticks = 0; reports = 0 }
+
+  let whnf = mk_counter ()
+
+  let defeq = mk_counter ()
+
+  let cfg = ref { budget = None; trace_every = None }
+
+  let normalize_positive = function
+    | Some n when n > 0 -> Some n
+    | _ -> None
+
+  let configure ?budget ?trace_every () =
+    cfg :=
+      {
+        budget = normalize_positive budget;
+        trace_every = normalize_positive trace_every;
+      }
+
+  let reset_counters () =
+    whnf.ticks <- 0;
+    whnf.reports <- 0;
+    defeq.ticks <- 0;
+    defeq.reports <- 0
+
+  let tick (env : Env.t) ~(op : string) ~(counter : counter) (expr : Expr.t) =
+    let module Logger = (val env.logger) in
+    counter.ticks <- counter.ticks + 1;
+    (match (!cfg).trace_every with
+    | Some n when counter.ticks mod n = 0 ->
+      counter.reports <- counter.reports + 1;
+      Logger.app "[loop-probe:%s] tick=%d expr=%a" op counter.ticks Expr.pp expr
+    | _ -> ());
+    match (!cfg).budget with
+    | Some n when counter.ticks > n ->
+      Logger.err
+        "[loop-probe:%s] budget exceeded after %d ticks. Last expr: %a" op
+        counter.ticks Expr.pp expr
+    | _ -> ()
+
+  let enter_whnf env expr = tick env ~op:"whnf" ~counter:whnf expr
+
+  let enter_defeq env expr = tick env ~op:"defeq" ~counter:defeq expr
+
+  let summarize (env : Env.t) =
+    let module Logger = (val env.logger) in
+    Logger.app
+      "[loop-probe:summary] whnf_ticks=%d whnf_reports=%d defeq_ticks=%d \
+       defeq_reports=%d"
+      whnf.ticks whnf.reports defeq.ticks defeq.reports
+end
+
 module Reduce = struct
   open Expr
 
@@ -476,6 +539,7 @@ and infer_sort_of env (expr : Expr.t) =
       (infer env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
+  LoopProbe.enter_whnf env expr;
   Logger.debug "Whnf : %a" Expr.pp expr;
   let module Logger = (val env.logger) in
   match expr |> Expr.node with
@@ -515,6 +579,8 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
 *)
 and isDefEq env e1 e2 =
   let module Logger = (val env.logger) in
+  LoopProbe.enter_defeq env e1;
+  LoopProbe.enter_defeq env e2;
   Logger.debugf Pp.pp_defeq (e1, e2);
   match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
@@ -660,7 +726,9 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
     (string_of_bool type_is_sort);
   no_dup_uparams && no_free_vars && type_is_sort
 
-let typecheck (env : Env.t) =
+let typecheck ?loop_probe_budget ?loop_probe_trace_every (env : Env.t) =
+  LoopProbe.configure ?budget:loop_probe_budget ?trace_every:loop_probe_trace_every ();
+  LoopProbe.reset_counters ();
   let iter = env.tbl |> Iter.of_hashtbl in
   let success = ref 0 in
   Iter.iter2
@@ -691,4 +759,5 @@ let typecheck (env : Env.t) =
         Logger.err "Type checking failed when checking %a." (TypeError e)
           Name.pp n)
     iter;
+  LoopProbe.summarize env;
   Logger.success "Successfully checked %d declarations in environment." !success
