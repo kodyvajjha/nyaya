@@ -127,6 +127,83 @@ end) : LOGGER = struct
     Logs.info (fun m -> m ~header:Data.header "%a" pp x)
 end
 
+module type TRACE_DATA = sig
+  type env
+
+  type input
+
+  type output
+
+  val env_logger : env -> (module LOGGER)
+
+  val kind : string
+
+  (** Name of the env var that controls whether successful trace lines are
+      hidden. Truthy values are: [1], [true], [TRUE], [yes], [YES].
+
+      When enabled, [enter] and [leave_success] logs are suppressed, while
+      [leave_failure] logs remain visible. *)
+  val elide_ok_env : string
+
+  val input_summary : input -> string
+
+  val output_summary : output -> string
+end
+
+module MakeTrace (Data : TRACE_DATA) = struct
+  type frame = {
+    id: int;
+    input: Data.input;
+  }
+
+  let stack : frame list ref = ref []
+
+  let next_id = ref 0
+
+  let elide_ok =
+    match Sys.getenv_opt Data.elide_ok_env with
+    | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
+    | _ -> false
+
+  let current_path () =
+    !stack
+    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    |> String.concat ">"
+
+  let current_depth () = List.length !stack
+
+  let enter (env : Data.env) (input : Data.input) : frame =
+    let module Logger = (val Data.env_logger env) in
+    let id = !next_id in
+    let frame = { id; input } in
+    incr next_id;
+    stack := frame :: !stack;
+    if not elide_ok then
+      Logger.app "[%s#%d d=%d p=%s] -> %s" Data.kind id (current_depth ())
+        (current_path ())
+        (Data.input_summary input);
+    frame
+
+  let leave_success (env : Data.env) (frame : frame) (output : Data.output) =
+    let module Logger = (val Data.env_logger env) in
+    stack := CCList.tl !stack;
+    if not elide_ok then
+      Logger.info "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
+        (current_depth ()) (current_path ()) (Data.output_summary output)
+
+  let leave_failure (env : Data.env) (frame : frame) (exn : exn) =
+    let module Logger = (val Data.env_logger env) in
+    stack := CCList.tl !stack;
+    Logger.app "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
+      (current_depth ()) (current_path ())
+      (Printexc.to_string exn)
+      (Data.input_summary frame.input)
+
+  let reset () =
+    stack := [];
+    next_id := 0
+end
+
 let get_random_el (tbl : (int, 'a) Hashtbl.t) : 'a =
   let el =
     let open CCRandom in
