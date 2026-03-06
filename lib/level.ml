@@ -122,7 +122,7 @@ let rec leq (x : t) (y : t) (balance : int) : bool =
   (* descend right *)
   | (Param _ | Zero), Max (a, b) -> leq x a balance || leq x b balance
   (* imax *)
-  | IMax (a1, b1), IMax (a2, b2) when a1 == a2 && b1 == b2 -> true
+  | IMax (a1, b1), IMax (a2, b2) when a1 == a2 && b1 == b2 && balance >= 0 -> true
   | IMax (_, Param p), _ -> cases x y p balance
   | _, IMax (_, Param p) -> cases x y p balance
   | IMax (a, IMax (b, c)), _ -> leq (Max (IMax (a, c), IMax (b, c))) y balance
