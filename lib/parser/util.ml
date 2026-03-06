@@ -64,7 +64,8 @@ end) : LOGGER = struct
         k ()
       in
       let with_header h _tags k ppf fmt =
-        Format.kfprintf k ppf ("%a @[" ^^ fmt ^^ "@]@.")
+        Format.kfprintf k ppf
+          ("%a @[" ^^ fmt ^^ "@]@.")
           Logs.pp_header (level, h)
       in
       msgf @@ fun ?header ?tags fmt -> with_header header tags k ppf fmt
@@ -73,27 +74,23 @@ end) : LOGGER = struct
 
   let info fmt =
     CCFormat.ksprintf
-      ~f:(fun str ->
-        Logs.info (fun m -> m "%s" str ~header:Data.header))
+      ~f:(fun str -> Logs.info (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let app fmt =
     CCFormat.ksprintf
-      ~f:(fun str ->
-        Logs.app (fun m -> m "%s" str ~header:Data.header))
+      ~f:(fun str -> Logs.app (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let success fmt =
     CCFormat.set_color_default true;
     CCFormat.with_color_ksf "green"
-      ~f:(fun str ->
-        Logs.info (fun m -> m "%s" str ~header:Data.header))
+      ~f:(fun str -> Logs.info (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let warn fmt =
     CCFormat.ksprintf
-      ~f:(fun str ->
-        Logs.warn (fun m -> m "%s" str ~header:Data.header))
+      ~f:(fun str -> Logs.warn (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let err fmt exn =
@@ -114,8 +111,7 @@ end) : LOGGER = struct
 
   let debug fmt =
     CCFormat.ksprintf
-      ~f:(fun str ->
-        Logs.debug (fun m -> m "%s" str ~header:Data.header))
+      ~f:(fun str -> Logs.debug (fun m -> m "%s" str ~header:Data.header))
       fmt
 
   let debugf pp x =
@@ -138,12 +134,12 @@ module type TRACE_DATA = sig
 
   val kind : string
 
+  val elide_ok_env : string
   (** Name of the env var that controls whether successful trace lines are
       hidden. Truthy values are: [1], [true], [TRUE], [yes], [YES].
 
       When enabled, [enter] and [leave_success] logs are suppressed, while
       [leave_failure] logs remain visible. *)
-  val elide_ok_env : string
 
   val input_summary : input -> string
 
@@ -166,8 +162,8 @@ module MakeTrace (Data : TRACE_DATA) = struct
     | _ -> false
 
   let current_path () =
-    !stack
-    |> List.rev |> CCList.map (fun frame -> string_of_int frame.id)
+    !stack |> List.rev
+    |> CCList.map (fun frame -> string_of_int frame.id)
     |> String.concat ">"
 
   let current_depth () = List.length !stack
@@ -179,24 +175,23 @@ module MakeTrace (Data : TRACE_DATA) = struct
     incr next_id;
     stack := frame :: !stack;
     if not elide_ok then
-      Logger.app "[%s#%d d=%d p=%s] -> %s" Data.kind id (current_depth ())
-        (current_path ())
-        (Data.input_summary input);
+      Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id (current_depth ())
+        (current_path ()) (Data.input_summary input);
     frame
 
   let leave_success (env : Data.env) (frame : frame) (output : Data.output) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
     if not elide_ok then
-      Logger.info "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
-        (current_depth ()) (current_path ()) (Data.output_summary output)
+      Logger.debug "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
+        (current_depth ()) (current_path ())
+        (Data.output_summary output)
 
   let leave_failure (env : Data.env) (frame : frame) (exn : exn) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
-    Logger.app "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
-      (current_depth ()) (current_path ())
-      (Printexc.to_string exn)
+    Logger.debug "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
+      (current_depth ()) (current_path ()) (Printexc.to_string exn)
       (Data.input_summary frame.input)
 
   let reset () =

@@ -248,7 +248,7 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
 
 and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.infof Pp.pp_inferring expr;
+  Logger.debugf Pp.pp_inferring expr;
   match Expr.node expr with
   | Expr.Sort u -> Expr.sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
@@ -482,7 +482,7 @@ and infer_sort_of env (expr : Expr.t) =
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort" (TypeError expr) Expr.pp
       (infer env expr)
-
+      
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   let frame = WhnfTrace.enter env expr in
   match whnf_impl env expr with
