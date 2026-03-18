@@ -713,6 +713,12 @@ let typecheck (env : Env.t) =
         let header = CCFormat.to_string Name.pp n
       end) in
       let env = Env.with_logger env (module DeclLogger) in
+      let decl_name_str = CCFormat.to_string Name.pp n in
+      let prev_level = Logs.level () in
+      (match Sys.getenv_opt "NYAYA_DECL_DEBUG" with
+      | Some target when String.equal target decl_name_str ->
+        Logs.set_level (Some Logs.Debug)
+      | _ -> ());
       InferTrace.reset ();
       WhnfTrace.reset ();
       DefEqTrace.reset ();
@@ -727,7 +733,7 @@ let typecheck (env : Env.t) =
       else
         DeclLogger.success "Declaration %a is well-posed." Name.pp n;
       (* Decl is well-posed, so perform typechecking. *)
-      try
+      (try
         if check env d then
           (DeclLogger.success "Type checked decl %a." Name.pp (Decl.get_name d);
           success := !success + 1)
@@ -737,6 +743,7 @@ let typecheck (env : Env.t) =
         Logger.success "Failed after checking %d declarations in environment."
           !success;
         Logger.err "Type checking failed when checking %a." (TypeError e)
-          Name.pp n)
+          Name.pp n);
+      Logs.set_level prev_level)
     iter;
   Logger.success "Successfully checked %d declarations in environment." !success
