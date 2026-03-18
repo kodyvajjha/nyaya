@@ -19,6 +19,9 @@ let truncate ?(max_len = 400) s =
 
 let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
 
+let whnf_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+let infer_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+
 module InferTrace = Nyaya_parser.Util.MakeTrace (struct
   type env = Env.t
 
@@ -234,17 +237,21 @@ module Reduce = struct
     | _ -> e
 end
 
-(** Infer the type of the given [expr]. TODO: this needs some aggressive optimization in the form of memoization. *)
+(** Infer the type of the given [expr].*)
 let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
-  let frame = InferTrace.enter env expr in
-  match infer_impl env expr with
-  | ty ->
-    InferTrace.leave_success env frame ty;
-    ty
-  | exception exn ->
-    let backtrace = Printexc.get_raw_backtrace () in
-    InferTrace.leave_failure env frame exn;
-    Printexc.raise_with_backtrace exn backtrace
+  match Hashtbl.find_opt infer_memo (Expr.tag expr) with
+  | Some ty -> ty
+  | None ->
+    let frame = InferTrace.enter env expr in
+    (match infer_impl env expr with
+    | ty ->
+      InferTrace.leave_success env frame ty;
+      Hashtbl.replace infer_memo (Expr.tag expr) ty;
+      ty
+    | exception exn ->
+      let backtrace = Printexc.get_raw_backtrace () in
+      InferTrace.leave_failure env frame exn;
+      Printexc.raise_with_backtrace exn backtrace)
 
 and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
@@ -484,15 +491,19 @@ and infer_sort_of env (expr : Expr.t) =
       (infer env expr)
       
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
-  let frame = WhnfTrace.enter env expr in
-  match whnf_impl env expr with
-  | e ->
-    WhnfTrace.leave_success env frame e;
-    e
-  | exception exn ->
-    let backtrace = Printexc.get_raw_backtrace () in
-    WhnfTrace.leave_failure env frame exn;
-    Printexc.raise_with_backtrace exn backtrace
+  match Hashtbl.find_opt whnf_memo (Expr.tag expr) with
+  | Some result -> result
+  | None ->
+    let frame = WhnfTrace.enter env expr in
+    (match whnf_impl env expr with
+    | e ->
+      WhnfTrace.leave_success env frame e;
+      Hashtbl.replace whnf_memo (Expr.tag expr) e;
+      e
+    | exception exn ->
+      let backtrace = Printexc.get_raw_backtrace () in
+      WhnfTrace.leave_failure env frame exn;
+      Printexc.raise_with_backtrace exn backtrace)
 
 and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   Logger.debug "Whnf : %a" Expr.pp expr;
@@ -512,7 +523,7 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
     Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
-    if e3 = expr then
+    if e3 == expr then
       e3
     else
       whnf env e3
@@ -522,9 +533,9 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.Const { name; uparams }  ->
     (* Delta reduction *)
     Reduce.delta_at_head env expr
-  | Expr.Forall { name; btype; binfo; body } ->
-    (* Reduce the domain type *)
-    Expr.pi name (whnf env btype) binfo body 
+  | Expr.Forall _ ->
+    (* Already in whnf: the head is a Forall constructor, don't reduce under binders. *)
+    expr
   | _ ->
     Logger.debug "not reducing: %a" Expr.pp expr;
     expr
@@ -545,6 +556,8 @@ and isDefEq env e1 e2 =
 
 and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
+  if e1 == e2 then true
+  else (
   Logger.debugf Pp.pp_defeq (e1, e2);
   match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
@@ -598,6 +611,7 @@ and isDefEq_impl env e1 e2 =
       false
   | _ ->
     Logger.err "failed def eq: %a =?= %a" Defeq_failure Expr.pp e1 Expr.pp e2
+  )
 
 (* TODO: complete ctor checks. *)
 let check_ctor (decl : Decl.t) (env : Env.t) =
@@ -702,6 +716,8 @@ let typecheck (env : Env.t) =
       InferTrace.reset ();
       WhnfTrace.reset ();
       DefEqTrace.reset ();
+      Hashtbl.reset whnf_memo;
+      Hashtbl.reset infer_memo;
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
