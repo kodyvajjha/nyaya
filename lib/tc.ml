@@ -224,7 +224,8 @@ module Reduce = struct
                   |> CCList.take rule.ctor_num_args
                   |> List.rev
                 in
-                let new_args = prefix @ field_args in
+                let suffix = CCList.drop (major_idx + 1) args in
+                let new_args = prefix @ field_args @ suffix in
                 let red = Expr.mk_app rule.value new_args in
                 Logger.debug "iota: %a" Expr.pp red;
                 red
@@ -536,6 +537,9 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.Forall _ ->
     (* Already in whnf: the head is a Forall constructor, don't reduce under binders. *)
     expr
+  | Expr.Proj {name; nat; expr} -> 
+      let (ctorApp, args) = Expr.get_apps (whnf env expr) in 
+      let num_params = Decl.get_inductive_num_params (Hashtbl.find env.tbl name) in CCList.get_at_idx_exn (nat + num_params) args 
   | _ ->
     Logger.debug "not reducing: %a" Expr.pp expr;
     expr
