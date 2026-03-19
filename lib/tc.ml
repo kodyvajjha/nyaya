@@ -156,6 +156,41 @@ module Reduce = struct
       ans
     | _ -> f
 
+  (**
+     One-step iota reduction at the head of [e].
+
+     Iota reduction fires when [e] is a recursor applied to a
+     constructor-headed major premise.  The general shape of a reducible
+     application is:
+
+       R  p₁…pₙ  motive  minor₁…minorₖ  (C  q₁…qₘ  f₁…fⱼ)  s₁…sₜ
+
+     where:
+       - R          is the recursor constant
+       - p₁…pₙ     are the recursor parameters
+       - motive     is the motive (one or more)
+       - minor₁…   are the minor premises (one per constructor)
+       - C q… f…   is the major premise, already whnf'd to a constructor
+                   application; q… are the constructor's own type parameters
+                   and f… are its fields (= the ctor_num_args trailing args)
+       - s₁…sₜ     are any *extra* arguments that appear after the major
+                   in the full spine (e.g. motive indices that trail the
+                   major, or additional arguments to the overall type such
+                   as the [List.below] proof in brecOn-based recursors)
+
+     The iota rule value [rule.value] is a closed term lambda-bound over
+     (params, motives, minors, ctor_fields), i.e. it expects exactly
+     [prefix @ field_args].  The extra suffix args [s₁…sₜ] are NOT part
+     of the rule RHS; they must be passed on to the result:
+
+       result = rule.value  p₁…pₙ  motive  minor₁…  f₁…fⱼ  s₁…sₜ
+
+     Omitting [suffix] was the original bug: specialised recursors such as
+     [List.lengthTRAux.match_1] take a [List.below] proof after the major
+     premise.  Without [suffix], that proof was silently dropped, leaving
+     the minor result partially applied (e.g. [fun (_ : List.below …) => x]
+     instead of [x]).
+  *)
   let iota_at_head (env : Env.t) (e : Expr.t) whnf : Expr.t =
     let module Logger = (val env.logger) in
     let hd, args = Expr.get_apps e in
@@ -206,14 +241,12 @@ module Reduce = struct
                  *field* arguments (the final [rule.ctor_num_args] arguments),
                  not all constructor arguments.
               *)
-              (* Apply rule.value to:
-                 - all recursor args *before* the major premise
-                 - then only the constructor FIELD arguments
-
-                 This matches the typical export encoding where each rule
-                 is lambda-bound over (params/idx/motives/minors) and then ctor args.
-              *)
               let prefix = CCList.take major_idx args in
+              (* Args in the spine that come after the major premise.
+                 These are not part of the rule RHS and must be re-applied
+                 to the result.  See the docstring on [iota_at_head] for
+                 why this matters. *)
+              let suffix = CCList.drop (major_idx + 1) args in
               let maj_num_args = List.length maj_args in
               if maj_num_args < rule.ctor_num_args then
                 (* Malformed constructor application: don't reduce. *)
@@ -224,7 +257,6 @@ module Reduce = struct
                   |> CCList.take rule.ctor_num_args
                   |> List.rev
                 in
-                let suffix = CCList.drop (major_idx + 1) args in
                 let new_args = prefix @ field_args @ suffix in
                 let red = Expr.mk_app rule.value new_args in
                 Logger.debug "iota: %a" Expr.pp red;
