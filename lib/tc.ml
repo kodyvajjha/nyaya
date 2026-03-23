@@ -179,7 +179,7 @@ module Reduce = struct
     let module Logger = (val env.logger) in
     let hd, args = Expr.get_apps e in
     match Expr.node hd with
-    | Expr.Const { name = rec_name; _ } ->
+    | Expr.Const { name = rec_name; uparams = rec_levels } ->
       (* Look up decl for the head constant *)
       let decl =
         try Hashtbl.find env.tbl rec_name
@@ -187,6 +187,12 @@ module Reduce = struct
       in
       (match decl with
       | Decl.Rec { num_params; num_idx; num_motives; num_minors; rules; _ } ->
+        (* The rule value is a template with the recursor's own universe
+           param names.  Substitute them with the actual universe levels
+           from the const application. *)
+        let decl_uparams =
+          CCList.map Level.param (Decl.get_uparams decl)
+        in
         let major_idx = num_params + num_idx + num_motives + num_minors in
         if List.length args <= major_idx then
           e
@@ -248,8 +254,11 @@ module Reduce = struct
                   |> CCList.take rule.ctor_num_args
                   |> List.rev
                 in
+                let rule_val =
+                  Expr.subst_levels rule.value decl_uparams rec_levels
+                in
                 let new_args = prefix @ field_args @ suffix in
-                let red = Expr.mk_app rule.value new_args in
+                let red = Expr.mk_app rule_val new_args in
                 Logger.debug "iota: %a" Expr.pp red;
                 red
               ))
@@ -276,11 +285,14 @@ module Reduce = struct
             (match rule_opt with
             | None -> e
             | Some rule ->
+              let rule_val =
+                Expr.subst_levels rule.value decl_uparams rec_levels
+              in
               let prefix_len = num_params + num_motives + num_minors in
               let prefix = CCList.take prefix_len args in
               let suffix = CCList.drop (major_idx + 1) args in
               let new_args = prefix @ field_args @ suffix in
-              let red = Expr.mk_app rule.value new_args in
+              let red = Expr.mk_app rule_val new_args in
               Logger.debug "iota (natlit): %a" Expr.pp red;
               red)
           | _ ->
