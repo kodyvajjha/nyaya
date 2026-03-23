@@ -633,7 +633,10 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     (* Don't delta-unfold Nat kernel builtins — they may later be applied
        to huge literals, and their Nat.brecOn definitions would loop. *)
     if Reduce.is_nat_builtin_name name then expr
-    else Reduce.delta_at_head env expr
+    else
+      let e' = Reduce.delta_at_head env expr in
+      if e' == expr then expr
+      else whnf env e'
   | Expr.Forall _ ->
     (* Already in whnf: the head is a Forall constructor, don't reduce under binders. *)
     expr
