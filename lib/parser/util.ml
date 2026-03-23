@@ -141,10 +141,17 @@ module type TRACE_DATA = sig
       When enabled, [enter] and [leave_success] logs are suppressed, while
       [leave_failure] logs remain visible. *)
 
+  val max_depth_env : string
+  (** Name of the env var that sets the maximum trace depth.  When the
+      depth exceeds this limit, [enter] raises [Failure] with a diagnostic
+      message.  Default (when unset): 1000. *)
+
   val input_summary : input -> string
 
   val output_summary : output -> string
 end
+
+exception Depth_limit of string
 
 module MakeTrace (Data : TRACE_DATA) = struct
   type frame = {
@@ -161,6 +168,11 @@ module MakeTrace (Data : TRACE_DATA) = struct
     | Some ("1" | "true" | "TRUE" | "yes" | "YES") -> true
     | _ -> false
 
+  let max_depth =
+    match Sys.getenv_opt Data.max_depth_env with
+    | Some s -> (try int_of_string s with _ -> 2000)
+    | None -> 2000
+
   let current_path () =
     !stack |> List.rev
     |> CCList.map (fun frame -> string_of_int frame.id)
@@ -174,8 +186,17 @@ module MakeTrace (Data : TRACE_DATA) = struct
     let frame = { id; input } in
     incr next_id;
     stack := frame :: !stack;
+    let depth = current_depth () in
+    if depth > max_depth then (
+      let msg =
+        Printf.sprintf "[%s#%d] depth %d exceeds max %d, input=%s" Data.kind id
+          depth max_depth (Data.input_summary input)
+      in
+      Logger.app "DEPTH LIMIT: %s" msg;
+      raise (Depth_limit msg)
+    );
     if not elide_ok then
-      Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id (current_depth ())
+      Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id depth
         (current_path ()) (Data.input_summary input);
     frame
 
@@ -190,9 +211,12 @@ module MakeTrace (Data : TRACE_DATA) = struct
   let leave_failure (env : Data.env) (frame : frame) (exn : exn) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
-    Logger.debug "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
-      (current_depth ()) (current_path ()) (Printexc.to_string exn)
-      (Data.input_summary frame.input)
+    match exn with
+    | Depth_limit _ -> () (* already logged once at the point of origin *)
+    | _ ->
+      Logger.debug "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
+        (current_depth ()) (current_path ()) (Printexc.to_string exn)
+        (Data.input_summary frame.input)
 
   let reset () =
     stack := [];

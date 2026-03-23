@@ -257,7 +257,7 @@ module Pp = struct
     | FreeVar { name; fvarId; _ } ->
       Fmt.fprintf fpf "%a##%d" Name.pp name fvarId
     | Const { name; uparams } ->
-      if CCList.is_empty uparams then
+      if CCList.is_empty uparams || CCList.for_all Level.is_zero uparams then
         Fmt.fprintf fpf "%a" Name.pp name
       else
         Fmt.fprintf fpf "@[<h>%a.@[<h>{%a}@]@]" Name.pp name
@@ -280,14 +280,43 @@ module Pp = struct
         binders (pp prec) final
     | Forall _ ->
       let binders, final = gather_foralls expr in
+      (* Split into leading anonymous (arrow-style) binders and the rest *)
+      let is_arrow_binder (name, _btype, (binfo : binfo)) =
+        binfo = Default && (Name.is_anon name || Name.is_hyg_name name)
+      in
+      let rec split_arrows = function
+        | (b :: rest) when is_arrow_binder b ->
+          let arrows, remaining = split_arrows rest in
+          (b :: arrows, remaining)
+        | rest -> ([], rest)
+      in
+      let arrows, explicit = split_arrows binders in
+      let pp_arrow fpf (_name, btype, _binfo) =
+        Fmt.fprintf fpf "@[%a@]" (pp Prec.App) btype
+      in
       let pp_binder fpf (name, btype, binfo) =
         let lbr, rbr = bracks binfo in
         Fmt.fprintf fpf "@[%s%a : %a%s@]" lbr Name.pp name (pp Prec.Binder)
           btype rbr
       in
-      wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@], %a@]@]"
-        Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
-        binders (pp prec) final
+      (match arrows, explicit with
+      | [], _ ->
+        (* All explicit: forall (x : A)(y : B), C *)
+        wrap Prec.Arrow prec fpf "@[<v 0>@[<hv 2>forall @[%a@], %a@]@]"
+          Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
+          explicit (pp prec) final
+      | _, [] ->
+        (* All arrows: A → B → C *)
+        wrap Prec.Arrow prec fpf "@[<hv 0>%a →@ %a@]"
+          Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf " →@ ") pp_arrow)
+          arrows (pp prec) final
+      | _, _ ->
+        (* Mixed: A → B → forall (x : C), D *)
+        wrap Prec.Arrow prec fpf "@[<hv 0>%a →@ @[<hv 2>forall @[%a@], %a@]@]"
+          Fmt.(list ~sep:(fun fpf _ -> Fmt.fprintf fpf " →@ ") pp_arrow)
+          arrows
+          Fmt.(list ~sep:Fmt.pp_print_cut pp_binder)
+          explicit (pp prec) final)
     | Let { name; btype; value; body } ->
       wrap Prec.Let prec fpf "@[let @[<2>%a : %a :=@ %a@] in@ %a@]" Name.pp name
         (pp prec) btype (pp prec) value (pp prec) body
@@ -347,13 +376,7 @@ let instantiate
       (module Util.MakeLogger (struct
         let header = "Expr"
       end) : Util.LOGGER)) ~(free_var : t) ~(expr : t) () =
-  let module Logger = (val logger) in
-  Logger.debugf
-    (fun fpf (e1, e2) ->
-      CCFormat.fprintf fpf
-        "@[<v 0>@{<yellow>instantiate:@} @[<hov 2>%a@] in @[<hov 2>%a@]@]" pp e1
-        pp e2)
-    (free_var, expr);
+  let _logger = logger in
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
     if num_loose_bvars expr <= offset then
       expr
@@ -396,13 +419,7 @@ let instantiate
         proj name nat (instantiate_aux free_var expr offset)
     )
   in
-  let inst = instantiate_aux free_var expr 0 in
-  Logger.debugf
-    (fun fpf t ->
-      CCFormat.fprintf fpf
-        "@[@{<Blue>Type after instantiation@}: @,@[<hov 2>%a@]@]" pp t)
-    inst;
-  inst
+  instantiate_aux free_var expr 0
 
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
    suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)

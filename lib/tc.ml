@@ -35,6 +35,8 @@ module InferTrace = Nyaya_parser.Util.MakeTrace (struct
 
   let elide_ok_env = "NYAYA_INFER_TRACE_ELIDE_OK"
 
+  let max_depth_env = "NYAYA_INFER_MAX_DEPTH"
+
   let input_summary = expr_summary
 
   let output_summary = expr_summary
@@ -53,6 +55,8 @@ module WhnfTrace = Nyaya_parser.Util.MakeTrace (struct
 
   let elide_ok_env = "NYAYA_WHNF_TRACE_ELIDE_OK"
 
+  let max_depth_env = "NYAYA_WHNF_MAX_DEPTH"
+
   let input_summary = expr_summary
 
   let output_summary = expr_summary
@@ -70,6 +74,8 @@ module DefEqTrace = Nyaya_parser.Util.MakeTrace (struct
   let kind = "d"
 
   let elide_ok_env = "NYAYA_DEFEQ_TRACE_ELIDE_OK"
+
+  let max_depth_env = "NYAYA_DEFEQ_MAX_DEPTH"
 
   let input_summary (lhs, rhs) =
     truncate (CCFormat.asprintf "%a =?= %a" Expr.pp lhs Expr.pp rhs)
@@ -109,7 +115,6 @@ module Reduce = struct
   open Expr
 
   let beta e =
-    Logger.debug "@[Beta reducing @[<hov 2> %a@]@]" pp e;
     let rec aux f args =
       match node f, args with
       | Lam { body; _ }, v :: vs ->
@@ -117,43 +122,22 @@ module Reduce = struct
       | _, _ -> mk_app f args
     in
     let f, args = get_apps e in
-    let ans = aux f args in
-    Logger.debugf
-      (fun fpf (t1, t2) ->
-        CCFormat.fprintf fpf
-          "@[<hov 0>After beta reduction@;\
-           @[<hov 2>%a@]@;\
-           becomes@;\
-           @[<hov 2>%a@]@]" pp t1 pp t2)
-      (e, ans);
-    ans
+    aux f args
 
   let delta_at_head (env : Env.t) f =
-    let module Logger = (val env.logger) in
     (* One-step delta reduction of the head. *)
     match node f with
     | Const { name; uparams }  ->
       let decl = Hashtbl.find env.tbl name in
       let decl_value = decl |> Decl.get_value in
-      let ans =
-        (* TODO: add a note about this in the notebook. *)
-        match decl_value with
-        | Some v ->
-          let decl_uparams =
-            CCList.map Level.param (decl |> Decl.get_uparams)
-          in
-          Expr.subst_levels v decl_uparams uparams
-        | None -> f
-      in
-      Logger.debugf
-        (fun fpf (t1, t2) ->
-          CCFormat.fprintf fpf
-            "@[<v 0>After delta reduction@,\
-             @[<hv 2>%a@]@,\
-             becomes@,\
-             @[<hv 2>%a@]@]" Expr.pp t1 Expr.pp t2)
-        (f, ans);
-      ans
+      (* TODO: add a note about this in the notebook. *)
+      (match decl_value with
+      | Some v ->
+        let decl_uparams =
+          CCList.map Level.param (decl |> Decl.get_uparams)
+        in
+        Expr.subst_levels v decl_uparams uparams
+      | None -> f)
     | _ -> f
 
   (**
@@ -209,6 +193,8 @@ module Reduce = struct
         else (
           let major = List.nth args major_idx in
           let major_whnf = whnf env major in
+          Logger.debug "iota_at_head: rec=%a major_idx=%d major_whnf=@[%a@]"
+            Name.pp rec_name major_idx Expr.pp major_whnf;
           let maj_hd, maj_args = Expr.get_apps major_whnf in
           match node maj_hd with
           | Expr.Const { name = ctor_name; _ } ->
@@ -241,7 +227,12 @@ module Reduce = struct
                  *field* arguments (the final [rule.ctor_num_args] arguments),
                  not all constructor arguments.
               *)
-              let prefix = CCList.take major_idx args in
+              (* The rule value expects: params, motives, minors, then
+                 ctor fields.  Indices sit between minors and major in
+                 the recursor spine but are NOT passed to the rule — they
+                 are determined by the constructor. *)
+              let prefix_len = num_params + num_motives + num_minors in
+              let prefix = CCList.take prefix_len args in
               (* Args in the spine that come after the major premise.
                  These are not part of the rule RHS and must be re-applied
                  to the result.  See the docstring on [iota_at_head] for
@@ -262,12 +253,124 @@ module Reduce = struct
                 Logger.debug "iota: %a" Expr.pp red;
                 red
               ))
+          | Expr.Literal (Expr.NatLit n) ->
+            (* NatLit iota: the major premise is a Nat literal, not a
+               constructor application.  Convert to constructor form and
+               apply the matching rule directly.
+                 NatLit 0   → Nat.zero rule, field_args = []
+                 NatLit n+1 → Nat.succ rule, field_args = [NatLit (n-1)]
+               We apply the rule directly rather than re-calling
+               iota_at_head to avoid looping with the Nat.succ kernel
+               builtin (which would whnf Nat.succ(NatLit n) back to
+               NatLit(n+1)). *)
+            let mk_nat s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
+            let ctor_name, field_args =
+              if Z.equal n Z.zero then (mk_nat "zero", [])
+              else (mk_nat "succ", [Expr.natlit (Z.pred n)])
+            in
+            let rule_opt =
+              List.find_opt
+                (fun (r : Decl.Rec_rule.t) -> r.ctor_name = ctor_name)
+                rules
+            in
+            (match rule_opt with
+            | None -> e
+            | Some rule ->
+              let prefix_len = num_params + num_motives + num_minors in
+              let prefix = CCList.take prefix_len args in
+              let suffix = CCList.drop (major_idx + 1) args in
+              let new_args = prefix @ field_args @ suffix in
+              let red = Expr.mk_app rule.value new_args in
+              Logger.debug "iota (natlit): %a" Expr.pp red;
+              red)
           | _ ->
             (* major isn't constructor-headed *)
             e
         )
       | _ -> e)
     | _ -> e
+
+  (** Kernel builtin reductions for Nat literals.
+
+      When the head constant is a known Nat builtin and the relevant
+      arguments (after whnf) are NatLit values, compute the result
+      directly.  Returns [Some result] if a reduction fired, [None]
+      otherwise.
+
+      Unary:  Nat.succ
+      Binary arithmetic: Nat.add, Nat.sub, Nat.mul, Nat.pow, Nat.div, Nat.mod
+      Binary comparisons: Nat.beq, Nat.ble  (produce Bool constructors)
+
+      Reference: "Type Checking in Lean 4", §3.5 (Literals). *)
+  let nat_lit_reduce (env : Env.t) (e : Expr.t) whnf : Expr.t option =
+    let hd, args = Expr.get_apps e in
+    match Expr.node hd with
+    | Expr.Const { name; _ } ->
+      let mk_name s1 s2 = Name.Str (Name.Str (Name.Anon, s1), s2) in
+      let as_nat_lit e =
+        match Expr.node (whnf env e) with
+        | Expr.Literal (Expr.NatLit n) -> Some n
+        | _ -> None
+      in
+      let bool_const b =
+        Expr.const (mk_name "Bool" (if b then "true" else "false"))
+      in
+      let unary f =
+        match args with
+        | [a] -> (match as_nat_lit a with Some n -> Some (f n) | None -> None)
+        | _ -> None
+      in
+      let binary f =
+        match args with
+        | [a; b] ->
+          (match as_nat_lit a, as_nat_lit b with
+          | Some m, Some n -> Some (f m n)
+          | _ -> None)
+        | _ -> None
+      in
+      (match name with
+      | n when n = mk_name "Nat" "succ" ->
+        unary (fun n -> Expr.natlit (Z.succ n))
+      | n when n = mk_name "Nat" "add" ->
+        binary (fun m n -> Expr.natlit (Z.add m n))
+      | n when n = mk_name "Nat" "sub" ->
+        binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero))
+      | n when n = mk_name "Nat" "mul" ->
+        binary (fun m n -> Expr.natlit (Z.mul m n))
+      | n when n = mk_name "Nat" "pow" ->
+        binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n)))
+      | n when n = mk_name "Nat" "div" ->
+        binary (fun m n ->
+          if Z.equal n Z.zero then Expr.natlit Z.zero
+          else Expr.natlit (Z.div m n))
+      | n when n = mk_name "Nat" "mod" ->
+        binary (fun m n ->
+          if Z.equal n Z.zero then Expr.natlit Z.zero
+          else Expr.natlit (Z.rem m n))
+      | n when n = mk_name "Nat" "beq" ->
+        binary (fun m n -> bool_const (Z.equal m n))
+      | n when n = mk_name "Nat" "ble" ->
+        binary (fun m n -> bool_const (Z.leq m n))
+      | _ -> None)
+    | _ -> None
+
+  (** Returns [true] when [name] is a known Nat kernel builtin.
+      Used to prevent delta-unfolding of builtins when [nat_lit_reduce]
+      could not fire (e.g. one argument is symbolic). *)
+  let is_nat_builtin_name (name : Name.t) : bool =
+    let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
+    name = mk_name "succ" || name = mk_name "add"
+    || name = mk_name "sub" || name = mk_name "mul"
+    || name = mk_name "pow" || name = mk_name "div"
+    || name = mk_name "mod" || name = mk_name "beq"
+    || name = mk_name "ble"
+
+  let is_nat_builtin (e : Expr.t) : bool =
+    let hd, _args = Expr.get_apps e in
+    match Expr.node hd with
+    | Expr.Const { name; _ } -> is_nat_builtin_name name
+    | _ -> false
+
 end
 
 (** Infer the type of the given [expr].*)
@@ -288,20 +391,9 @@ let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
 
 and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
-  Logger.debugf Pp.pp_inferring expr;
   match Expr.node expr with
   | Expr.Sort u -> Expr.sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } ->
-    (*
-       infer FVar id binder:
-       binder.type
-    *)
-    Logger.debugf
-      (fun fpf e ->
-        CCFormat.fprintf fpf
-          "@[@[%a@]@, is a free var of known type@, @[<hov 2> %a@]@]" Name.pp
-          name Expr.pp e)
-      expr;
     expr
   | Expr.Lam { name; btype; binfo; body } ->
     (*
@@ -313,20 +405,9 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     (match whnf env (infer env btype) |> Expr.node with
     | Expr.Sort _ ->
-      Logger.debugf
-        (fun fpf e ->
-          CCFormat.fprintf fpf "@[binder type %a is a sort@]" Expr.pp e)
-        btype;
       let binder_free_var =
-        Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) 
+        Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
       in
-      Logger.debugf
-        (fun fpf (e1, e2) ->
-          CCFormat.fprintf fpf
-            "@[<hov 0>Created a free variable of type @[<hov 2>%a@] as @[<hov \
-             2>%a@]@]"
-            Expr.pp e1 Expr.pp e2)
-        (btype, binder_free_var);
       let body_type =
         infer env
           (Expr.instantiate ~logger:env.logger ~free_var:binder_free_var
@@ -344,17 +425,9 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       imax(l, r)
     *)
     let l = infer_sort_of env btype in
-    Logger.debug "@[Level of %a is %a@]" Expr.pp btype Level.pp l;
     let free_var =
       Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
     in
-    Logger.debugf
-      (fun fpf (e1, e2) ->
-        CCFormat.fprintf fpf
-          "@[<hov 0>Created a free variable of type @[<hov 2>%a@] as @[<hov \
-           2>%a@]@]"
-          Expr.pp e1 Expr.pp e2)
-      (btype, free_var);
     let r =
       infer_sort_of env
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:body ())
@@ -366,19 +439,11 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
        let knownType := environment[name].type
        substituteLevels (e := knownType) (ks := knownType.uparams) (vs := levels)
     *)
-    Logger.debugf
-      (fun fpf t ->
-        CCFormat.fprintf fpf "@[Now inferring constant of name %a@]" Name.pp t)
-      name;
     let known_type : Decl.t = Hashtbl.find env.tbl name in
     let known_type_uparams =
       CCList.map Level.param (Decl.get_uparams known_type)
     in
-    let res =
-      Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
-    in
-    Logger.debug "Inferred constant type : %a" Expr.pp res;
-    res
+    Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | Expr.App (f, arg) ->
     (*
     infer App(f, arg):
@@ -391,21 +456,17 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     (match whnf env (infer env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
       let arg_type = infer env arg in
-      Logger.debugf Pp.pp_defeq (btype, arg_type);
       if not (isDefEq env btype arg_type) then
         Logger.err
           "@[Defeq check failed in expr = %a between @,\
            btype = %a and@,\
           \ inferred arg type = %a.@]" (Failure "failed 1") Expr.pp expr Expr.pp
           btype Expr.pp arg_type;
-      let p = Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body () in
-      Logger.debug "Inferred type of %a to be %a" Expr.pp expr Expr.pp p;
-      p
+      Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body ()
     | e ->
       Logger.err "Failed infer at app, got @[%a@] instead of a forall"
         (TypeError f) Expr.pp expr)
   | Let { name; btype; value; body }  ->
-    Logger.debug "Inferring Let : %a" Expr.pp expr;
     (*
        infer Let binder val body:
        assert! inferSortOf binder
@@ -414,7 +475,6 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     (match infer env btype |> Expr.node with
     | Sort _ ->
-      Logger.debug "Inferring Let : %a" Expr.pp expr;
       if not (isDefEq env btype (infer env value)) then
         Logger.err "@[btype = %a @. arg = %a@]" (Failure "failed 2") Expr.pp
           btype Expr.pp (infer env value);
@@ -449,7 +509,6 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     let const, ty_args = Expr.get_apps struct_type in
     (match const |> Expr.node with
     | Const { name; uparams } ->
-      Logger.debug "const : %a" Expr.pp const;
       let inductive_info = Hashtbl.find env.tbl name in
       let ctor_names = Decl.get_inductive_ctors inductive_info in
       let ctor_num_params = Decl.get_inductive_num_params inductive_info in
@@ -461,8 +520,6 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let ctor_type =
         ref (Expr.subst_levels ctor_info_type ctor_uparams uparams)
       in
-      Logger.debug "ctor_names : %a@." (CCList.pp Name.pp) ctor_names;
-      Logger.debug "ctor_type : %a" Expr.pp !ctor_type;
       let ty_param_args = CCList.take ctor_num_params ty_args in
       for i = 0 to CCList.length ty_param_args - 1 do
         let for_ty = whnf env !ctor_type in
@@ -539,12 +596,22 @@ and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
       Printexc.raise_with_backtrace exn backtrace)
 
 and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
-  Logger.debug "Whnf : %a" Expr.pp expr;
   let module Logger = (val env.logger) in
   match expr |> Expr.node with
   | Expr.Sort u -> Expr.sort (Level.simplify u)
   | Expr.App (f, arg) ->
     let hd, args = Expr.get_apps expr in
+    (* Try kernel numeric builtins BEFORE delta, so that e.g. Nat.add
+       on two NatLit args computes in O(1) instead of O(n) iota steps. *)
+    (match Reduce.nat_lit_reduce env expr whnf with
+    | Some r -> whnf env r
+    | None ->
+    (* If the head is a known Nat kernel builtin but nat_lit_reduce couldn't
+       fire (e.g. a symbolic argument), do NOT delta-unfold — the expression
+       is already in WHNF.  Unfolding would expose an O(n) Nat.brecOn/Nat.rec
+       reduction on huge literals. *)
+    if Reduce.is_nat_builtin expr then expr
+    else
     let hd' =
       match hd |> Expr.node with
       | Expr.Const _ -> Reduce.delta_at_head env hd
@@ -555,26 +622,33 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
 
     (* Now attempt iota at head *)
     let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
-    Logger.debug "Iota reduced @[%a@] to @[%a@]" Expr.pp e2 Expr.pp e3;
     if e3 == expr then
       e3
     else
-      whnf env e3
+      whnf env e3)
   | Expr.Let { name; btype; value; body } ->
     (* Zeta reduction*)
     Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ()
   | Expr.Const { name; uparams }  ->
-    (* Delta reduction *)
-    Reduce.delta_at_head env expr
+    (* Don't delta-unfold Nat kernel builtins — they may later be applied
+       to huge literals, and their Nat.brecOn definitions would loop. *)
+    if Reduce.is_nat_builtin_name name then expr
+    else Reduce.delta_at_head env expr
   | Expr.Forall _ ->
     (* Already in whnf: the head is a Forall constructor, don't reduce under binders. *)
     expr
-  | Expr.Proj {name; nat; expr} -> 
-      let (ctorApp, args) = Expr.get_apps (whnf env expr) in 
-      let num_params = Decl.get_inductive_num_params (Hashtbl.find env.tbl name) in CCList.get_at_idx_exn (nat + num_params) args 
-  | _ ->
-    Logger.debug "not reducing: %a" Expr.pp expr;
-    expr
+  | Expr.Proj {name; nat; expr = inner} ->
+      let inner' = whnf env inner in
+      let (hd, args) = Expr.get_apps inner' in
+      (match Expr.node hd with
+       | Expr.Const _ ->
+         let num_params = Decl.get_inductive_num_params (Hashtbl.find env.tbl name) in
+         let idx = nat + num_params in
+         (match CCList.get_at_idx idx args with
+          | Some field -> whnf env field
+          | None -> Expr.proj name nat inner')
+       | _ -> Expr.proj name nat inner')
+  | _ -> expr
 
 (* TODO: optimize def eq checking by implementing union-find.
    TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
@@ -593,9 +667,25 @@ and isDefEq env e1 e2 =
 and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
   if e1 == e2 then true
+  else
+  let e1' = whnf env e1 in
+  let e2' = whnf env e2 in
+  if e1' == e2' then true
+  else
+  (* Proof irrelevance: if p and q both inhabit Props S and T,
+     and S is definitionally equal to T, then p =?= q.
+       infer(p) = S, infer(q) = T,
+       infer(S) = Sort 0, infer(T) = Sort 0, defEq(S, T) *)
+  let is_prop ty =
+    match Expr.node (whnf env (infer env ty)) with
+    | Expr.Sort u -> Level.is_zero u
+    | _ -> false
+  in
+  let s = infer env e1' in
+  let t = infer env e2' in
+  if is_prop s && is_prop t && isDefEq env s t then true
   else (
-  Logger.debugf Pp.pp_defeq (e1, e2);
-  match e1 |> whnf env |> Expr.node, e2 |> whnf env |> Expr.node with
+  match Expr.node e1', Expr.node e2' with
   | Expr.Sort u1, Expr.Sort u2 -> Level.(u1 === u2)
   | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } -> f1 = f2
   | ( Expr.Forall { name = n; btype = s; body = a; binfo },
@@ -652,10 +742,8 @@ and isDefEq_impl env e1 e2 =
 (* TODO: complete ctor checks. *)
 let check_ctor (decl : Decl.t) (env : Env.t) =
   match decl with
-  | Decl.Ctor { num_params; inductive_name; _ } as c ->
+  | Decl.Ctor { num_params; inductive_name; _ } ->
     let inductive = Hashtbl.find env.tbl inductive_name in
-    Logger.debug "Ctor : %a" Decl.pp c;
-    Logger.debug "Associated inductive : %a" Decl.pp inductive;
     assert (num_params = Decl.get_inductive_num_params inductive);
     (* The constructor's type/telescope has to share the same parameters as the
        type of the inductive being declared. *)
@@ -679,7 +767,6 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
 
 let check (env : Env.t) (decl : Decl.t) : bool =
   let module Logger = (val env.logger) in
-  Logger.debug "@[Now type-checking %a.@]" Decl.pp decl;
   match (decl : Decl.t) with
   | Def { info; value; red_hint = _red_hint } ->
     (* TODO: definitions should be unfolded according to reducibility hints. *)
@@ -712,7 +799,6 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   If yes, we call that declaration well-posed and only typecheck those. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let module Logger = (val env.logger) in
-  Logger.debug "Checking if %a is well-posed." Name.pp info.name;
   let rec dup_exist = function
     | [] -> false
     | hd :: tl -> List.exists (( = ) hd) tl || dup_exist tl
@@ -720,12 +806,9 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_dup_uparams = dup_exist info.uparams |> not in
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
-    Logger.debug "Checking if type %a is sort" Expr.pp info.ty;
     try
       match infer env info.ty |> Expr.node with
-      | Expr.Sort _ ->
-        Logger.debug "Type of %a is sort" Name.pp info.name;
-        true
+      | Expr.Sort _ -> true
       | _ ->
         Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
         false
@@ -734,10 +817,6 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
         Name.pp info.name Pp.pp_failed_inferring e
   in
 
-  Logger.debug "(no_dup_uparams,no_free_vars,type_is_sort) = (%s,%s,%s)"
-    (string_of_bool no_dup_uparams)
-    (string_of_bool no_free_vars)
-    (string_of_bool type_is_sort);
   no_dup_uparams && no_free_vars && type_is_sort
 
 let typecheck (env : Env.t) =
