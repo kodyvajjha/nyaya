@@ -94,19 +94,13 @@ end) : LOGGER = struct
       fmt
 
   let err fmt exn =
-    (* Grab backtrace for the most recently raised exception *)
-    let bt = Printexc.get_raw_backtrace () in
-    let bt_s = Printexc.raw_backtrace_to_string bt in
-
     CCFormat.set_color_default true;
     CCFormat.with_color_ksf "red"
       ~f:(fun msg ->
-        (* Log the original message, the exception, and the backtrace *)
         Logs.err (fun m ->
-            m "@[<v 0>%s@,Exception: %s@,@[<v 2>Backtrace:@,%s@]@]" msg
-              (Printexc.to_string exn) bt_s ~header:Data.header);
-        (* Re-raise, preserving backtrace *)
-        Printexc.raise_with_backtrace exn bt)
+            m "@[<v 0>%s@,Exception: %s@]" msg
+              (Printexc.to_string exn) ~header:Data.header);
+        raise exn)
       fmt
 
   let debug fmt =
@@ -173,10 +167,20 @@ module MakeTrace (Data : TRACE_DATA) = struct
     | Some s -> (try int_of_string s with _ -> 2000)
     | None -> 2000
 
+  let max_path_entries = 8
+
   let current_path () =
-    !stack |> List.rev
-    |> CCList.map (fun frame -> string_of_int frame.id)
-    |> String.concat ">"
+    (* Stack is newest-first; take the last max_path_entries frames *)
+    let entries =
+      CCList.take max_path_entries !stack
+      |> List.rev
+      |> CCList.map (fun frame -> string_of_int frame.id)
+    in
+    let depth = List.length !stack in
+    if depth > max_path_entries then
+      "..." ^ ">" ^ String.concat ">" entries
+    else
+      String.concat ">" entries
 
   let current_depth () = List.length !stack
 
