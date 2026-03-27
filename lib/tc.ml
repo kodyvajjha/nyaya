@@ -312,6 +312,9 @@ module Reduce = struct
       Unary:  Nat.succ
       Binary arithmetic: Nat.add, Nat.sub, Nat.mul, Nat.pow, Nat.div, Nat.mod
       Binary comparisons: Nat.beq, Nat.ble  (produce Bool constructors)
+      Bitwise: Nat.land, Nat.lor, Nat.xor
+      Shifts:  Nat.shiftLeft, Nat.shiftRight
+      Bit test: Nat.testBit  (produces Bool constructors)
 
       Reference: "Type Checking in Lean 4", §3.5 (Literals). *)
   let nat_lit_reduce (env : Env.t) (e : Expr.t) whnf : Expr.t option =
@@ -478,6 +481,21 @@ module Reduce = struct
                 | None -> None)
               | None -> None)
           | _ -> None)
+      (* Bitwise operations: Nat.land, Nat.lor, Nat.xor *)
+      | n when n = mk_name "Nat" "land" ->
+        binary (fun m n -> Expr.natlit (Z.logand m n))
+      | n when n = mk_name "Nat" "lor" ->
+        binary (fun m n -> Expr.natlit (Z.logor m n))
+      | n when n = mk_name "Nat" "xor" ->
+        binary (fun m n -> Expr.natlit (Z.logxor m n))
+      (* Bit shift operations: Nat.shiftLeft, Nat.shiftRight *)
+      | n when n = mk_name "Nat" "shiftLeft" ->
+        binary (fun m n -> Expr.natlit (Z.shift_left m (Z.to_int n)))
+      | n when n = mk_name "Nat" "shiftRight" ->
+        binary (fun m n -> Expr.natlit (Z.shift_right m (Z.to_int n)))
+      (* Bit test: Nat.testBit *)
+      | n when n = mk_name "Nat" "testBit" ->
+        binary (fun m n -> bool_const (Z.testbit m (Z.to_int n)))
       | _ -> None)
     | _ -> None
 
@@ -488,8 +506,12 @@ module Reduce = struct
     let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
     name = mk_name "succ" || name = mk_name "add"
     || name = mk_name "sub" || name = mk_name "mul"
-    || name = mk_name "div" || name = mk_name "mod"
-    || name = mk_name "beq" || name = mk_name "ble"
+    || name = mk_name "pow" || name = mk_name "div"
+    || name = mk_name "mod" || name = mk_name "beq"
+    || name = mk_name "ble" || name = mk_name "land"
+    || name = mk_name "lor" || name = mk_name "xor"
+    || name = mk_name "shiftLeft" || name = mk_name "shiftRight"
+    || name = mk_name "testBit"
 
   let is_nat_builtin (e : Expr.t) : bool =
     let hd, _args = Expr.get_apps e in
@@ -826,22 +848,22 @@ and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
   if e1 == e2 then true
   else
-  let e1' = whnf env e1 in
-  let e2' = whnf env e2 in
-  if e1' == e2' then true
-  else
-  (* Proof irrelevance: if p and q both inhabit Props S and T,
-     and S is definitionally equal to T, then p =?= q.
-       infer(p) = S, infer(q) = T,
-       infer(S) = Sort 0, infer(T) = Sort 0, defEq(S, T) *)
+  (* Early proof irrelevance check BEFORE whnf: if both terms inhabit
+     definitionally equal Props, they are equal.  This avoids expensive
+     whnf of proof terms (e.g. Nat.bitwise_lt_two_pow which unfolds
+     Nat.rec on the bit-width).  infer is memoised and cheap. *)
   let is_prop ty =
     match Expr.node (whnf env (infer env ty)) with
     | Expr.Sort u -> Level.is_zero u
     | _ -> false
   in
-  let s = infer env e1' in
-  let t = infer env e2' in
+  let s = infer env e1 in
+  let t = infer env e2 in
   if is_prop s && is_prop t && isDefEq env s t then true
+  else
+  let e1' = whnf env e1 in
+  let e2' = whnf env e2 in
+  if e1' == e2' then true
   else
   let result =
     match Expr.node e1', Expr.node e2' with
