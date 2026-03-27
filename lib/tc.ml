@@ -488,9 +488,8 @@ module Reduce = struct
     let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
     name = mk_name "succ" || name = mk_name "add"
     || name = mk_name "sub" || name = mk_name "mul"
-    || name = mk_name "pow" || name = mk_name "div"
-    || name = mk_name "mod" || name = mk_name "beq"
-    || name = mk_name "ble"
+    || name = mk_name "div" || name = mk_name "mod"
+    || name = mk_name "beq" || name = mk_name "ble"
 
   let is_nat_builtin (e : Expr.t) : bool =
     let hd, _args = Expr.get_apps e in
