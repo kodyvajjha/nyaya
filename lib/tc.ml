@@ -344,9 +344,59 @@ module Reduce = struct
       | n when n = mk_name "Nat" "succ" ->
         unary (fun n -> Expr.natlit (Z.succ n))
       | n when n = mk_name "Nat" "add" ->
-        binary (fun m n -> Expr.natlit (Z.add m n))
+        (match binary (fun m n -> Expr.natlit (Z.add m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.add when the second argument is
+             a small concrete NatLit but the first is symbolic:
+               Nat.add x 0     → x
+               Nat.add x (n+1) → Nat.succ (Nat.add x n)
+             Bounded to avoid O(n) blowup on huge literals. *)
+          match args with
+          | [a; b] ->
+            (match as_nat_lit b with
+            | Some n when Z.leq n (Z.of_int 64) ->
+              if Z.equal n Z.zero then Some a
+              else
+                let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
+                Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [inner])
+            | _ -> None)
+          | _ -> None)
       | n when n = mk_name "Nat" "sub" ->
-        binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero))
+        (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.sub with symbolic args:
+               Nat.sub x 0             → x
+               Nat.sub 0 _             → NatLit 0
+               Nat.sub (succ n) (succ m) → Nat.sub n m
+             "succ" matches both Nat.succ x and NatLit (k+1). *)
+          let is_zero e =
+            match Expr.node (whnf env e) with
+            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+            | _ -> false
+          in
+          let as_succ e =
+            let e' = whnf env e in
+            let shd, sargs = Expr.get_apps e' in
+            match Expr.node shd, sargs with
+            | Expr.Const { name = sn; _ }, [x]
+              when sn = mk_name "Nat" "succ" -> Some x
+            | _ ->
+              (match Expr.node e' with
+              | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
+                Some (Expr.natlit (Z.pred k))
+              | _ -> None)
+          in
+          match args with
+          | [a; b] ->
+            if is_zero b then Some (whnf env a)
+            else if is_zero a then Some (Expr.natlit Z.zero)
+            else
+              (match as_succ a, as_succ b with
+              | Some n, Some m -> Some (Expr.mk_app hd [n; m])
+              | _ -> None)
+          | _ -> None)
       | n when n = mk_name "Nat" "mul" ->
         binary (fun m n -> Expr.natlit (Z.mul m n))
       | n when n = mk_name "Nat" "pow" ->
@@ -360,9 +410,74 @@ module Reduce = struct
           if Z.equal n Z.zero then Expr.natlit Z.zero
           else Expr.natlit (Z.rem m n))
       | n when n = mk_name "Nat" "beq" ->
-        binary (fun m n -> bool_const (Z.equal m n))
+        (match binary (fun m n -> bool_const (Z.equal m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.beq with symbolic args:
+               Nat.beq 0 (succ _)        → Bool.false
+               Nat.beq (succ _) 0        → Bool.false
+               Nat.beq (succ n) (succ m) → Nat.beq n m *)
+          let is_zero e =
+            match Expr.node (whnf env e) with
+            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+            | _ -> false
+          in
+          let as_succ e =
+            let e' = whnf env e in
+            let shd, sargs = Expr.get_apps e' in
+            match Expr.node shd, sargs with
+            | Expr.Const { name = sn; _ }, [x]
+              when sn = mk_name "Nat" "succ" -> Some x
+            | _ ->
+              (match Expr.node e' with
+              | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
+                Some (Expr.natlit (Z.pred k))
+              | _ -> None)
+          in
+          match args with
+          | [a; b] ->
+            (match as_succ a, as_succ b with
+            | Some n, Some m -> Some (Expr.mk_app hd [n; m])
+            | Some _, _ when is_zero b -> Some (bool_const false)
+            | _, Some _ when is_zero a -> Some (bool_const false)
+            | _ -> None)
+          | _ -> None)
       | n when n = mk_name "Nat" "ble" ->
-        binary (fun m n -> bool_const (Z.leq m n))
+        (match binary (fun m n -> bool_const (Z.leq m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.ble with symbolic args:
+               Nat.ble 0 _             → Bool.true
+               Nat.ble (succ _) 0      → Bool.false
+               Nat.ble (succ n) (succ m) → Nat.ble n m *)
+          let is_zero e =
+            match Expr.node (whnf env e) with
+            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+            | _ -> false
+          in
+          let as_succ e =
+            let shd, sargs = Expr.get_apps (whnf env e) in
+            match Expr.node shd, sargs with
+            | Expr.Const { name = sn; _ }, [x]
+              when sn = mk_name "Nat" "succ" -> Some x
+            | _ ->
+              (match Expr.node (whnf env e) with
+              | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
+                Some (Expr.natlit (Z.pred k))
+              | _ -> None)
+          in
+          match args with
+          | [a; b] ->
+            if is_zero a then Some (bool_const true)
+            else
+              (match as_succ a with
+              | Some _ when is_zero b -> Some (bool_const false)
+              | Some n ->
+                (match as_succ b with
+                | Some m -> Some (Expr.mk_app hd [n; m])
+                | None -> None)
+              | None -> None)
+          | _ -> None)
       | _ -> None)
     | _ -> None
 
@@ -628,9 +743,10 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       whnf env r
     | None ->
     (* If the head is a known Nat kernel builtin but nat_lit_reduce couldn't
-       fire (e.g. a symbolic argument), do NOT delta-unfold — the expression
-       is already in WHNF.  Unfolding would expose an O(n) Nat.brecOn/Nat.rec
-       reduction on huge literals. *)
+       fire, do NOT delta-unfold — unfolding would expose an O(n) Nat.brecOn
+       reduction on huge literals (e.g. UInt32 operations with 2^32).
+       Partial reductions like Nat.add x 1 → Nat.succ x are handled
+       directly in nat_lit_reduce instead. *)
     if Reduce.is_nat_builtin expr then expr
     else
     let hd' =
@@ -655,9 +771,13 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     Logger.debug "whnf: zeta";
     whnf env (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
   | Expr.Const { name; uparams }  ->
+    (* Nat.zero is definitionally equal to NatLit 0 in the Lean kernel.
+       Normalize it here so that isDefEq doesn't need a Const-vs-Literal case. *)
+    if name = Name.Str (Name.Str (Name.Anon, "Nat"), "zero") then
+      Expr.natlit Z.zero
     (* Don't delta-unfold Nat kernel builtins — they may later be applied
        to huge literals, and their Nat.brecOn definitions would loop. *)
-    if Reduce.is_nat_builtin_name name then expr
+    else if Reduce.is_nat_builtin_name name then expr
     else
       let e' = Reduce.delta_at_head env expr in
       if e' == expr then expr
@@ -669,14 +789,23 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let inner' = whnf env inner in
       let (hd, args) = Expr.get_apps inner' in
       (match Expr.node hd with
-       | Expr.Const _ ->
-         let num_params = Decl.get_inductive_num_params (Hashtbl.find env.tbl name) in
-         let idx = nat + num_params in
-         (match CCList.get_at_idx idx args with
-          | Some field ->
-            Logger.debug "whnf: proj-reduce (#%d)" nat;
-            whnf env field
-          | None -> Expr.proj name nat inner')
+       | Expr.Const { name = cname; _ } ->
+         (* Only reduce if the head is actually a constructor of the
+            projected inductive type.  Without this guard, stuck recursor
+            applications (e.g. List.rec … stuck_arg) would be mistaken
+            for constructor applications and a random argument extracted. *)
+         let ind_decl = Hashtbl.find env.tbl name in
+         let ctor_names = Decl.get_inductive_ctors ind_decl in
+         if List.mem cname ctor_names then
+           let num_params = Decl.get_inductive_num_params ind_decl in
+           let idx = nat + num_params in
+           (match CCList.get_at_idx idx args with
+            | Some field ->
+              Logger.debug "whnf: proj-reduce (#%d)" nat;
+              whnf env field
+            | None -> Expr.proj name nat inner')
+         else
+           Expr.proj name nat inner'
        | _ -> Expr.proj name nat inner')
   | _ -> expr
 
@@ -845,6 +974,13 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
     true
+  | Opaque { info; value } ->
+    Logger.debugf Pp.pp_check (value, info.ty);
+    let inf = (infer env value) in
+    Logger.app "Inference complete";
+    let ans = isDefEq env (inf) info.ty in
+    Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
+    ans
   | Ctor { info; inductive_name; _ } as d -> check_ctor d env
   | Rec _ -> (* TODO: what goes here? *) true
   | Inductive _ -> (* TODO: what goes here? *) true
