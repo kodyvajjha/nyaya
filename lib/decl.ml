@@ -151,7 +151,7 @@ let get_value (decl : t) =
   match decl with
   | Def { value; _ } -> Some value
   | Thm { value; _ } -> Some value
-  | Opaque _ -> None
+  | Opaque { value; _ } -> Some value
   (* TODO: This needs some figuring out... *)
   (* | Inductive { info; _ } -> Some info.ty *)
   (* | Axiom { ty; _ } -> Some ty *)
