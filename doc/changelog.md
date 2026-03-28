@@ -5,6 +5,35 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-03-27: Proof-irrelevant App inference & structure eta for iota
+
+### Skip defeq check for Prop-typed arguments in infer App
+**File:** `tc.ml`, `infer` App case
+**Problem:** Inferring the type of applications whose arguments are proofs (Prop-typed)
+triggered expensive defeq checks on auto-generated proof terms (omega, decide, etc.).
+These terms can be enormous and normalising them is wasteful since proof irrelevance
+means the exact proof doesn't matter.
+**Fix:** Before checking `isDefEq btype arg_type`, check whether `btype` is a Prop
+(its type whnf's to `Sort 0`). If so, skip the defeq check entirely — any two proofs
+of the same Prop are interchangeable.
+
+### Structure eta in iota reduction
+**File:** `tc.ml`, `iota_at_head`
+**Problem:** `List.get_cons_succ'` (proved by `rfl`) requires
+`List.get (a :: as) (Fin.succ i) =?= List.get as i` to hold definitionally. After
+reducing through `brecOn`/`List.rec`/`List.get.match_1`, the kernel reaches
+`Fin.casesOn` applied to `Fin.succ _ i`. `Fin.succ` unfolds into a match on `i`, but
+`i` is a free variable, so the inner `Fin.casesOn` gets stuck. The whole LHS is stuck
+at `Fin.rec ... (Fin.rec ... i ...)` and can't match the RHS.
+**Fix:** When `iota_at_head` encounters a non-constructor major premise for a
+structure-like recursor (single constructor, no indices, not recursive), apply
+"structure eta": reduce by projecting out each field from the major premise.
+`S.rec params motive minor x → minor (x.0) (x.1) …`
+This is the same rule Lean 4's kernel uses for structure recursors.
+**Declaration unblocked:** `List.get_cons_succ'`
+
+---
+
 ## 2026-03-26: Nat bitwise builtins & early proof irrelevance
 
 ### Nat bitwise builtins

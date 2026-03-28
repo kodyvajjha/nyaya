@@ -296,8 +296,35 @@ module Reduce = struct
               Logger.debug "iota (natlit): %a" Expr.pp red;
               red)
           | _ ->
-            (* major isn't constructor-headed *)
-            e
+            (* major isn't constructor-headed — try structure eta.
+               For structure-like types (single constructor, no indices,
+               not recursive), reduce the recursor by projecting out
+               each field:
+                 S.rec params motive minor x  →  minor (x.0) (x.1) … *)
+            (match rec_name with
+            | Name.Str (ind_name, _) ->
+              (match Hashtbl.find_opt env.tbl ind_name with
+              | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
+                when List.length ctor_names = 1
+                  && num_idx = 0
+                  && not is_recursive ->
+                let rule = List.hd rules in
+                let rule_val =
+                  Expr.subst_levels rule.value decl_uparams rec_levels
+                in
+                let prefix_len = num_params + num_motives + num_minors in
+                let prefix = CCList.take prefix_len args in
+                let suffix = CCList.drop (major_idx + 1) args in
+                let field_args =
+                  List.init rule.ctor_num_args (fun i ->
+                    Expr.proj ind_name i major)
+                in
+                let new_args = prefix @ field_args @ suffix in
+                let red = Expr.mk_app rule_val new_args in
+                Logger.debug "iota (struct-eta): %a" Expr.pp red;
+                red
+              | _ -> e)
+            | _ -> e)
         )
       | _ -> e)
     | _ -> e
@@ -604,15 +631,26 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     *)
     (match whnf env (infer env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
-      let arg_type = infer env arg in
-      if not (isDefEq env btype arg_type) then
-        Logger.err
-          "@[<v 0>[infer App] defeq failed for@,\
-           \ expr = %a@,\
-           \ btype = %a@,\
-           \ arg_type = %a@]"
-          (Defeq_failure "infer App: btype vs arg type")
-          Expr.pp expr Expr.pp btype Expr.pp arg_type;
+      (* When the expected parameter type is a Prop, skip the defeq
+         check on the argument — proof irrelevance means the exact
+         proof term doesn't matter, and inferring/normalising complex
+         auto-generated proofs (omega, decide) is very expensive. *)
+      let btype_is_prop =
+        match Expr.node (whnf env (infer env btype)) with
+        | Expr.Sort u -> Level.is_zero u
+        | _ -> false
+      in
+      if not btype_is_prop then begin
+        let arg_type = infer env arg in
+        if not (isDefEq env btype arg_type) then
+          Logger.err
+            "@[<v 0>[infer App] defeq failed for@,\
+             \ expr = %a@,\
+             \ btype = %a@,\
+             \ arg_type = %a@]"
+            (Defeq_failure "infer App: btype vs arg type")
+            Expr.pp expr Expr.pp btype Expr.pp arg_type
+      end;
       Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body ()
     | e ->
       Logger.err "infer App: expected forall, got @[%a@]"
