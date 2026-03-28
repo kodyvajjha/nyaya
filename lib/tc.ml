@@ -377,11 +377,11 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.add m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.add when the second argument is
-             a small concrete NatLit but the first is symbolic:
-               Nat.add x 0     → x
-               Nat.add x (n+1) → Nat.succ (Nat.add x n)
-             Bounded to avoid O(n) blowup on huge literals. *)
+          (* Partial iota rules for Nat.add:
+               Nat.add x 0           → x
+               Nat.add x (NatLit n+1) → Nat.succ (Nat.add x (NatLit n))
+               Nat.add x (Nat.succ y) → Nat.succ (Nat.add x y)
+             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
           match args with
           | [a; b] ->
             (match as_nat_lit b with
@@ -390,7 +390,16 @@ module Reduce = struct
               else
                 let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [inner])
-            | _ -> None)
+            | _ ->
+              (* Symbolic successor: Nat.add x (Nat.succ y) → Nat.succ (Nat.add x y) *)
+              let b' = whnf env b in
+              let bhd, bargs = Expr.get_apps b' in
+              (match Expr.node bhd, bargs with
+               | Expr.Const { name = sn; _ }, [y]
+                 when sn = mk_name "Nat" "succ" ->
+                 let inner = Expr.mk_app hd [a; y] in
+                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [inner])
+               | _ -> None))
           | _ -> None)
       | n when n = mk_name "Nat" "sub" ->
         (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
@@ -428,7 +437,33 @@ module Reduce = struct
               | _ -> None)
           | _ -> None)
       | n when n = mk_name "Nat" "mul" ->
-        binary (fun m n -> Expr.natlit (Z.mul m n))
+        (match binary (fun m n -> Expr.natlit (Z.mul m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.mul:
+               Nat.mul x 0           → 0
+               Nat.mul x (NatLit n+1) → Nat.add (Nat.mul x (NatLit n)) x
+               Nat.mul x (Nat.succ y) → Nat.add (Nat.mul x y) x
+             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
+          match args with
+          | [a; b] ->
+            (match as_nat_lit b with
+            | Some n when Z.leq n (Z.of_int 64) ->
+              if Z.equal n Z.zero then Some (Expr.natlit Z.zero)
+              else
+                let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
+                Some (Expr.mk_app (Expr.const (mk_name "Nat" "add")) [inner; a])
+            | _ ->
+              (* Symbolic successor: Nat.mul x (Nat.succ y) → Nat.add (Nat.mul x y) x *)
+              let b' = whnf env b in
+              let bhd, bargs = Expr.get_apps b' in
+              (match Expr.node bhd, bargs with
+               | Expr.Const { name = sn; _ }, [y]
+                 when sn = mk_name "Nat" "succ" ->
+                 let inner = Expr.mk_app hd [a; y] in
+                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "add")) [inner; a])
+               | _ -> None))
+          | _ -> None)
       | n when n = mk_name "Nat" "pow" ->
         binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n)))
       | n when n = mk_name "Nat" "div" ->
@@ -526,19 +561,21 @@ module Reduce = struct
       | _ -> None)
     | _ -> None
 
-  (** Returns [true] when [name] is a known Nat kernel builtin.
-      Used to prevent delta-unfolding of builtins when [nat_lit_reduce]
-      could not fire (e.g. one argument is symbolic). *)
+  (** Returns [true] when [name] is a primitive Nat kernel builtin whose
+      definition recurses linearly (O(n)) and must NOT be delta-unfolded
+      when [nat_lit_reduce] fails on symbolic args.
+
+      Bitwise operations (land, lor, xor, shiftLeft, shiftRight, testBit)
+      are NOT guarded here: they are defined via [Nat.bitwise] which
+      recurses logarithmically (divides by 2), making delta safe.  They
+      also need delta for their equation lemmas (e.g. Nat.lor.eq_1). *)
   let is_nat_builtin_name (name : Name.t) : bool =
     let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
     name = mk_name "succ" || name = mk_name "add"
     || name = mk_name "sub" || name = mk_name "mul"
     || name = mk_name "pow" || name = mk_name "div"
     || name = mk_name "mod" || name = mk_name "beq"
-    || name = mk_name "ble" || name = mk_name "land"
-    || name = mk_name "lor" || name = mk_name "xor"
-    || name = mk_name "shiftLeft" || name = mk_name "shiftRight"
-    || name = mk_name "testBit"
+    || name = mk_name "ble"
 
   let is_nat_builtin (e : Expr.t) : bool =
     let hd, _args = Expr.get_apps e in
@@ -977,12 +1014,58 @@ and isDefEq_impl env e1 e2 =
       ) else
         (Logger.debug "defeq: Let btype/value mismatch"; false)
     | _ ->
-      Logger.err
-        "@[<v 0>[isDefEq] structural mismatch@,\
-         \ lhs = %a@,\
-         \ rhs = %a@]"
-        (Defeq_failure "isDefEq: structural mismatch")
-        Expr.pp e1 Expr.pp e2
+      (* Structure eta (defEqEtaStruct x y): y is constructor-headed for
+         a structure type T; compare Proj(i, x) against yArgs[i+numParams]
+         for each field, after checking the inferred types are defeq
+         (which ensures the parameters agree). *)
+      let try_struct_eta x y =
+        let hd, y_args = Expr.get_apps y in
+        match Expr.node hd with
+        | Expr.Const { name = ctor_name; _ } ->
+          (match Hashtbl.find_opt env.tbl ctor_name with
+           | Some (Decl.Ctor { inductive_name; num_params; num_fields; _ }) ->
+             (match Hashtbl.find_opt env.tbl inductive_name with
+              | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
+                when List.length ctor_names = 1
+                  && num_idx = 0
+                  && not is_recursive
+                  && List.length y_args = num_params + num_fields ->
+                if not (isDefEq env (infer env x) (infer env y)) then false
+                else (
+                  Logger.debug "defeq: struct-eta for %a" Name.pp inductive_name;
+                  let rec check i =
+                    if i >= num_fields then true
+                    else
+                      isDefEq env
+                        (Expr.proj inductive_name i x)
+                        (List.nth y_args (num_params + i))
+                      && check (i + 1)
+                  in
+                  check 0)
+              | _ -> false)
+           | _ -> false)
+        | _ -> false
+      in
+      if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
+      else
+      (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
+      let try_lam_eta lam other =
+        match Expr.node lam with
+        | Expr.Lam { name; btype; body; binfo } ->
+          let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
+          isDefEq env
+            (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+            (Expr.app other fv)
+        | _ -> false
+      in
+      if try_lam_eta e1' e2' || try_lam_eta e2' e1' then true
+      else
+        Logger.err
+          "@[<v 0>[isDefEq] structural mismatch@,\
+           \ lhs = %a@,\
+           \ rhs = %a@]"
+          (Defeq_failure "isDefEq: structural mismatch")
+          Expr.pp e1 Expr.pp e2
   in
   result
 

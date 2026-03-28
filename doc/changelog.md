@@ -5,6 +5,73 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-03-28: Structure eta, lambda eta, Nat symbolic successor iota, bitwise delta
+
+### Narrow Nat builtin delta guard to primitives only
+**File:** `tc.ml`, `is_nat_builtin_name`
+**Problem:** `Nat.lor.eq_1` failed because `Nat.lor` was in the builtin guard list,
+blocking delta-unfolding when `nat_lit_reduce` didn't fire (symbolic args). The
+equation lemma needs `Nat.lor` to unfold to `Nat.bitwise Bool.or` to verify
+definitional equality.
+**Fix:** Remove bitwise operations (`Nat.land`, `Nat.lor`, `Nat.xor`,
+`Nat.shiftLeft`, `Nat.shiftRight`, `Nat.testBit`) from `is_nat_builtin_name`. They
+still get the O(1) fast path from `nat_lit_reduce` on concrete args, but now fall
+through to delta when the fast path doesn't apply. Safe because `Nat.bitwise`
+recurses logarithmically (divides by 2), unlike primitive arithmetic (linear).
+**Declaration unblocked:** `Nat.lor.eq_1`
+
+### Lambda eta in isDefEq
+**File:** `tc.ml`, `isDefEq_impl`
+**Problem:** `List.id_run_foldlM` compared `fun x y => Pure.pure Id ... (f x y)`
+against `f`. The outermost `Lam` is already WHNF so the `Pure.pure` inside the body
+never gets a chance to reduce, and the `Lam` vs `FreeVar` pair has no matching case.
+**Fix:** Add lambda eta to the catch-all in `isDefEq_impl`: when one side is a `Lam`
+and the other is not, instantiate the lambda body with a fresh variable and apply the
+other side to the same variable, then recurse. This lets the `Pure.pure Id` in the
+body reach WHNF and reduce away.
+**Declaration unblocked:** `List.id_run_foldlM`
+
+### Nat.add/Nat.mul symbolic successor partial iota
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** `Nat.add_succ_sub_one` (`m + succ n - 1 = m + n`) failed because
+`Nat.add m (Nat.succ n)` was stuck — the partial iota rules only fired when the
+second argument was a concrete `NatLit`, not a symbolic `Nat.succ y`. This blocked
+`Nat.sub` from seeing the successor in the result, so the whole expression stayed
+unreduced.
+**Fix:** Extend partial iota for `Nat.add` and `Nat.mul` to handle symbolic
+successor arguments after the `NatLit` check fails:
+`Nat.add x (Nat.succ y) → Nat.succ (Nat.add x y)`,
+`Nat.mul x (Nat.succ y) → Nat.add (Nat.mul x y) x`.
+**Declaration unblocked:** `Nat.add_succ_sub_one`
+
+### Nat.mul partial iota rules
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** `BitVec.replicate_zero` failed with a structural mismatch:
+`HMul.hMul Nat Nat Nat (instHMul Nat instMulNat) w (OfNat.ofNat Nat 0 ...)` vs
+`OfNat.ofNat Nat 0 ...`. After type class unfolding this is `Nat.mul w 0 =?= 0`,
+but `Nat.mul` only had concrete binary reduction (both args literal) and no partial
+iota rules for symbolic arguments.
+**Fix:** Add partial iota rules for `Nat.mul` (bounded to second arg ≤ 64):
+`Nat.mul x 0 → 0`, `Nat.mul x (n+1) → Nat.add (Nat.mul x n) x`.
+**Declaration unblocked:** `BitVec.replicate_zero`
+
+### Structure eta in isDefEq
+**File:** `tc.ml`, `isDefEq_impl`
+**Problem:** `List.get_cons_succ'` still failed after iota structure eta because the
+final defeq check compared `Fin.mk n (Nat.add i.0 0) proof` (constructor application)
+against `i` (a free variable). The `isDefEq` match had no case for comparing a
+constructor-headed term against a non-constructor term and fell through to
+"structural mismatch".
+**Fix:** Before the catch-all error in `isDefEq_impl`, try structure eta: when one
+side is a constructor application of a structure type (single ctor, no indices, not
+recursive), compare each constructor field against the corresponding projection of
+the other side. For `Fin.mk n val proof` vs `i`, this compares `val =?= i.0`
+(succeeds via `Nat.add x 0 → x`) and `proof =?= i.1` (succeeds via proof
+irrelevance).
+**Declaration unblocked:** `List.get_cons_succ'`
+
+---
+
 ## 2026-03-27: Proof-irrelevant App inference & structure eta for iota
 
 ### Skip defeq check for Prop-typed arguments in infer App
