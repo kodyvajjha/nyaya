@@ -140,6 +140,50 @@ module Reduce = struct
       | None -> f)
     | _ -> f
 
+  (** Convert a string literal to its constructor representation:
+        [StrLit "ok" → String.mk (List.cons Char (Char.ofNat 111)
+                        (List.cons Char (Char.ofNat 107) (List.nil Char)))]
+      Uses [Char.ofNat] for each Unicode code point, matching the Lean 4
+      kernel's string_lit_to_constructor. *)
+  let string_lit_to_ctor (s : string) : Expr.t =
+    let mk_name base field = Name.Str (Name.Str (Name.Anon, base), field) in
+    let char_type = Expr.const (Name.Str (Name.Anon, "Char")) in
+    let list_nil = Expr.mk_app (Expr.const (mk_name "List" "nil")) [char_type] in
+    let list_cons_char = Expr.mk_app (Expr.const (mk_name "List" "cons")) [char_type] in
+    let char_of_nat = Expr.const (mk_name "Char" "ofNat") in
+    let string_mk = Expr.const (mk_name "String" "mk") in
+    (* Decode UTF-8 string to list of Unicode code points *)
+    let code_points = ref [] in
+    let len = String.length s in
+    let i = ref 0 in
+    while !i < len do
+      let b0 = Char.code (String.get s !i) in
+      let cp, advance =
+        if b0 land 0x80 = 0 then (b0, 1)
+        else if b0 land 0xe0 = 0xc0 then
+          let b1 = Char.code (String.get s (!i + 1)) in
+          ((b0 land 0x1f) lsl 6 lor (b1 land 0x3f), 2)
+        else if b0 land 0xf0 = 0xe0 then
+          let b1 = Char.code (String.get s (!i + 1)) in
+          let b2 = Char.code (String.get s (!i + 2)) in
+          ((b0 land 0x0f) lsl 12 lor ((b1 land 0x3f) lsl 6) lor (b2 land 0x3f), 3)
+        else
+          let b1 = Char.code (String.get s (!i + 1)) in
+          let b2 = Char.code (String.get s (!i + 2)) in
+          let b3 = Char.code (String.get s (!i + 3)) in
+          ((b0 land 0x07) lsl 18 lor ((b1 land 0x3f) lsl 12)
+           lor ((b2 land 0x3f) lsl 6) lor (b3 land 0x3f), 4)
+      in
+      code_points := cp :: !code_points;
+      i := !i + advance
+    done;
+    (* Build list from right to left (code_points is reversed) *)
+    let char_list = List.fold_left (fun acc cp ->
+      let ch = Expr.mk_app char_of_nat [Expr.natlit (Z.of_int cp)] in
+      Expr.mk_app list_cons_char [ch; acc]
+    ) list_nil !code_points in
+    Expr.mk_app string_mk [char_list]
+
   (**
      One-step iota reduction at the head of [e].
 
@@ -467,13 +511,41 @@ module Reduce = struct
       | n when n = mk_name "Nat" "pow" ->
         binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n)))
       | n when n = mk_name "Nat" "div" ->
-        binary (fun m n ->
+        (match binary (fun m n ->
           if Z.equal n Z.zero then Expr.natlit Z.zero
-          else Expr.natlit (Z.div m n))
+          else Expr.natlit (Z.div m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.div with symbolic args:
+               Nat.div 0 n → 0
+               Nat.div n 0 → 0  (Lean kernel convention) *)
+          let is_zero e =
+            match Expr.node (whnf env e) with
+            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+            | _ -> false
+          in
+          (match args with
+          | [a; _] when is_zero a -> Some (Expr.natlit Z.zero)
+          | [_; b] when is_zero b -> Some (Expr.natlit Z.zero)
+          | _ -> None))
       | n when n = mk_name "Nat" "mod" ->
-        binary (fun m n ->
+        (match binary (fun m n ->
           if Z.equal n Z.zero then Expr.natlit Z.zero
-          else Expr.natlit (Z.rem m n))
+          else Expr.natlit (Z.rem m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.mod with symbolic args:
+               Nat.mod 0 n → 0
+               Nat.mod n 0 → 0  (Lean kernel convention) *)
+          let is_zero e =
+            match Expr.node (whnf env e) with
+            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+            | _ -> false
+          in
+          (match args with
+          | [a; _] when is_zero a -> Some (Expr.natlit Z.zero)
+          | [_; b] when is_zero b -> Some (Expr.natlit Z.zero)
+          | _ -> None))
       | n when n = mk_name "Nat" "beq" ->
         (match binary (fun m n -> bool_const (Z.equal m n)) with
         | Some _ as r -> r
@@ -684,6 +756,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
             "@[<v 0>[infer App] defeq failed for@,\
              \ expr = %a@,\
              \ btype = %a@,\
+             
              \ arg_type = %a@]"
             (Defeq_failure "infer App: btype vs arg type")
             Expr.pp expr Expr.pp btype Expr.pp arg_type
@@ -883,6 +956,13 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     expr
   | Expr.Proj {name; nat; expr = inner} ->
       let inner' = whnf env inner in
+      (* String literals are not constructor-headed; expand to String.mk before
+         attempting proj-reduce so that e.g. "".String.0 → List.nil Char. *)
+      let inner' =
+        match Expr.node inner' with
+        | Expr.Literal (Expr.StrLit s) -> Reduce.string_lit_to_ctor s
+        | _ -> inner'
+      in
       let (hd, args) = Expr.get_apps inner' in
       (match Expr.node hd with
        | Expr.Const { name = cname; _ } ->

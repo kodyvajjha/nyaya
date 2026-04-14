@@ -5,6 +5,50 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-04-13: Nat.mod/Nat.div partial iota for zero first argument
+
+### Nat.mod 0 n and Nat.div 0 n partial iota rules
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** `Fin.zero_le` failed with a structural mismatch:
+`OfNat.ofNat Nat 0 (instOfNatNat 0)` vs `Fin.val n (OfNat.ofNat (Fin n) 0 (Fin.instOfNat n _ 0))`.
+The RHS reduces through `Fin.instOfNat` → `Fin.ofNat` → `Fin.mk n (HMod.hMod ... 0 n) ...`,
+then proj-reduce fires on `Fin.val` to extract the first field, leaving `Nat.mod 0 n`.
+The LHS reduces to the Nat literal `0`. The mismatch was `0 =?= Nat.mod 0 n` — the
+latter was stuck because `nat_lit_reduce` for `Nat.mod` only had the `binary` case
+(both args must be NatLit). With symbolic `n`, no reduction fired.
+**Fix:** Add partial iota rules to `Nat.mod` and `Nat.div` for when one arg is zero:
+- `Nat.mod 0 n → 0`
+- `Nat.mod n 0 → 0` (Lean kernel convention)
+- `Nat.div 0 n → 0`
+- `Nat.div n 0 → 0` (Lean kernel convention)
+**Declaration unblocked:** `Fin.zero_le`
+
+---
+
+## 2026-04-13: String literal projection reduction (2637 declarations checked)
+
+### Proj-reduce string literals by expanding to constructor form
+**File:** `tc.ml`, `whnf_impl` Proj case
+**Problem:** `String.length_singleton` (proved by `rfl`) requires
+`String.length (String.singleton c) =?= 1` definitionally. The reduction chain
+expands via `String.push` → `String.casesOn` (struct-eta) → `String.mk (List.append "".data [c])`.
+The key step: `String.casesOn` struct-eta generates the projection `"".String.0`
+(i.e. `Expr.proj "String" 0 ""`) to extract the `data` field of the empty string
+literal `""`. `whnf` reduces this by delegating to the `Proj` case, but the existing
+code only handles `Expr.Const`-headed inner terms (constructor applications). A string
+literal `Expr.Literal (Expr.StrLit "")` isn't constructor-headed, so proj-reduce
+silently gave up and returned `"".String.0` unchanged. This blocked `List.rec` from
+firing iota on `List.append [] [c]`, leaving `List.length` stuck at a non-literal.
+**Fix:** After `whnf env inner` in the `Expr.Proj` branch, expand any `StrLit s`
+to its constructor form via `Reduce.string_lit_to_ctor s` before attempting
+proj-reduce. For `""`, this yields `String.mk (List.nil Char)`, whose head
+`String.mk` is a constructor, so proj-reduce fires and extracts `List.nil Char`.
+The rest of the reduction chain (`List.append [] [c] → [c]`, `List.length [c] → 1`)
+then completes normally.
+**Declaration unblocked:** `String.length_singleton`
+
+---
+
 ## 2026-03-28: Structure eta, lambda eta, Nat symbolic successor iota, bitwise delta
 
 ### Narrow Nat builtin delta guard to primitives only
