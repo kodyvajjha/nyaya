@@ -370,13 +370,8 @@ let rec num_loose_bvars expr =
       (num_loose_bvars body - 1)
   | Proj { expr; _ } -> num_loose_bvars expr
 
-(** Substitute the [free_var] at the [expr] (has to be a bound variable). TODO: this needs to be optimized by counting the number of loose bound variables in the expr.  *)
-let instantiate
-    ?(logger =
-      (module Util.MakeLogger (struct
-        let header = "Expr"
-      end) : Util.LOGGER)) ~(free_var : t) ~(expr : t) () =
-  let _logger = logger in
+(** Substitute the [free_var] at the [expr] (has to be a bound variable). *)
+let instantiate ~(free_var : t) ~(expr : t) =
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
     if num_loose_bvars expr <= offset then
       expr
