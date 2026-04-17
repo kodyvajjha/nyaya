@@ -1,22 +1,9 @@
-module type LOGGER = Nyaya_parser.Util.LOGGER
+(* Declaration environment.
 
-type t = {
-  tbl: (Name.t, Decl.t) Hashtbl.t;
-  logger: (module LOGGER);
-}
-
-let logger (env : t) = env.logger
-
-let with_logger (env : t) (logger : (module LOGGER)) = { env with logger }
-
-let pp fpf t =
-  CCFormat.fprintf fpf "@[Total unique declarations in environment: %d@.@]"
-    (Hashtbl.length t)
-
-let getter tbl key excp =
-  match CCHashtbl.get tbl key with
-  | Some v -> v
-  | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
+   A pure store of kernel declarations keyed by [Name.t]. All
+   operational state (loggers, memos, fvar counters, tracers) lives
+   in [Ctx.t]; this module is deliberately effect-free aside from the
+   one-time [mk] that resolves raw AST ids into typed declarations. *)
 
 open Nyaya_parser
 
@@ -24,11 +11,26 @@ module Logger = Util.MakeLogger (struct
   let header = "Env"
 end)
 
-let table
-    ?(logger =
-      (module Util.MakeLogger (struct
-        let header = "Env"
-      end) : LOGGER)) expr_table name_table rec_rule_table (ast : Ast.t) : t =
+type t = { tbl: (Name.t, Decl.t) Hashtbl.t }
+
+let pp fpf t =
+  CCFormat.fprintf fpf "@[Total unique declarations in environment: %d@.@]"
+    (Hashtbl.length t.tbl)
+
+let find t name = Hashtbl.find t.tbl name
+
+let find_opt t name = Hashtbl.find_opt t.tbl name
+
+let length t = Hashtbl.length t.tbl
+
+let to_iter t = Iter.of_hashtbl t.tbl
+
+let getter tbl key excp =
+  match CCHashtbl.get tbl key with
+  | Some v -> v
+  | None -> failwith @@ CCFormat.sprintf "Could not find id %d in %s" key excp
+
+let table expr_table name_table rec_rule_table (ast : Ast.t) : t =
   let resolved_table = Hashtbl.create (CCList.length ast.items) in
   let decl_table = Ast.Hashed.decls ast in
   let resolve (nid : int) =
@@ -157,7 +159,6 @@ let table
                      num_inductives + num_constructors + 9 -- (total - 1))
                   |> CCArray.to_list)
               in
-              (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
               CCList.(
                 let+ id = remaining in
                 getter name_table id "name table in inductives")
@@ -186,9 +187,6 @@ let table
               !inductive_names
               @ [ getter name_table arr.(j + 3) "name table in Rec" ]
           done;
-          (* CCFormat.printf "@[%a@.@]"
-             CCFormat.Dump.(list Name.pp)
-             !inductive_names; *)
           let num_params = arr.(3 + num_inductives) in
           let num_idx = arr.(4 + num_inductives) in
           let num_motives = arr.(5 + num_inductives) in
@@ -205,11 +203,6 @@ let table
                 ]
           done;
           let is_k = arr.(8 + num_inductives + num_rules) in
-          (* for i = 9 + num_inductives + num_rules to CCList.length l - 1 do
-               uparams :=
-                 !uparams
-                 @ [ getter name_table arr.(i) "Name table in rec uparams" ]
-             done; *)
           let uparams =
             if num_inductives + num_rules + 9 = total then
               []
@@ -220,7 +213,6 @@ let table
                   (CCArray.(num_inductives + num_rules + 9 -- (total - 1))
                   |> CCArray.to_list)
               in
-              (* CCFormat.printf "@[%a@]@." CCFormat.Dump.(list int) remaining; *)
               CCList.(
                 let+ id = remaining in
                 getter name_table id "name table in inductives")
@@ -247,7 +239,7 @@ let table
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) decl_table;
   Logger.info "Finished environment construction. Total number of mappings: %d"
     (Hashtbl.length decl_table);
-  { tbl = resolved_table; logger }
+  { tbl = resolved_table }
 
 let mk (ast : Ast.t) : t =
   let name_table = Name.table ast in
