@@ -1240,13 +1240,68 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
 let typecheck (env : Env.t) =
   let iter = env.tbl |> Iter.of_hashtbl in
   let success = ref 0 in
+  (* NYAYA_ONLY_DECL restricts the sweep to a single named declaration, for
+     fast iterate-fix-verify cycles: `check` only inspects the target
+     declaration's own value/type (dependencies are looked up from `env`
+     during infer/whnf but not re-verified as top-level decls), so skipping
+     every other declaration here has no effect on the result for the one
+     we do check. *)
+  let only_decl = Sys.getenv_opt "NYAYA_ONLY_DECL" in
+  (* NYAYA_SWEEP_ALL checks every declaration, catching all failures (not
+     just TypeError/Defeq_failure -- also Depth_limit, Not_well_posed, etc.)
+     instead of stopping at the first one, and reports the complete
+     pass/fail set at the end. This is the regression gate for the autoloop:
+     a plain run dies at the first failing declaration in hash order, so it
+     cannot by itself confirm "no previously-passing declaration regressed."
+     No debug_*.txt files are written here -- the failure set for this
+     codebase is currently large, and writing one file per failure would
+     litter the repo. Use NYAYA_ONLY_DECL (or NYAYA_DECL_DEBUG) separately
+     to get a trace for one specific declaration. *)
+  let sweep_all =
+    match Sys.getenv_opt "NYAYA_SWEEP_ALL" with
+    | Some ("1" | "true" | "TRUE") -> true
+    | _ -> false
+  in
+  let failures = ref [] in
   Iter.iter2
     (fun n d ->
+      let decl_name_str = CCFormat.to_string Name.pp n in
+      if
+        match only_decl with
+        | Some target -> not (String.equal target decl_name_str)
+        | None -> false
+      then ()
+      else if sweep_all then (
+        InferTrace.reset ();
+        WhnfTrace.reset ();
+        DefEqTrace.reset ();
+        Hashtbl.reset whnf_memo;
+        Hashtbl.reset infer_memo;
+        let record_failure () =
+          failures := decl_name_str :: !failures;
+          (* Print as we go, not just in the final summary: a long sweep can
+             be killed (e.g. OOM from unbounded hash-cons growth, a known
+             TODO) before it finishes, and a streamed line survives that
+             where a summary computed at the end wouldn't. *)
+          Logger.info "SWEEP_ALL_FAIL: %s" decl_name_str
+        in
+        try
+          let info = Decl.get_decl_info d in
+          if not (well_posed env info) then
+            record_failure ()
+          else if check env d then
+            success := !success + 1
+          else
+            record_failure ()
+        with
+        | (Stack_overflow | Out_of_memory) as exn -> raise exn
+        | _ -> record_failure ()
+      )
+      else
       let module DeclLogger : Env.LOGGER = Nyaya_parser.Util.MakeLogger (struct
         let header = CCFormat.to_string Name.pp n
       end) in
       let env = Env.with_logger env (module DeclLogger) in
-      let decl_name_str = CCFormat.to_string Name.pp n in
       let prev_level = Logs.level () in
       (match Sys.getenv_opt "NYAYA_DECL_DEBUG" with
       | Some target when String.equal target decl_name_str ->
@@ -1305,4 +1360,12 @@ let typecheck (env : Env.t) =
           Name.pp n (Printexc.to_string exn));
       Logs.set_level prev_level)
     iter;
-  Logger.success "Successfully checked %d declarations in environment." !success
+  if sweep_all then (
+    let total = !success + List.length !failures in
+    Logger.info "SWEEP_ALL: %d/%d declarations passed." !success total;
+    Logger.info "SWEEP_ALL: %d failing declarations:" (List.length !failures);
+    List.iter (fun name -> Logger.info "SWEEP_ALL_FAIL: %s" name)
+      (List.sort String.compare !failures)
+  )
+  else
+    Logger.success "Successfully checked %d declarations in environment." !success
