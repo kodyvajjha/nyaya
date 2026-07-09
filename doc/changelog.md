@@ -5,6 +5,36 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-08: Nat.mod partial iota for concrete positive numerator
+
+### Nat.mod literal-numerator, symbolic-denominator partial iota
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** `Fin.castSucc_one` (proved by `rfl`) failed with a structural mismatch
+bottoming out at `Nat.add n##8 0 =?= Nat.add n##8 1`, traced back through
+`Fin.val`/`Fin.mk`/`Fin.castSucc` to `Nat.mod 1 (n##8+2) =?= Nat.mod 1 (n##8+3)`
+(via `Fin.instOfNat`'s use of `Nat.mod` to compute `OfNat.ofNat (Fin _) 1`). Both
+sides needed to reduce to the literal `1`, but `nat_lit_reduce`'s `Nat.mod` case
+only handled the fully-concrete case and the two "one side is literal 0" partial
+cases — not "numerator is a positive literal, denominator symbolic."
+**Fix:** Added a partial iota rule: when the numerator `a` is a concrete positive
+`NatLit k` and `Nat.ble b a` (using the existing `Nat.ble` partial-iota chain)
+reduces to `Bool.false` (i.e. denominator `b > a`), return `k`. This mirrors the
+real `Nat.mod` definition's `ite (LE.le m n) (Nat.modCore n m) n` branch taking
+the `n` arm when the `LE.le` condition is false.
+**Kernel reference:** `Nat.mod`, `src/Init/Prelude.lean` (leanprover/lean4):
+```
+protected def Nat.mod : Nat → Nat → Nat
+  | 0, _ => 0
+  | n@(succ _), m => ite (LE.le m n) (Nat.modCore n m) n
+```
+Doc comment on `Nat.mod`: "`Nat.mod n (m + n + 1)` should reduce to `n` for
+concrete `Nat` literals `n` ... These reductions help `Fin n` literals work
+well, because the `OfNat` instance for `Fin` uses `Nat.mod`." Our case
+(`Nat.mod 1 (n##8+2)`) is exactly this pattern with literal `n = 1`, `m = n##8`.
+**Declaration unblocked:** `Fin.castSucc_one`
+
+---
+
 ## 2026-04-13: Nat.mod/Nat.div partial iota for zero first argument
 
 ### Nat.mod 0 n and Nat.div 0 n partial iota rules
