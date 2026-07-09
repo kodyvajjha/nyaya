@@ -5,6 +5,59 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-08: Fix unsound Nat.sub partial iota; unblocks Nat.sub_one
+
+### Nat.sub: replace paired-decrement shortcut with faithful single-step rule
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** `Nat.sub_one` (`n - 1 = Nat.pred n`, proved by `rfl`) failed with a
+structural mismatch bottoming out at `Nat.sub n##83 =?= Nat.rec ...` (comparing
+`Nat.sub`'s and `Nat.pred`'s delta-unfolded recursor forms directly, rather
+than reducing `Nat.sub n##83 1` down to `Nat.pred n##83` first). Investigating
+this surfaced a deeper, pre-existing problem: the *existing* partial-iota
+rules for `Nat.sub` — `Nat.sub 0 _ → 0` and `Nat.sub (succ n) (succ m) →
+Nat.sub n m` (added 2026-03-26, before this session's citation discipline) —
+do not match the real kernel's single-step reduction and are only
+*propositionally* true (provable by induction on the second argument), not
+*definitionally* true by iota alone, when that argument is symbolic. E.g. the
+real `Nat.sub 0 (succ b)` iota-reduces to `Nat.pred (Nat.sub 0 b)`, which is
+*stuck* when `b` is a free variable — not the literal `0` the old rule
+claimed. This is the same class of over-generalization flagged in
+`doc/soundness-risks.md` entry #1: a rule that's true for the cases it was
+built to unblock, generalized further than the cited definition supports.
+**Fix:** Replaced both special cases with a single rule that mirrors the real
+definition's one-step reduction exactly: `Nat.sub a 0 → a` (unchanged, this
+one *is* the literal first match arm) and `Nat.sub a (succ b) → Nat.pred
+(Nat.sub a b)` — recursing only on the second argument, leaving the first
+argument `a` untouched and possibly fully symbolic, then wrapping in
+`Nat.pred` (not a kernel builtin, so it delta-unfolds and iota-reduces
+normally once its own argument becomes constructor-headed). This is what
+directly resolves `Nat.sub_one`: `Nat.sub n 1 → Nat.pred (Nat.sub n 0) →
+Nat.pred n` via the existing `Nat.sub a 0 → a` case plus this new one,
+landing on exactly the theorem's RHS.
+**Kernel reference:** `Nat.sub`, `src/Init/Prelude.lean` (leanprover/lean4),
+fetched via `cdn.jsdelivr.net/gh/leanprover/lean4@master/...` (raw GitHub
+mirror), verified against the raw fetched text directly:
+```
+@[extern "lean_nat_sub", instance_reducible]
+protected def Nat.sub : (@& Nat) → (@& Nat) → Nat
+  | a, 0      => a
+  | a, succ b => pred (Nat.sub a b)
+```
+Pattern matching is on the *second* argument only; the first argument is
+never inspected by the definition, so no rule may require it to be
+succ-decomposable, and no rule may claim a result without wrapping in
+`Nat.pred` per recursive step.
+**Regression note:** the removed `Nat.sub (succ n) (succ m) → Nat.sub n m`
+case previously unblocked `Int.pred_toNat` (2026-03-26 entry). Re-verified
+`Int.pred_toNat` still passes with the corrected rule (fast-tier,
+`NYAYA_ONLY_DECL=Int.pred_toNat`) — its use case only ever had a concrete
+literal in the relevant position, so the faithful step-by-step reduction
+(via repeated `Nat.pred` wrapping) still reaches the same normal form.
+**Declaration unblocked:** `Nat.sub_one` (and corrects `Int.pred_toNat`'s
+previous reliance on an unsound shortcut).
+
+---
+
 ## 2026-07-08: Fix Nat.mod divisor-0 convention (mod n 0 = n, not 0)
 
 ### Nat.mod n 0 correctness fix

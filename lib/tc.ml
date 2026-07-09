@@ -449,11 +449,26 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.sub with symbolic args:
-               Nat.sub x 0             → x
-               Nat.sub 0 _             → NatLit 0
-               Nat.sub (succ n) (succ m) → Nat.sub n m
-             "succ" matches both Nat.succ x and NatLit (k+1). *)
+          (* Partial iota rule for Nat.sub with symbolic args, matching the
+             real definition exactly (Nat.sub, Init/Prelude.lean):
+               protected def Nat.sub : Nat → Nat → Nat
+                 | a, 0      => a
+                 | a, succ b => pred (Nat.sub a b)
+             This recurses ONLY on the second argument (the subtrahend);
+             the first argument [a] is never pattern-matched and may stay
+             fully symbolic. "succ" matches both Nat.succ x and
+             NatLit (k+1).
+             NOTE: an earlier version of this rule additionally special-
+             cased "Nat.sub 0 _ → 0" and "Nat.sub (succ n) (succ m) →
+             Nat.sub n m" (paired decrement, skipping the intermediate
+             Nat.pred). Both are only PROPOSITIONALLY true (provable by
+             induction on the second argument), not definitionally true
+             by iota alone when that argument is symbolic — e.g.
+             Nat.sub 0 (succ b) really iota-reduces to
+             Nat.pred (Nat.sub 0 b), which is stuck when b is a free
+             variable, not the literal 0 the old rule claimed. That was
+             an unsound over-generalization; removed in favor of this
+             faithful single-step reproduction. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -474,11 +489,12 @@ module Reduce = struct
           match args with
           | [a; b] ->
             if is_zero b then Some (whnf env a)
-            else if is_zero a then Some (Expr.natlit Z.zero)
             else
-              (match as_succ a, as_succ b with
-              | Some n, Some m -> Some (Expr.mk_app hd [n; m])
-              | _ -> None)
+              (match as_succ b with
+              | Some m ->
+                let inner = Expr.mk_app hd [a; m] in
+                Some (Expr.mk_app (Expr.const (mk_name "Nat" "pred")) [inner])
+              | None -> None)
           | _ -> None)
       | n when n = mk_name "Nat" "mul" ->
         (match binary (fun m n -> Expr.natlit (Z.mul m n)) with
