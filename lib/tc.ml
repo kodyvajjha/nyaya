@@ -530,23 +530,34 @@ module Reduce = struct
           | _ -> None))
       | n when n = mk_name "Nat" "mod" ->
         (match binary (fun m n ->
-          if Z.equal n Z.zero then Expr.natlit Z.zero
+          (* Nat.mod's own doc comment (Init/Prelude.lean): "When the
+             divisor is 0, the result is the dividend rather than an
+             error" — explicit example given there: `5 % 0 = 5`. So
+             div-by-zero returns the numerator [m], not 0. *)
+          if Z.equal n Z.zero then Expr.natlit m
           else Expr.natlit (Z.rem m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.mod with symbolic args:
-               Nat.mod 0 n → 0
-               Nat.mod n 0 → 0  (Lean kernel convention)
+          (* Partial iota rules for Nat.mod with symbolic args.
              Real definition (Nat.mod, Init/Prelude.lean):
                | 0, _ => 0
                | n@(succ _), m => ite (LE.le m n) (Nat.modCore n m) n
-             When [n] (first arg) is a concrete positive literal and [m]
-             (second arg) is structurally provable > n via the existing
-             Nat.ble partial-iota chain (i.e. `Nat.ble m n` reduces to
-             `false`), the `ite` condition is false and the result is [n].
-             This is exactly the documented Fin-literal reduction: "Nat.mod
-             n (m' + n + 1) reduces to n for concrete literal n" (needed so
-             the OfNat instance for Fin reduces definitionally). *)
+             with divisor-0 handled by that same `ite`: `LE.le 0 n` is
+             always true, so it takes the `Nat.modCore n 0` branch, and
+             `Nat.modCore n 0` returns `n` (its `dite (0 < 0) ... (fun _
+             => x)` always takes the `x` branch when the divisor is 0).
+             So:
+               Nat.mod 0 n → 0
+               Nat.mod n 0 → n   (dividend; divisor 0 is not an error —
+                 see doc comment above, "5 % 0 = 5")
+             And when [n] (first arg) is a concrete positive literal and
+             [m] (second arg) is structurally provable > n via the
+             existing Nat.ble partial-iota chain (i.e. `Nat.ble m n`
+             reduces to `false`), the `ite` condition is false and the
+             result is [n]. This is exactly the documented Fin-literal
+             reduction: "Nat.mod n (m' + n + 1) reduces to n for concrete
+             literal n" (needed so the OfNat instance for Fin reduces
+             definitionally). *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -554,7 +565,7 @@ module Reduce = struct
           in
           (match args with
           | [a; _] when is_zero a -> Some (Expr.natlit Z.zero)
-          | [_; b] when is_zero b -> Some (Expr.natlit Z.zero)
+          | [a; _b] when is_zero _b -> Some (whnf env a)
           | [a; b] ->
             (match as_nat_lit a with
             | Some k when Z.gt k Z.zero ->

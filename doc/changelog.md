@@ -5,6 +5,64 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-08: Fix Nat.mod divisor-0 convention (mod n 0 = n, not 0)
+
+### Nat.mod n 0 correctness fix
+**File:** `tc.ml`, `nat_lit_reduce`
+**Problem:** Both the fully-concrete `binary` case and the symbolic partial-iota
+case for `Nat.mod` reduced `Nat.mod n 0` to `0`. This is wrong: Lean's `Nat.mod`
+returns the dividend, not `0`, when the divisor is `0`. This was a pre-existing
+bug (not introduced in this pass) that made `nyaya` treat `n % 0` and `0` as
+definitionally equal when they are not (for nonzero `n`), which is a real
+unsoundness — an overly permissive rule that could let a false equation type-
+check via `rfl`. It was found opportunistically while citing the real `Nat.mod`
+definition for the `Fin.castSucc_one` fix above.
+**Fix:** Changed both reduction sites: the divisor-0 branch of the concrete
+`binary` computation now returns the numerator `m` instead of `Expr.natlit
+Z.zero`, and the `is_zero b` partial-iota case now returns `whnf env a` (the
+numerator) instead of `Expr.natlit Z.zero`.
+**Kernel reference:** `Nat.mod`, `src/Init/Prelude.lean` (leanprover/lean4),
+fetched via `cdn.jsdelivr.net/gh/leanprover/lean4@master/...` (a GitHub raw
+mirror) after `raw.githubusercontent.com` and the `github.com` blob view were
+both rate-limited (429) during this session; verified against the raw fetched
+text directly (not a paraphrase). Doc comment on `Nat.mod`, quoted verbatim
+from the fetched source:
+> The modulo operator, which computes the remainder when dividing one natural
+> number by another. Usually accessed via the `%` operator. When the divisor
+> is `0`, the result is the dividend rather than an error.
+>
+> Examples:
+>  * `7 % 2 = 1`
+>  * `9 % 3 = 0`
+>  * `5 % 7 = 5`
+>  * `5 % 0 = 5`
+>  * `show ∀ (n : Nat), 0 % n = 0 from fun _ => rfl`
+>  * `show ∀ (m : Nat), 5 % (m + 6) = 5 from fun _ => rfl`
+
+And the actual definition:
+```
+protected def Nat.mod : @& Nat → @& Nat → Nat
+  | 0, _ => 0
+  | n@(succ _), m => ite (LE.le m n) (Nat.modCore n m) n
+```
+For `m = 0`: `LE.le 0 n` is always true, so this takes the `Nat.modCore n 0`
+branch. `Nat.modCore n 0`'s definition (`dite (LT.lt 0 y) (fun hy => ...) (fun
+_ => x)` with `y = 0`) takes the `x`-branch since `0 < 0` is false, returning
+`x = n` (the dividend) unchanged. So `Nat.mod n 0 = n`, confirming the
+docstring's `5 % 0 = 5` example.
+**Declaration unblocked:** none directly (no currently-failing `init.export`
+declaration in this pass exercised this path); this is a correctness fix for
+an already-committed rule, verified not to regress any previously-passing
+declaration (see verification below).
+**Verification:** fast-tier (`Fin.castSucc_one` still passes) plus full
+regression tier — all 12 previously-unblocked declarations (`Fin.zero_le`,
+`String.length_singleton`, `Nat.lor.eq_1`, `List.id_run_foldlM`,
+`Nat.add_succ_sub_one`, `BitVec.replicate_zero`, `List.get_cons_succ'`,
+`ISize.not_xor`, `Vector.findM?_pure`, `BitVec.not_sshiftRight`,
+`Int.pred_toNat`, `Float32.toUInt32`) still pass individually.
+
+---
+
 ## 2026-07-08: Nat.mod partial iota for concrete positive numerator
 
 ### Nat.mod literal-numerator, symbolic-denominator partial iota
