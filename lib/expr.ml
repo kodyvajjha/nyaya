@@ -357,20 +357,39 @@ let get_fvar_id expr =
   | _ ->
     Logger.err "Expr %a is not a free variable" (Failure "get_fvar_id") pp expr
 
-let rec num_loose_bvars expr =
-  match node expr with
-  | Sort _ | Const _ | FreeVar _ | Literal _ -> 0
-  | BoundVar i -> i + 1
-  | App (f, a) -> Int.max (num_loose_bvars f) (num_loose_bvars a)
-  | Forall { btype; body; _ } | Lam { btype; body; _ } ->
-    Int.max (num_loose_bvars btype) (num_loose_bvars body - 1)
-  | Let { btype; value; body; _ } ->
-    Int.max
-      (Int.max (num_loose_bvars btype) (num_loose_bvars value))
-      (num_loose_bvars body - 1)
-  | Proj { expr; _ } -> num_loose_bvars expr
+(* Memoized by hash-cons tag: num_loose_bvars is a pure structural property
+   of the expr (independent of env/offset/typechecking state), and a given
+   tag's node never changes, so a stale entry can never be wrong. Without
+   this, instantiate_aux (which calls num_loose_bvars at every recursion
+   step) re-walks the whole DAG as a tree on every call; on a heavily-shared
+   DAG (e.g. Vector.pmap_attach's well-founded-recursion proof term) that
+   re-walk is exponential in the sharing depth -- observed as billions of
+   calls with no progress, OOMing/hanging the declaration. Reset per
+   declaration in Tc.typecheck (like whnf_memo/infer_memo) purely to bound
+   memory across a long sweep, not for correctness. *)
+let num_loose_bvars_memo : (int, int) Hashtbl.t = Hashtbl.create 8192
 
-(** Substitute the [free_var] at the [expr] (has to be a bound variable). TODO: this needs to be optimized by counting the number of loose bound variables in the expr.  *)
+let rec num_loose_bvars expr =
+  match Hashtbl.find_opt num_loose_bvars_memo (tag expr) with
+  | Some n -> n
+  | None ->
+    let n =
+      match node expr with
+      | Sort _ | Const _ | FreeVar _ | Literal _ -> 0
+      | BoundVar i -> i + 1
+      | App (f, a) -> Int.max (num_loose_bvars f) (num_loose_bvars a)
+      | Forall { btype; body; _ } | Lam { btype; body; _ } ->
+        Int.max (num_loose_bvars btype) (num_loose_bvars body - 1)
+      | Let { btype; value; body; _ } ->
+        Int.max
+          (Int.max (num_loose_bvars btype) (num_loose_bvars value))
+          (num_loose_bvars body - 1)
+      | Proj { expr; _ } -> num_loose_bvars expr
+    in
+    Hashtbl.replace num_loose_bvars_memo (tag expr) n;
+    n
+
+(** Substitute the [free_var] at the [expr] (has to be a bound variable). *)
 let instantiate
     ?(logger =
       (module Util.MakeLogger (struct

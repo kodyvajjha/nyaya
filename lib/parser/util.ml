@@ -199,7 +199,16 @@ module MakeTrace (Data : TRACE_DATA) = struct
       Logger.app "DEPTH LIMIT: %s" msg;
       raise (Depth_limit msg)
     );
-    if not elide_ok then
+    (* DEBUG-GATE: Data.input_summary/output_summary (Expr.pp, a non-
+       memoized DAG-as-tree walk) must never be *computed* unless Debug
+       logging is actually on. Passing it as a normal function argument to
+       Logger.debug is NOT lazy -- OCaml evaluates function arguments
+       eagerly, so the format string's %s placeholder forces the full
+       pretty-print on every enter/leave call regardless of log level,
+       before Logs' own (correctly lazy) level check ever runs. On a
+       heavily-shared hash-consed DAG this can single-handedly OOM. See
+       project_nyaya_oom_investigation memory / Vector.pmap_attach. *)
+    if not elide_ok && Logs.level () = Some Logs.Debug then
       Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id depth
         (current_path ()) (Data.input_summary input);
     frame
@@ -207,7 +216,7 @@ module MakeTrace (Data : TRACE_DATA) = struct
   let leave_success (env : Data.env) (frame : frame) (output : Data.output) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
-    if not elide_ok then
+    if not elide_ok && Logs.level () = Some Logs.Debug then
       Logger.debug "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
         (current_depth ()) (current_path ())
         (Data.output_summary output)
@@ -218,9 +227,10 @@ module MakeTrace (Data : TRACE_DATA) = struct
     match exn with
     | Depth_limit _ -> () (* already logged once at the point of origin *)
     | _ ->
-      Logger.debug "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
-        (current_depth ()) (current_path ()) (Printexc.to_string exn)
-        (Data.input_summary frame.input)
+      if Logs.level () = Some Logs.Debug then
+        Logger.debug "[%s#%d d=%d p=%s] !! %s input=%s" Data.kind frame.id
+          (current_depth ()) (current_path ()) (Printexc.to_string exn)
+          (Data.input_summary frame.input)
 
   let reset () =
     stack := [];

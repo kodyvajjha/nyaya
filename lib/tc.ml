@@ -1421,6 +1421,7 @@ let typecheck (env : Env.t) =
         DefEqTrace.reset ();
         Hashtbl.reset whnf_memo;
         Hashtbl.reset infer_memo;
+        Hashtbl.reset Expr.num_loose_bvars_memo;
         let record_failure () =
           failures := decl_name_str :: !failures;
           (* Print as we go, not just in the final summary: a long sweep can
@@ -1456,6 +1457,7 @@ let typecheck (env : Env.t) =
       DefEqTrace.reset ();
       Hashtbl.reset whnf_memo;
       Hashtbl.reset infer_memo;
+      Hashtbl.reset Expr.num_loose_bvars_memo;
       let info = Decl.get_decl_info d in
       (* Check well-posedness. *)
       let is_well_posed = well_posed env info in
@@ -1494,6 +1496,7 @@ let typecheck (env : Env.t) =
         DefEqTrace.reset ();
         Hashtbl.reset whnf_memo;
         Hashtbl.reset infer_memo;
+        Hashtbl.reset Expr.num_loose_bvars_memo;
         (try ignore (check env d) with _ -> ());
         Format.pp_print_flush debug_ppf ();
         close_out oc;

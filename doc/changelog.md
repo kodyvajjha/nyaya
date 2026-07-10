@@ -5,6 +5,195 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-09: Two real bugs found and fixed on Vector.pmap_attach — one OOM, one non-termination
+
+**Status: this is a real fix for a real declaration, and likely a major
+contributor to the OOM wall described in the entry below (same day, earlier).
+Not yet re-run against the full sweep to confirm the wall itself is gone —
+see "Next" at the end.**
+
+Investigating a soft failure where `Vector.pmap_attach` OOM-killed the process
+under `NYAYA_ONLY_DECL`, two independent, stacked bugs were found by
+instrumenting call counts and GC stats and running under `ulimit -v` to get a
+fast, repeatable crash instead of eating all system memory.
+
+### Debugging workflow (reusable recipe for the next OOM/hang-shaped bug)
+
+The two bugs below were found without ever letting the process actually
+exhaust system memory — that's slow (minutes) and destabilizes the whole
+machine each time. Instead:
+
+**1. Get the exact `NYAYA_ONLY_DECL` name first.** It matches the full
+dotted name from `Name.pp`, not the bare identifier — `grep`ping the raw
+`.export` file for the identifier only gives you the unqualified form:
+```sh
+grep -n "pmap_attach" test/parser/init.export   # confirms it exists, wrong form for NYAYA_ONLY_DECL
+NYAYA_ONLY_DECL="Vector.pmap_attach" timeout 90 dune exec bin/main.exe  # correct: Namespace.decl
+```
+
+**2. Cap virtual memory with `ulimit -v` (KB) in a subshell**, so a runaway
+process dies in seconds with `Out_of_memory` instead of slowly eating all
+system RAM+swap. The parens make it a subshell so the limit doesn't leak
+into your interactive shell. Always redirect both streams to a log file and
+keep `timeout` as a second, independent backstop (`ulimit` doesn't help a
+process that hangs without allocating):
+```sh
+(ulimit -v 3000000; NYAYA_ONLY_DECL="Vector.pmap_attach" timeout 60 dune exec bin/main.exe) \
+  > /tmp/run.log 2>&1
+echo "EXIT:$?"
+tail -n 80 /tmp/run.log
+```
+Try the cap at a couple of different sizes (e.g. 3_000_000 then 10_000_000,
+i.e. ~3GB then ~10GB) with the *same* command. If it dies at the same point
+in the code regardless of the cap, that's a strong signal it's either (a) a
+single catastrophic allocation, or (b) a hang with flat memory (an infinite
+or exponential-time loop that never allocates much) — not "genuinely needs
+N GB of legitimate working set." That distinction is exactly what separated
+bug 1 (real, fast, huge allocation) from bug 2 (a hang, not a leak) below.
+
+**3. Instrument suspects directly in source with cheap global counters +
+periodic `Gc.quick_stat()`, flushed unconditionally.** The pattern used
+(then removed once the bugs were found — don't leave this in the tree):
+```ocaml
+let calls = ref 0
+...
+incr calls;
+if !calls mod 5_000 = 0 then (
+  let gc = Gc.quick_stat () in
+  Printf.eprintf "[DBG %s] calls=%d live_words=%d heap_words=%d\n%!"
+    label !calls gc.live_words gc.heap_words
+)
+```
+Two details matter: the `%!` (force-flush every line — under `timeout`/
+`ulimit` the process can be killed before a buffered `Format`/`Printf`
+channel would otherwise flush, silently losing the last N seconds of
+signal) and picking the modulus small enough to actually get a data point
+before the crash (started at 200_000, had to drop to 5_000/20_000 once the
+first runs printed *nothing* before dying — that itself was informative,
+see below). Wire a reset for each new counter into `Tc.typecheck`'s
+existing per-declaration reset block (next to `Hashtbl.reset whnf_memo`
+etc.) so a `NYAYA_ONLY_DECL` run starts every counter at zero.
+
+**4. Read the *shape* of the counter output to distinguish failure modes,
+don't just look at whether it crashed:**
+- **Nothing printed before death, even at a low modulus and a high memory
+  cap** → not many-small-allocations; look for a single expensive call
+  very early (this is how bug 1 — an eager `Expr.pp` inside a trace
+  logger — was found: the crash happened between two adjacent counter
+  checkpoints that were only a few hundred calls apart).
+- **A counter climbs into the billions while `live_words`/`heap_words`
+  stay flat** → not a memory problem at all, it's non-termination (a loop
+  or exponential recursion that does negligible allocation per step). This
+  is how bug 2 was distinguished from "just needs more memory" — before
+  the fix, `num_loose_bvars`'s counter passed 9 billion with `live_words`
+  unchanged across dozens of printed checkpoints, i.e. actually hung, not
+  leaking.
+
+**5. Regression-check any fix on the substitution/typechecking hot path
+against a handful of previously-passing declarations**, not just the one
+you were debugging — cheap because `NYAYA_ONLY_DECL` gives a fresh,
+independent process per name:
+```sh
+for d in "Int64.toInt32_ofBitVec" "Nat.sub_one" "Fin.castSucc_one" \
+         "Fin.zero_le" "String.length_singleton"; do
+  echo "=== $d ==="
+  timeout 90 env NYAYA_ONLY_DECL="$d" dune exec bin/main.exe 2>&1 | tail -4
+done
+```
+(Names above are just examples pulled from earlier entries in this
+changelog — swap in whichever declarations were confirmed passing most
+recently.) Note baseline overhead: parsing `init.export` + building the
+environment takes ~20s on its own before any checking starts, so size
+`timeout` accordingly or a passing declaration will look like a hang.
+
+### Bug 1: `MakeTrace.enter`/`leave_success`/`leave_failure` eagerly computed
+debug-only pretty-prints on every call, regardless of log level
+
+**File:** `lib/parser/util.ml`, `MakeTrace.enter`/`leave_success`/`leave_failure`
+
+**Problem:** these three functions called
+`Logger.debug "...%s..." ... (Data.input_summary input)` — passing
+`Data.input_summary input` (for `InferTrace`/`WhnfTrace`, `expr_summary` =
+a full, non-memoized `Expr.pp` tree-walk of the expr) as a plain, positional
+function argument. OCaml evaluates function arguments eagerly, so this
+pretty-print ran unconditionally on **every single `infer`/`whnf` call**
+(enter and leave), even with logging at `Info` level and no debug output
+ever shown. `Logs.debug (fun m -> ...)`'s own level check only happens
+*inside* the closure passed to it — by the time that closure would run, the
+expensive `%s` argument had already been fully computed to build the format
+string. `Expr.pp` walks the hash-consed DAG as if it were a tree (no
+memoization on `tag`), so on a term with heavy internal sharing this is not
+just wasted work but potentially an exponential-length string built in a
+single allocation. Confirmed by observing the process die instantly (before
+any of several independently-added call counters advanced meaningfully) even
+at a 10GB `ulimit -v`.
+
+**Fix:** gate all three call sites behind an explicit
+`Logs.level () = Some Logs.Debug` check, so `input_summary`/`output_summary`
+are only ever computed when debug output will actually be printed.
+
+**Why this matters beyond this one declaration:** this ran on every
+`infer`/`whnf` enter and leave for *every* declaration checked, in every run
+configuration (`NYAYA_SWEEP_ALL`, plain discovery, `NYAYA_ONLY_DECL`) — a
+low-grade firehose of transient string allocation across the whole corpus.
+This is a plausible (not yet confirmed) contributor to the "steady growth, no
+single blowup point" OOM signature from the entry below.
+
+### Bug 2: `num_loose_bvars` re-walks the DAG as a tree on every call from `instantiate`
+
+**File:** `lib/expr.ml`, `num_loose_bvars` / `instantiate`
+
+**Problem:** `instantiate_aux` (the beta/let/pi-body substitution engine
+used by essentially every case of `infer`/`whnf`/`isDefEq`) calls
+`num_loose_bvars expr` at every recursion step, as a short-circuit ("does
+this subtree even contain the bound var we're substituting?"). This TODO was
+already flagged in the source (`"this needs to be optimized by counting the
+number of loose bound variables in the expr"`), but the actual failure mode
+wasn't confirmed until now: `num_loose_bvars` itself is a full recursive
+tree-walk with **no memoization**, called on a hash-consed DAG with heavy
+internal sharing (a well-founded-recursion-generated proof term, in this
+case). After fixing bug 1 (which had been OOMing the process before this
+code path could even run long enough to matter), `num_loose_bvars` call
+counts were observed climbing past **9 billion with zero further progress**
+and flat memory (i.e. genuinely non-terminating within a 90s window, not
+merely slow) — a DAG-as-tree exponential re-walk, not a memory leak.
+
+**Fix:** memoize `num_loose_bvars` by hash-cons `tag` in a new
+`Expr.num_loose_bvars_memo : (int, int) Hashtbl.t`. This is sound
+unconditionally (no per-declaration reset needed for correctness): the
+function is a pure structural property of the expr node, independent of
+`env`/typechecking state/offset, and a given tag's underlying node never
+changes. It's reset per declaration anyway (alongside `whnf_memo`/
+`infer_memo` in `Tc.typecheck`, all three call sites), purely to bound total
+memory across a long sweep, matching the existing convention for those two
+tables — not because the cache can go stale.
+
+**Result:** `Vector.pmap_attach` now type-checks successfully in ~60s
+(previously: non-terminating / OOM). Verified no regression on 5 known-passing
+declarations from earlier entries in this changelog (`Int64.toInt32_ofBitVec`,
+`Nat.sub_one`, `Fin.castSucc_one`, `Fin.zero_le`, `String.length_singleton`) —
+all still pass.
+
+**Declaration unblocked:** `Vector.pmap_attach` (was OOM/non-terminating, not
+a `Defeq_failure`/`TypeError`, so it wouldn't have shown up as a normal
+"failing declaration" — it would have just killed whatever process reached
+it).
+
+**Next:** ~60s for one declaration (with ~200M `instantiate_aux` calls
+remaining, per the advisor's read of the diagnostic data) means `instantiate`
+itself is still doing a lot of redundant DAG-as-tree work — a further
+optimization is possible (e.g. memoizing `instantiate` keyed on
+`(tag, offset)`, not just `tag`, since substitution result depends on
+`offset` too) but was deliberately not attempted this session: the reported
+problem (OOM/hang) is fixed, and that's a separate, riskier piece of work.
+Not yet re-run: the full `NYAYA_SWEEP_ALL` corpus sweep, to see whether these
+two fixes (especially bug 1, which fired on every declaration in every mode)
+move or remove the ~9000-declaration OOM wall from the entry below. That's
+the natural next step for whoever picks up `project_nyaya_oom_investigation`
+next.
+
+---
+
 ## 2026-07-09: Discovery blocked by the OOM wall — loop paused, OOM promoted to its own investigation
 
 **Status: loop paused here. This is the handoff point for whoever picks up next.**
