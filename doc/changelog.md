@@ -5,6 +5,96 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-09: Discovery blocked by the OOM wall — loop paused, OOM promoted to its own investigation
+
+**Status: loop paused here. This is the handoff point for whoever picks up next.**
+
+After the `isDefEq` same-head shortcut landed (next entry below, `99db72a`),
+the standard discovery step — plain `dune exec --root=. nyaya`, no env vars,
+which walks the declaration hashtable and is supposed to stop at the first
+failure — was run to find the next target. Result: it processed **9478
+declarations, all passing, zero failures found**, before being killed with
+`EXIT=137` (SIGKILL, i.e. the OS OOM-killer). Re-running it deterministically
+re-hits the same wall for zero new information, since the hashtable walk
+order is fixed and nothing about the crash depends on which declaration it
+happens to land on.
+
+**This is not a new bug.** It's the same open issue in
+`project_nyaya_oom_investigation` (Claude's persistent memory) /
+this session's earlier finding: a `NYAYA_SWEEP_ALL` full-corpus sweep was
+separately OOM-killed after ~69 minutes at ~14.5GB RSS, ~9000+ declarations
+in, steady growth, no single blowup point. **The two numbers lining up
+(~9000-9500 declarations before SIGKILL, in two totally different run
+configurations) is itself informative**: it suggests the crash point is
+governed by cumulative memory used per declaration processed within a single
+long-running process, not by which specific declaration is being checked or
+by which env-var mode is active. Concretely, this means:
+- A one-time `NYAYA_SWEEP_ALL` survey (the plan's designated "run this once,
+  right before merge, to get full visibility" tool) will almost certainly
+  hit the *same* wall around the *same* declaration count, for the same
+  reason a second plain-discovery run would — it does not fix or route
+  around per-process memory accumulation, it only continues past *caught
+  exceptions* (and explicitly does not catch `Out_of_memory`/`Stack_overflow`
+  in the first place, per its original design intent).
+- Any strategy that keeps processing declarations one after another inside
+  a single OCaml process is capped at roughly this same ceiling until the
+  actual root cause is found and fixed. Restarting the process between
+  declarations (what `NYAYA_ONLY_DECL` does, one fresh process per
+  declaration) sidesteps the problem rather than fixing it, and doesn't
+  scale to "find me the next failure" when you don't already know its name.
+
+**Ruled out already** (verified by reading the actual code, not assumed —
+see `project_nyaya_oom_investigation` memory for the full detail):
+- Hash-cons table (`lib/expr.ml`, `HExpr = Hc.Make (E)`) genuinely uses
+  `Ephemeron.K1.Make` (confirmed via `~/.opam/5.1.0/lib/hc/hc.ml`) — a real
+  weak-key GC-collectible table. The stale TODO comment in `expr.ml` about
+  wanting Ephemerons is describing something already done; don't re-blame
+  this.
+- `MakeTrace.reset` and `whnf_memo`/`infer_memo` are all correctly cleared
+  per declaration — not accumulation sources.
+
+**Not yet checked / where to start next:**
+- Whether OCaml's major GC is actually keeping pace with a long sustained
+  allocation rate (ephemeron clearing only happens during major GC sweeps;
+  default `space_overhead` tuning could produce large peak RSS under high
+  sustained allocation even with no true "leak"). Try `OCAMLRUNPARAM` GC
+  stats during a long run, or test whether periodic `Gc.compact ()` changes
+  RSS behavior over ~5000+ declarations.
+- Any other module-level cache not yet audited for eviction (e.g. does
+  `Level.simplify` or anything in `lib/name.ml` memoize globally without
+  ever clearing?).
+- Whether per-node representation overhead (boxing, record fields, the
+  hash-consed wrapper) is just inherently heavier than the C++ kernel's
+  representation, independent of any leak — baseline cost per node, not
+  accumulation over time. If so, the fix is a representation change, not a
+  GC-tuning fix.
+- A profiler run (e.g. `perf`, or OCaml's own `landmarks`/`memtrace`) across
+  a multi-thousand-declaration run would likely settle this faster than more
+  code reading — this hasn't been tried yet.
+
+**Decision (Kody, 2026-07-09):** the OOM issue is promoted from "open,
+revisit later" to "open, dedicated investigation, decoupled from the
+correctness loop." It's a bigger, more open-ended engineering problem
+(profiling, GC tuning, possibly a representation change) than the
+one-declaration-at-a-time citation-gated fixes this loop was scoped for, and
+it's now the actual blocker on making further correctness progress via the
+discovery mechanism (not just a performance nice-to-have). A new session
+should pick this up on its own, separate from the debug-fix loop
+infrastructure described in `doc/agentic-loop-retrospective.md`.
+
+**To resume the correctness loop without waiting on the OOM fix:** discovery
+doesn't have to be a full-corpus walk. A `NYAYA_ONLY_DECL=<name>` check is
+still cheap and memory-bounded for any *specific* candidate name — the
+constraint is only that nothing currently provides such a name past
+`Int64.toInt32_ofBitVec` (the last one found before the wall). Manually
+sampling declaration names from `init.export` (e.g. scanning for names
+alphabetically/structurally near recent fixes, or picking from a category
+not yet exercised) and trying them one at a time via `NYAYA_ONLY_DECL` would
+work without touching the OOM problem, just less systematically than
+"run discovery and see what it finds."
+
+---
+
 ## 2026-07-09: Add lazy-delta-reduction "same head" shortcut to isDefEq; unblocks Int64.toInt32_ofBitVec
 
 ### isDefEq: compare same-head applications' arguments before delta-unfolding
