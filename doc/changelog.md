@@ -5,6 +5,120 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-09: Add lazy-delta-reduction "same head" shortcut to isDefEq; unblocks Int64.toInt32_ofBitVec
+
+### isDefEq: compare same-head applications' arguments before delta-unfolding
+**File:** `tc.ml`, `isDefEq_impl`
+**Problem:** `Int64.toInt32_ofBitVec` (an `rfl`-proved theorem relating
+`Int64.toInt32 (Int64.ofBitVec b)` to `Int32.ofBitVec (BitVec.signExtend 64
+32 b)`) hit `DEPTH LIMIT: ... input=Nat.sub (BitVec.toNat 64
+(Int64.toBitVec (Int64.ofBitVec b))) 18446744073709551117` (a ~2^64
+literal). Root cause, found by reading the full debug trace: our
+`isDefEq_impl` always calls `whnf` on both sides of a comparison before any
+structural check. When both sides of a comparison share a head like
+`BitVec.signExtend` (same declaration, applied to different BitVec
+arguments on each side), `whnf` unconditionally delta-unfolds that shared
+head all the way down into its full computational body (through
+`BitVec.ofInt`, `BitVec.ofNatLT`, `Int.toNat`, `HMod.hMod`, eventually
+`Nat.sub` on a raw Nat encoding) *before* the two sides' actual differing
+argument (`Int64.toBitVec (Int64.ofBitVec b)` vs `b` -- which reduces to
+each other in two cheap constructor/projection steps) is ever compared
+directly. The expensive, symbolic-minuend Nat.sub this produces is the
+thing that exceeded the depth limit; it need never have been computed at
+all.
+**Fix:** Added `same_head_args_shortcut`, tried after the existing
+proof-irrelevance check and before `whnf`: if both sides (pre-whnf) are
+applications of the exact same declaration (same `Const` name, same
+universe params) with equal arity, compare their arguments pairwise via
+`isDefEq` first; if all pairs succeed, the whole application is equal
+(sound by congruence: `aᵢ ≡ bᵢ` for all `i` implies `f a⃗ ≡ f b⃗`, so this can
+only ever be a true positive, never a false one). If the shortcut doesn't
+apply, or any argument pair fails, execution falls through completely
+unchanged to the existing whnf-based algorithm -- exactly as if the
+shortcut were absent. One subtlety caught during regression testing: our
+`isDefEq`'s own final "structural mismatch" fallback does not return
+`false` -- it *raises* `Defeq_failure` (via `Logger.err`), uncaught by the
+`isDefEq` wrapper. The shortcut's pairwise argument comparison must catch
+that exception and treat it as "argument pair failed" (i.e. fall through),
+not let it escape and abort the whole outer comparison -- otherwise a
+nested mismatch reachable only via the shortcut's *un-reduced* argument
+comparison could break declarations that used to pass via the *reduced*
+(whnf'd) comparison path. This was caught by regression-testing all 14
+previously-unblocked declarations before committing (see Verification
+below) -- `Fin.zero_le` and `List.get_cons_succ'` initially regressed with
+exactly this failure mode, fixed by wrapping the pairwise check in `try
+... with Defeq_failure _ -> false`.
+**Kernel reference:** `type_checker.cpp` (leanprover/lean4,
+`src/kernel/type_checker.cpp`), fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.cpp`
+and verified against the raw fetched text directly. The relevant functions:
+`is_def_eq_app` (the argument-wise comparison for two applications) and
+`lazy_delta_reduction_step`, which gates entry into that argument-wise
+comparison specifically for two applications delta-headed by the *same*
+declaration with matching universe levels, tried *before* delta-unfolding
+that shared declaration:
+```cpp
+bool type_checker::is_def_eq_app(expr const & t, expr const & s) {
+    if (is_app(t) && is_app(s)) {
+        buffer<expr> t_args;
+        buffer<expr> s_args;
+        expr t_fn = get_app_args(t, t_args);
+        expr s_fn = get_app_args(s, s_args);
+        if (is_def_eq(t_fn, s_fn) && t_args.size() == s_args.size()) {
+            unsigned i = 0;
+            for (; i < t_args.size(); i++) {
+                if (!is_def_eq(t_args[i], s_args[i]))
+                    break;
+            }
+            if (i == t_args.size())
+                return true;
+        }
+    }
+    return false;
+}
+```
+and, inside `lazy_delta_reduction_step`, the same-declaration/same-height
+case:
+```cpp
+if (is_app(t_n) && is_app(s_n) && is_eqp(*d_t, *d_s) && d_t->get_hints().is_regular()) {
+    // Optimization: We try to check if their arguments are definitionally
+    // equal. If they are, then t_n and s_n must be definitionally equal,
+    // and we can skip the delta-reduction step.
+    if (!failed_before(t_n, s_n)) {
+        if (is_def_eq(const_levels(get_app_fn(t_n)), const_levels(get_app_fn(s_n))) &&
+            is_def_eq_args(t_n, s_n)) {
+            return reduction_status::DefEqual;
+        } else {
+            cache_failure(t_n, s_n);
+        }
+    }
+}
+```
+Our version does not replicate `d_t->get_hints().is_regular()` (a
+performance heuristic restricting the kernel's version to plain,
+non-reducible/non-irreducible definitions) or the `failed_before`/
+`cache_failure` memoization (a performance optimization, not a correctness
+requirement) -- omitting both only means we attempt the shortcut on a
+superset of the declarations the kernel would bother trying it on, or
+retry a failed comparison instead of caching it, neither of which affects
+soundness (the congruence argument holds regardless of which declarations
+we try it on, and retrying a failed check just costs time, not
+correctness).
+**Verification:** Fast-tier (`NYAYA_ONLY_DECL=Int64.toInt32_ofBitVec`)
+confirms the target now passes. Additionally ran a full regression pass
+(fresh process per declaration) over every declaration listed as
+"Declaration unblocked" earlier in this changelog -- `Nat.sub_one`,
+`Int.pred_toNat`, `Fin.castSucc_one`, `Fin.zero_le`,
+`String.length_singleton`, `Nat.lor.eq_1`, `List.id_run_foldlM`,
+`Nat.add_succ_sub_one`, `BitVec.replicate_zero`, `List.get_cons_succ'`,
+`ISize.not_xor`, `Vector.findM?_pure`, `BitVec.not_sshiftRight`,
+`Float32.toUInt32` -- all still pass after the fix (see the `Defeq_failure`
+catch above; the first attempt without that catch regressed `Fin.zero_le`
+and `List.get_cons_succ'`, caught and fixed before this commit).
+**Declaration unblocked:** `Int64.toInt32_ofBitVec`
+
+---
+
 ## 2026-07-09: Considered and reverted — bounding Nat.sub's literal-subtrahend partial iota to k ≤ 64
 
 **Not committed.** A follow-up to the `Nat.sub` faithful single-step rule

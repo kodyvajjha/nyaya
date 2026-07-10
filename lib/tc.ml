@@ -1052,7 +1052,15 @@ and isDefEq_impl env e1 e2 =
   (* Early proof irrelevance check BEFORE whnf: if both terms inhabit
      definitionally equal Props, they are equal.  This avoids expensive
      whnf of proof terms (e.g. Nat.bitwise_lt_two_pow which unfolds
-     Nat.rec on the bit-width).  infer is memoised and cheap. *)
+     Nat.rec on the bit-width).  infer is memoised and cheap.
+     This must run BEFORE the same-head-args shortcut below, not after:
+     if it ran second, that shortcut would eagerly compare a proof-term's
+     own data arguments (e.g. two proofs `f n1` / `f n2` of the same Prop,
+     with n1/n2 large or symbolic Nat/BitVec data) via isDefEq before ever
+     getting the chance to notice both are proofs of the same
+     proposition -- reintroducing exactly the kind of deep-unfold blowup
+     the shortcut below exists to avoid, just relocated to proof terms
+     instead of the data terms it was written for. *)
   let is_prop ty =
     match Expr.node (whnf env (infer env ty)) with
     | Expr.Sort u -> Level.is_zero u
@@ -1061,6 +1069,78 @@ and isDefEq_impl env e1 e2 =
   let s = infer env e1 in
   let t = infer env e2 in
   if is_prop s && is_prop t && isDefEq env s t then true
+  else
+  (* Lazy-delta-reduction "same head" shortcut, BEFORE whnf. Mirrors the
+     Lean 4 kernel's optimization in type_checker.cpp's
+     lazy_delta_reduction_step: when both sides of a defeq check are
+     applications of the exact same declaration (same Const name, same
+     universe params) with the same arity, try comparing corresponding
+     arguments pairwise via isDefEq *before* delta-unfolding that shared
+     head, and only fall through to unfolding if that fails.
+       bool type_checker::is_def_eq_app(expr const & t, expr const & s) {
+         if (is_app(t) && is_app(s)) {
+           ... expr t_fn = get_app_args(t, t_args);
+               expr s_fn = get_app_args(s, s_args);
+           if (is_def_eq(t_fn, s_fn) && t_args.size() == s_args.size()) {
+             for (i = 0; i < t_args.size(); i++)
+               if (!is_def_eq(t_args[i], s_args[i])) break;
+             if (i == t_args.size()) return true;
+       (and, gating entry into this path on both heads being the identical
+       declaration with equal universe params:)
+           if (is_app(t_n) && is_app(s_n) && is_eqp(d_t_deref, d_s_deref) &&
+               d_t_hints_is_regular) {
+             if (is_def_eq(const_levels(get_app_fn(t_n)), const_levels(get_app_fn(s_n))) &&
+                 is_def_eq_args(t_n, s_n))
+               return reduction_status::DefEqual;
+     This must run BEFORE our own whnf, not after: our whnf's delta-
+     unfolding is exactly what turns a shared-head application (e.g.
+     BitVec.signExtend applied to two different BitVec arguments) into its
+     full computational body -- observed exploding into raw Nat.sub
+     arithmetic on a ~2^64 literal and hitting the depth limit for
+     Int64.toInt32_ofBitVec -- before the arguments (where the real
+     equality lives, e.g. Int64.toBitVec (Int64.ofBitVec b) reducing to b
+     via a couple of cheap constructor/projection steps) are ever compared
+     directly. This is soundness-safe as a pure early-exit: congruence
+     (f a1..an ≡ f b1..bn whenever each ai ≡ bi) is a theorem of
+     definitional equality, so returning true here can never be a false
+     positive. If the shortcut doesn't apply (different heads, arity
+     mismatch) or any argument pair fails, we fall through completely
+     unchanged to the existing whnf-based algorithm below -- exactly as if
+     this check were absent -- matching the real kernel's fallback (failed
+     argument comparison unfolds both sides and continues, it does not
+     conclude inequality). We don't replicate the kernel's
+     `d_t->get_hints().is_regular()` gate (a performance heuristic
+     restricting this to plain, non-reducible/non-irreducible definitions);
+     omitting it only means we also attempt the shortcut for declarations
+     the kernel wouldn't bother trying it on, which is still sound (same
+     congruence argument), just a superset of when it fires. *)
+  let same_head_args_shortcut () =
+    let h1, args1 = Expr.get_apps e1 in
+    let h2, args2 = Expr.get_apps e2 in
+    match Expr.node h1, Expr.node h2 with
+    | ( Expr.Const { name = n1; uparams = us },
+        Expr.Const { name = n2; uparams = vs } )
+      when args1 <> [] && n1 = n2
+        && List.length args1 = List.length args2
+        && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
+      ->
+      (* isDefEq's own final fallback (below, "structural mismatch") does
+         not return [false] on failure -- it RAISES [Defeq_failure] via
+         Logger.err, and the [isDefEq] wrapper re-raises it uncaught. A
+         failed argument comparison here must be treated exactly like any
+         other "shortcut doesn't apply" outcome -- fall through to the
+         original whnf-based algorithm below, which may still succeed via
+         a completely different route (e.g. reducing an argument first
+         reveals an equality that comparing it raw does not) -- not let
+         the exception escape and abort the entire outer comparison. This
+         mirrors the real kernel's lazy_delta_reduction_step, which caches
+         a failed is_def_eq_args and falls through to unfolding rather
+         than concluding the whole thing unequal. *)
+      (try List.for_all2 (isDefEq env) args1 args2
+       with Defeq_failure _ -> false)
+    | _ -> false
+  in
+  if same_head_args_shortcut () then true
   else
   let e1' = whnf env e1 in
   let e2' = whnf env e2 in
