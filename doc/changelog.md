@@ -5,6 +5,43 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-09: Considered and reverted — bounding Nat.sub's literal-subtrahend partial iota to k ≤ 64
+
+**Not committed.** A follow-up to the `Nat.sub` faithful single-step rule
+(previous entry, `50af38e`) proposed bounding the concrete-subtrahend case
+(`Nat.sub a (NatLit k)` with `a` symbolic) to `k ≤ 64`, mirroring the existing
+`Nat.add`/`Nat.mul` literal-successor bounds a few lines below it in
+`nat_lit_reduce`, to avoid peeling a huge concrete literal (e.g. a
+`2^64`-ish BitVec/UInt mask) one `Nat.pred` at a time.
+
+**Why this is off the SAFE/RISKY axis, not SAFE:** the plan's SAFE label
+means "reproduces a documented kernel rule with the kernel's own
+preconditions." The real kernel's `Nat.sub` has no such cutoff — it's
+`@[extern]`, and with a symbolic minuend and literal subtrahend it iota-
+reduces by peeling `succ` with no bound. This proposed change is *narrower*
+than the kernel, not a faithful reproduction of an additional kernel
+precondition, so it doesn't earn a `Kernel reference:` field. It also can't
+be unsound: a bound that only makes whnf get stuck *more* often can never
+make two non-defeq terms compare equal — narrowing is soundness-safe by
+construction (same reasoning as why the `Nat.add`/`Nat.mul` bounds already
+in the file are fine).
+
+**Why reverted anyway:** (1) it doesn't unblock any declaration — no
+`debug_*.txt` motivated it, it was proposed speculatively; (2) it is not
+verifiable by the fast tier — no currently-failing declaration exercises a
+literal subtrahend > 64, so there is no way to confirm the cutoff value or
+even that the branch is reachable; (3) the runaway case it targets (huge
+literal, symbolic minuend) is already caught by the existing recursion/depth
+guard, just with a different failure mode (`Depth_limit` exception vs. a
+stuck term) — so the change trades one already-handled failure mode for
+another, for zero net gain; (4) `k ≤ 64` lands squarely in BitVec/UInt mask
+territory, i.e. exactly the range where getting the cutoff wrong would be
+most likely to matter, with no test to catch a wrong choice. Verdict: revert
+until a real failing declaration actually hits this path, then add the bound
+with a concrete case to verify against.
+
+---
+
 ## 2026-07-08: Fix unsound Nat.sub partial iota; unblocks Nat.sub_one
 
 ### Nat.sub: replace paired-decrement shortcut with faithful single-step rule
