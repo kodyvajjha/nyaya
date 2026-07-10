@@ -5,6 +5,135 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: Guard Nat.xor against Nat.bitwise well-founded-recursion blowup; unblocks UInt32.not_neg_one
+
+### Nat.xor: don't delta-unfold into Nat.bitwise's well-founded-recursion body
+**File:** `tc.ml`, `is_nat_builtin_name`, `nat_lit_reduce` (`Nat.xor` case),
+`isDefEq_impl` (last-resort `Nat.xor` one-step rule)
+**Problem:** `UInt32.not_neg_one` (`~(-1 : UInt32) = 0`, proved by `rfl`)
+failed with `Depth_limit("[w#4593] depth 2001 exceeds max 2000,
+input=Nat.eq_or_lt_of_le.match_1 2147483451 4294967098 ...")`. This is a
+different bug *class* from most prior entries: not a missing whnf/iota rule
+causing a false mismatch, but a genuine reduction-termination bug. Traced
+(via a diagnostic rebuild with the `same_head_args_shortcut`'s speculative
+logging temporarily un-silenced, reverted before this fix) to: `UInt32.
+complement` routes through `BitVec.not` to `Nat.xor`, whose reference
+definition is `Nat.xor = Nat.bitwise bne`; `Nat.bitwise` is implemented via
+`Nat.bitwise._unary`, built on `WellFounded.fix`/`Acc.rec`, whose
+*accessibility proof* is resolved via ordinary structural `Nat` recursion
+(through `Nat.eq_or_lt_of_le`-style comparison lemmas, themselves defined
+via `Nat.brecOn`) applied to the concrete ~2^31/2^32-scale operands --
+genuinely O(n) in the operand *value* when forced by kernel iota, not
+O(log n) as the removed comment on `is_nat_builtin_name` had assumed for
+all five bitwise ops. Confirmed via nyaya's own `NYAYA_DECL_DEBUG` dump of
+`Nat.eq_or_lt_of_le`'s value: it's `Nat.brecOn` structural recursion on one
+of the two compared naturals, with no O(1) shortcut -- descending from a
+~2^31-scale literal to 0 one `Nat.succ` layer at a time is what blew the
+depth limit. The existing `is_nat_builtin_name` guard (already correctly
+preventing this class of blowup for `add`/`sub`/`mul`/`div`/`mod`/`beq`/
+`ble`) explicitly did *not* cover the bitwise operations, on the
+(incorrect) assumption that `Nat.bitwise`'s divide-by-2 recursion made
+delta-unfolding it safe -- that assumption ignored the *accessibility
+proof*'s own unrelated-and-expensive reduction cost.
+**Fix:** Add `Nat.xor` and `Nat.bitwise` to `is_nat_builtin_name`'s guarded
+set, so `whnf` stops at `Nat.xor`/`Nat.bitwise` rather than delta-unfolding
+further when `nat_lit_reduce`'s O(1) literal computation doesn't fire. This
+forces argument resolution back through the existing recursive
+`whnf`/`nat_lit_reduce` path (`BitVec`/`Fin` projections, `Nat.sub`/
+`Nat.pow`, all already guarded and working) -- sufficient for
+`UInt32.not_neg_one`'s fully concrete operands, and a strictly *more*
+faithful reduction (matching the real kernel, which never delta-unfolds
+these either), not a shortcut that skips any comparison.
+
+`Nat.land`, `Nat.lor`, `Nat.shiftLeft`, `Nat.shiftRight`, `Nat.testBit` are
+deliberately left UNGUARDED, unchanged -- narrower than the citation would
+in principle justify, but empirically necessary: guarding an outer name
+here blocks *all* delta on it, including the single unconditional delta
+step some already-passing declaration needs (an equation lemma stating,
+e.g., `Nat.lor = Nat.bitwise Bool.or` point-free, with no arguments ever
+applied to trigger a narrower rule). Verified this risk directly rather
+than assuming it away: reproduced `Nat.lor.eq_1` (documented as unblocked
+by *removing* bitwise ops from this exact guard, 2026-07-08 entry further
+down) as an actual regression when guarding `Nat.land`/`Nat.lor`/
+`Nat.xor`/`Nat.shiftLeft`/`Nat.shiftRight` together, then checked the
+sibling declarations one at a time and found three more of the same shape
+already passing and equally at risk: `Nat.land.eq_1`, `Nat.shiftLeft.eq_1`,
+`Nat.shiftLeft.eq_2` (`Nat.shiftRight` has no such lemma in `init.export`).
+`Nat.xor.eq_1` needs the identical one-step exposure `Nat.lor.eq_1` does,
+so guarding `Nat.xor` needed its own fix, not just omission:
+- `nat_lit_reduce`'s `Nat.xor` case: when the O(1) literal computation
+  fails but both arguments are present, produce the one-step delta unfold
+  (`Nat.xor n m → Nat.bitwise bne n m`) via `delta_at_head` on the bare
+  head, rather than leaving the application stuck.
+- `isDefEq_impl`: a last-resort structural rule, alongside the existing
+  struct-eta/lambda-eta fallbacks, that tries the same one-step unfold
+  when one side of an otherwise-stuck comparison is literally the bare
+  `Nat.xor` constant -- needed because `Nat.xor.eq_1` states its equation
+  point-free (no arguments anywhere for the `nat_lit_reduce` case above to
+  ever see).
+
+Both use `delta_at_head` to look up `Nat.xor`'s real declaration value
+programmatically (the same thing ordinary delta-unfolding would produce),
+rather than hand-reconstructing the `bne`/`instBEqOfDecidableEq` subterm,
+which would risk a subtly-wrong hand-written substitute. `Nat.land`/
+`Nat.lor`/`Nat.shiftLeft`/`Nat.shiftRight` get no equivalent guard or
+one-step exception in this fix -- they are not implicated in the bug being
+fixed (`UInt32.not_neg_one`'s reduction only reaches `Nat.xor`), and
+extending the guard to them speculatively, without a concrete failing
+declaration driving it, would mean inventing their one-step-exception
+mechanisms (`Nat.shiftLeft`/`Nat.shiftRight` in particular have no
+`Nat.bitwise`-shaped one-liner to unfold to at all -- their reference
+definition really is the `Nat.brecOn` recursion itself) without the
+verification a real failing case provides. If one of them is later found
+to cause the same class of blowup, it should get the same targeted
+treatment then, backed by that declaration's own citation.
+
+**Verification:** fast-tier (`UInt32.not_neg_one`, now passes, no longer
+needs anywhere near the depth limit) plus a deliberately widened regression
+check: all 16 declarations currently listed as "Declaration unblocked"
+elsewhere in this changelog (`Vector.pmap_attach`,
+`Int64.toInt32_ofBitVec`, `Nat.sub_one`, `Fin.castSucc_one`, `Fin.zero_le`,
+`String.length_singleton`, `Nat.lor.eq_1`, `List.id_run_foldlM`,
+`Nat.add_succ_sub_one`, `BitVec.replicate_zero`, `List.get_cons_succ'`,
+`ISize.not_xor`, `Vector.findM?_pure`, `BitVec.not_sshiftRight`,
+`Int.pred_toNat`, `Float32.toUInt32`), plus the four additional
+newly-identified at-risk declarations found while investigating this fix
+specifically (`Nat.xor.eq_1`, `Nat.land.eq_1`, `Nat.shiftLeft.eq_1`,
+`Nat.shiftLeft.eq_2`) -- all 21 declarations checked individually via
+`NYAYA_ONLY_DECL`, all still pass.
+**Kernel reference:** Lean 4's `src/kernel/type_checker.cpp`,
+`reduce_nat()`'s dispatch table (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.cpp`):
+```cpp
+if (f == *g_nat_add) return reduce_bin_nat_op(nat_add, e);
+if (f == *g_nat_sub) return reduce_bin_nat_op(nat_sub, e);
+if (f == *g_nat_mul) return reduce_bin_nat_op(nat_mul, e);
+if (f == *g_nat_pow) return reduce_pow(e);
+if (f == *g_nat_gcd) return reduce_bin_nat_op(nat_gcd, e);
+if (f == *g_nat_mod) return reduce_bin_nat_op(nat_mod, e);
+if (f == *g_nat_div) return reduce_bin_nat_op(nat_div, e);
+if (f == *g_nat_beq) return reduce_bin_nat_pred(nat_eq, e);
+if (f == *g_nat_ble) return reduce_bin_nat_pred(nat_le, e);
+if (f == *g_nat_land) return reduce_bin_nat_op(nat_land, e);
+if (f == *g_nat_lor)  return reduce_bin_nat_op(nat_lor, e);
+if (f == *g_nat_xor)  return reduce_bin_nat_op(nat_lxor, e);
+if (f == *g_nat_shiftLeft) return reduce_bin_nat_op(lean_nat_shiftl, e);
+if (f == *g_nat_shiftRight) return reduce_bin_nat_op(lean_nat_shiftr, e);
+```
+The real kernel computes `Nat.land`/`Nat.lor`/`Nat.xor`/`Nat.shiftLeft`/
+`Nat.shiftRight` natively via GMP bit operations, alongside
+`add`/`sub`/`mul`/`pow`/`gcd`/`mod`/`div`/`beq`/`ble` -- it never
+delta-unfolds any of their Lean-level reference definitions
+(`Nat.bitwise`'s well-founded recursion, or `Nat.shiftLeft`/
+`Nat.shiftRight`'s own `Nat.brecOn` recursion). This fix restores that
+faithfulness for `Nat.xor` specifically, the operation actually exercised
+by `UInt32.not_neg_one`. `Nat.testBit` has no entry in this dispatch table
+(no native kernel reduction rule), so leaving it unguarded doesn't diverge
+from the real kernel's behavior for it either way.
+**Declaration unblocked:** `UInt32.not_neg_one`
+
+---
+
 ## 2026-07-09: Two real bugs found and fixed on Vector.pmap_attach — one OOM, one non-termination
 
 **Status: this is a real fix for a real declaration, and likely a major

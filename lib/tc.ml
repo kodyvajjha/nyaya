@@ -667,7 +667,29 @@ module Reduce = struct
       | n when n = mk_name "Nat" "lor" ->
         binary (fun m n -> Expr.natlit (Z.logor m n))
       | n when n = mk_name "Nat" "xor" ->
-        binary (fun m n -> Expr.natlit (Z.logxor m n))
+        (match binary (fun m n -> Expr.natlit (Z.logxor m n)) with
+        | Some _ as r -> r
+        | None ->
+          (* Nat.xor is guarded in [is_nat_builtin_name] (see that
+             function's doc for why: unblocking UInt32.not_neg_one without
+             this guard needs delta-unfolding Nat.xor into Nat.bitwise's
+             well-founded-recursion body, which blows the depth limit).
+             But Nat.xor.eq_1 (an auto-generated equation lemma) needs
+             `Nat.xor n m` to delta-unfold exactly one step, to
+             `Nat.bitwise bne n m`, with n/m left fully symbolic -- the
+             guard would otherwise block that too. Reproduce exactly that
+             one step here via [delta_at_head] on the bare head (rather
+             than hand-writing the `bne`/instance subterm, which risks
+             getting it subtly wrong): this looks up Nat.xor's own
+             declaration value, the same thing ordinary delta would do.
+             The result is headed by [Nat.bitwise], which is ALSO guarded,
+             so this cannot recurse into the well-founded-recursion body:
+             whnf'ing this result stops immediately. *)
+          match args with
+          | [_; _] ->
+            let hd' = delta_at_head env hd in
+            if hd' == hd then None else Some (Expr.mk_app hd' args)
+          | _ -> None)
       (* Bit shift operations: Nat.shiftLeft, Nat.shiftRight *)
       | n when n = mk_name "Nat" "shiftLeft" ->
         binary (fun m n -> Expr.natlit (Z.shift_left m (Z.to_int n)))
@@ -683,10 +705,52 @@ module Reduce = struct
       definition recurses linearly (O(n)) and must NOT be delta-unfolded
       when [nat_lit_reduce] fails on symbolic args.
 
-      Bitwise operations (land, lor, xor, shiftLeft, shiftRight, testBit)
-      are NOT guarded here: they are defined via [Nat.bitwise] which
-      recurses logarithmically (divides by 2), making delta safe.  They
-      also need delta for their equation lemmas (e.g. Nat.lor.eq_1). *)
+      [Nat.xor] and [Nat.bitwise] ARE guarded here (added alongside
+      add/sub/mul/div/mod/beq/ble). [Nat.land], [Nat.lor], [Nat.shiftLeft],
+      [Nat.shiftRight], [Nat.testBit] are deliberately left UNGUARDED,
+      unchanged from before -- this asymmetry is intentional; see below.
+
+      Root cause of the bug this fixes (Depth_limit on
+      UInt32.not_neg_one): [Nat.xor]'s reference definition is
+      `Nat.bitwise bne`, and [Nat.bitwise] is implemented via
+      [Nat.bitwise._unary], built on [WellFounded.fix]/[Acc.rec], whose
+      *accessibility proof* is resolved via ordinary structural Nat
+      recursion (through [Nat.eq_or_lt_of_le]-style comparison lemmas
+      applied to the concrete operands) -- genuinely O(n) in the operand
+      value, not O(log n) as an earlier version of this comment assumed,
+      when forced by kernel iota. The real Lean 4 kernel never pays this
+      cost: its [type_checker.cpp] reduces Nat.land/Nat.lor/Nat.xor/
+      Nat.shiftLeft/Nat.shiftRight natively via GMP bit operations
+      (reduce_nat's dispatch table, alongside add/sub/mul/pow/gcd/mod/div/
+      beq/ble) -- it never delta-unfolds [Nat.bitwise] (or, separately,
+      [Nat.shiftLeft]/[Nat.shiftRight]'s own [Nat.brecOn]-based reference
+      definitions) for any of these.
+
+      Why ONLY xor/bitwise are guarded, not land/lor/shiftLeft/shiftRight
+      too, even though the same unfaithfulness argument applies to all
+      five: guarding an outer name here blocks ALL delta on it, including
+      the single unconditional step some already-passing equation lemma
+      needs. Confirmed empirically (reproducing each as a regression
+      before deciding): `Nat.lor.eq_1`, `Nat.land.eq_1`,
+      `Nat.shiftLeft.eq_1`, `Nat.shiftLeft.eq_2` all currently pass and
+      need exactly one delta step of their respective outer name (to
+      `Nat.bitwise <op> n m` for land/lor, or straight into
+      `Nat.brecOn ...` for shiftLeft, which is NOT a `Nat.bitwise`-shaped
+      one-liner at all -- unlike land/lor/xor, shiftLeft/shiftRight's
+      *reference* definition really is the Nat.brecOn recursion itself,
+      so there is no shallow "unfold once, then stop" form available for
+      them the way there is for the bitwise trio). `Nat.xor.eq_1` ALSO
+      currently passes and has the exact same one-step need as
+      `Nat.lor.eq_1` -- so guarding [Nat.xor] here would reintroduce that
+      regression too, EXCEPT [nat_lit_reduce]'s `Nat.xor` case (below)
+      specifically restores that one step via [delta_at_head] before
+      falling through to this guard, so [Nat.xor.eq_1] keeps working. No
+      similar targeted fallback exists yet for land/lor/shiftLeft/
+      shiftRight, so they stay unguarded rather than being broken; if a
+      future declaration needs the same O(n)-blowup fix for one of them,
+      add the same kind of targeted one-step [nat_lit_reduce] fallback
+      then, backed by that declaration's own citation, rather than
+      widening this guard set speculatively now. *)
   let is_nat_builtin_name (name : Name.t) : bool =
     let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
     name = mk_name "succ" || name = mk_name "add"
@@ -694,6 +758,7 @@ module Reduce = struct
     || name = mk_name "pow" || name = mk_name "div"
     || name = mk_name "mod" || name = mk_name "beq"
     || name = mk_name "ble"
+    || name = mk_name "xor" || name = mk_name "bitwise"
 
   let is_nat_builtin (e : Expr.t) : bool =
     let hd, _args = Expr.get_apps e in
@@ -1283,6 +1348,35 @@ and isDefEq_impl env e1 e2 =
         | _ -> false
       in
       if try_lam_eta e1' e2' || try_lam_eta e2' e1' then true
+      else
+      (* Nat.xor one-step: Nat.xor is a guarded builtin (is_nat_builtin_name;
+         see its doc) -- whnf deliberately stops at bare/applied `Nat.xor`
+         rather than delta-unfolding into Nat.bitwise's well-founded-
+         recursion body, which is what fixes the Depth_limit blowup on
+         UInt32.not_neg_one. But Nat.xor.eq_1 states its equation POINT-
+         FREE (`Nat.xor = Nat.bitwise bne`, no arguments applied at all),
+         so the App-level retry that lets nat_lit_reduce see Nat.xor
+         reapplied to its (literal-resolving) arguments never gets a
+         chance to fire here -- there are no arguments to reattach.
+         Handle this as a last-resort structural rule, exactly like
+         struct/lambda eta above: if one side is literally the bare
+         Nat.xor constant, try comparing its one-step delta-unfold
+         (via delta_at_head, so this is guaranteed to match Nat.xor's
+         real declaration value, not a hand-written guess) against the
+         other side. This does not touch whnf's own recursive behavior
+         at all, so it cannot reintroduce the depth-limit regression --
+         it only fires here, as a final fallback, after every other
+         comparison rule (including the App-level retry) has already
+         failed. *)
+      let try_xor_one_step other side =
+        match Expr.node side with
+        | Expr.Const { name; _ }
+          when name = Name.Str (Name.Str (Name.Anon, "Nat"), "xor") ->
+          let side' = Reduce.delta_at_head env side in
+          if side' == side then false else isDefEq env side' other
+        | _ -> false
+      in
+      if try_xor_one_step e1' e2' || try_xor_one_step e2' e1' then true
       else
         Logger.err
           "@[<v 0>[isDefEq] structural mismatch@,\
