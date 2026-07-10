@@ -5,6 +5,112 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: Partial iota rule for Nat.pow with symbolic exponent; unblocks Nat.two_pow_succ
+
+### Nat.pow: add a bounded partial-iota fallback, matching Nat.add/Nat.sub/Nat.mul
+**File:** `tc.ml`, `nat_lit_reduce` (`Nat.pow` case)
+**Problem:** `Nat.two_pow_succ` (`2^(n+1) = 2^n + 2^n`) failed with
+`isDefEq: structural mismatch`. Its `rfl`-style proof term's own inferred
+type states the LHS as `2^n * 2` (via `Nat.mul_two`), while the declared
+type states it as `2^(n+1)` -- these are definitionally equal only via
+`Nat.pow`'s own recursive equation (`pow m (n+1) = pow m n * m`), which
+requires unfolding `Nat.pow` one step with the exponent `n+1` symbolic
+(`n` a free variable). `Nat.pow` is (correctly) in `is_nat_builtin_name`'s
+guarded set -- unlike `add`/`sub`/`mul`, though, it previously had no
+partial-iota fallback for the guarded case, only the full O(1) literal
+computation (`binary (fun m n -> Z.pow m n)`, requiring both base and
+exponent to already be concrete literals). With a symbolic exponent this
+fails, and since the guard also blocks plain delta-unfolding, `whnf` got
+stuck at `Nat.pow 2 (n+1)` with no way to see the one step it needed.
+
+**Why a single unfolding step here is safe (and citation for why the real
+kernel does this too, not via `@[extern]`):** `Nat.pow`'s reference
+definition (`Init/Prelude.lean`) is:
+```lean
+@[extern "lean_nat_pow"]
+protected def Nat.pow (m : @& Nat) : (@& Nat) → Nat
+  | 0      => 1
+  | succ n => Nat.mul (Nat.pow m n) m
+```
+The `@[extern "lean_nat_pow"]` attribute is a *compiler* directive only --
+it tells the code generator to call a native function when compiling/
+running Lean programs, and has no bearing on kernel type-checking/defeq.
+The kernel's actual native fast path for `Nat.pow` during type-checking is
+a separate mechanism, `type_checker.cpp`'s `reduce_nat`/`reduce_pow`
+(fetched via `raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.cpp`):
+```cpp
+optional<expr> type_checker::reduce_pow(expr const & e) {
+    expr arg1 = whnf(app_arg(app_fn(e)));
+    if (!is_nat_lit_ext(arg1)) return none_expr();
+    expr arg2 = whnf(app_arg(e));
+    if (!is_nat_lit_ext(arg2)) return none_expr();
+    nat v1 = get_nat_val(arg1);
+    nat v2 = get_nat_val(arg2);
+    if (v2 > nat(ReducePowMaxExp)) return none_expr();
+    return some_expr(mk_lit(literal(nat(nat_pow(v1.raw(), v2.raw())))));
+}
+```
+(`ReducePowMaxExp` is `1<<24` -- the native path even caps concrete-literal
+exponents, falling through below that bound too.) This requires *both*
+base and exponent to already be concrete literals -- same shape as nyaya's
+existing `binary` fast path. Critically, when this fails (our case: `n+1`
+symbolic), the kernel does NOT get stuck. Its `whnf` main loop:
+```cpp
+while (true) {
+    expr t1 = whnf_core(t);
+    if (auto v = reduce_native(env(), t1)) { ... }
+    else if (auto v = reduce_nat(t1)) { ... }
+    else if (auto next_t = unfold_definition(t1)) {   // falls through here
+        t = *next_t;
+    } else { ... }
+}
+```
+falls straight through to ordinary delta-unfolding + iota, exactly as it
+would for any other recursively-defined `Nat` function. This is cheap and
+safe here specifically because `Nat.pow`'s definition is a plain `Nat.rec`
+(structural recursion on the exponent) -- no `WellFounded.fix`/`Acc.rec`
+accessibility-proof cost hidden inside it, unlike `Nat.bitwise` (see the
+`Nat.xor` entry above). One iota step exposes one layer, unconditionally
+cheap, regardless of how large the (symbolic) exponent eventually turns
+out to be.
+
+nyaya can't rely on "falls through to ordinary delta" the way the C++
+kernel's `while` loop does, because nyaya's guard exists specifically to
+block delta-unfolding `Nat.pow` on a *concrete* huge exponent one unary
+step at a time (e.g. `2^4294967296`, which the real kernel instead computes
+in one shot via GMP, capped at `1<<24`) -- removing the guard entirely
+would reintroduce exactly the `Nat.xor`-style blowup for large concrete
+exponents. So the guard has to stay, and the safe one-step case the real
+kernel gets "for free" needs its own explicit escape hatch instead.
+
+**Fix:** added a partial-iota fallback to `Nat.pow`'s `nat_lit_reduce` case,
+matching the existing `Nat.add`/`Nat.sub`/`Nat.mul` pattern exactly:
+```
+Nat.pow m 0             → 1
+Nat.pow m (NatLit n+1)  → Nat.mul (Nat.pow m (NatLit n)) m   [bounded, n ≤ 64]
+Nat.pow m (Nat.succ y)  → Nat.mul (Nat.pow m y) m
+```
+The base `m` is never pattern-matched and may stay fully symbolic; only the
+exponent is inspected, one step at a time, exactly mirroring `Nat.pow`'s
+own recursive equation. `Nat.pow` remains in `is_nat_builtin_name`'s
+guarded set, unchanged -- this only adds a bounded fallback path, it
+doesn't touch the guard itself.
+
+**Verification:** fast-tier (`Nat.two_pow_succ`, now passes). Checked for
+an equation-lemma trap like the one found for `Nat.xor.eq_1`: `Nat.pow.eq_1`
+and `Nat.pow.eq_2` don't exist in `init.export` at all, and `Nat.pow_succ`,
+`Nat.pow_zero`, `Nat.pow_succ'` all still pass. Regression-checked
+individually via `NYAYA_ONLY_DECL` against all declarations currently
+listed elsewhere in this changelog as "Declaration unblocked".
+**Kernel reference:** Lean 4's `src/kernel/type_checker.cpp`,
+`reduce_pow`/`reduce_bin_nat_op`/`whnf`'s main loop (quoted above, fetched
+via `raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.cpp`),
+and `src/Init/Prelude.lean`'s `Nat.pow` definition (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/Init/Prelude.lean`).
+**Declaration unblocked:** `Nat.two_pow_succ`
+
+---
+
 ## 2026-07-10: Guard Nat.xor against Nat.bitwise well-founded-recursion blowup; unblocks UInt32.not_neg_one
 
 ### Nat.xor: don't delta-unfold into Nat.bitwise's well-founded-recursion body

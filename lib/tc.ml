@@ -525,7 +525,36 @@ module Reduce = struct
                | _ -> None))
           | _ -> None)
       | n when n = mk_name "Nat" "pow" ->
-        binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n)))
+        (match binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n))) with
+        | Some _ as r -> r
+        | None ->
+          (* Partial iota rules for Nat.pow, matching the real definition
+             exactly (Init/Prelude.lean):
+               protected def Nat.pow (m : Nat) : Nat → Nat
+                 | 0      => 1
+                 | succ n => Nat.mul (Nat.pow m n) m
+             This recurses ONLY on the exponent (second argument); the base
+             [m] is never pattern-matched and may stay fully symbolic.
+             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
+          match args with
+          | [a; b] ->
+            (match as_nat_lit b with
+            | Some n when Z.leq n (Z.of_int 64) ->
+              if Z.equal n Z.zero then Some (Expr.natlit Z.one)
+              else
+                let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
+                Some (Expr.mk_app (Expr.const (mk_name "Nat" "mul")) [inner; a])
+            | _ ->
+              (* Symbolic successor: Nat.pow m (Nat.succ y) → Nat.mul (Nat.pow m y) m *)
+              let b' = whnf env b in
+              let bhd, bargs = Expr.get_apps b' in
+              (match Expr.node bhd, bargs with
+               | Expr.Const { name = sn; _ }, [y]
+                 when sn = mk_name "Nat" "succ" ->
+                 let inner = Expr.mk_app hd [a; y] in
+                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "mul")) [inner; a])
+               | _ -> None))
+          | _ -> None)
       | n when n = mk_name "Nat" "div" ->
         (match binary (fun m n ->
           if Z.equal n Z.zero then Expr.natlit Z.zero
