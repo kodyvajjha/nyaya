@@ -1136,8 +1136,26 @@ and isDefEq_impl env e1 e2 =
          mirrors the real kernel's lazy_delta_reduction_step, which caches
          a failed is_def_eq_args and falls through to unfolding rather
          than concluding the whole thing unequal. *)
-      (try List.for_all2 (isDefEq env) args1 args2
-       with Defeq_failure _ -> false)
+      (* This comparison is speculative: a failed argument pair here is an
+         expected, routine outcome (fall through to the pre-existing
+         whnf-based algorithm below), not a real declaration failure. But
+         every raise site in this codebase (Logger.err) logs unconditionally
+         before raising, so without suppression this prints a scary
+         "[isDefEq] structural mismatch ... Exception: Defeq_failure" for
+         every argument pair that doesn't happen to match syntactically,
+         even when the overall declaration goes on to type-check
+         successfully via the fallback path a moment later. Silence logging
+         for the duration of this speculative attempt only; restore it
+         (even if something other than Defeq_failure is raised) before
+         returning, so a genuine failure surfacing later still gets logged
+         normally by the top-level handler in [typecheck]. *)
+      let prev_level = Logs.level () in
+      Logs.set_level None;
+      Fun.protect
+        ~finally:(fun () -> Logs.set_level prev_level)
+        (fun () ->
+          try List.for_all2 (isDefEq env) args1 args2
+          with Defeq_failure _ -> false)
     | _ -> false
   in
   if same_head_args_shortcut () then true
