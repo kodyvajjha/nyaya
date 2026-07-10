@@ -1374,7 +1374,8 @@ let typecheck (env : Env.t) =
         else
           ()
       with exn when (match exn with
-                     | TypeError _ | Defeq_failure _ -> true
+                     | TypeError _ | Defeq_failure _ | Not_well_posed _
+                     | Nyaya_parser.Util.Depth_limit _ -> true
                      | _ -> false) ->
         Logger.success "Failed after checking %d declarations in environment."
           !success;
