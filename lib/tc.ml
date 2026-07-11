@@ -219,7 +219,7 @@ module Reduce = struct
      the minor result partially applied (e.g. [fun (_ : List.below …) => x]
      instead of [x]).
   *)
-  let iota_at_head (env : Env.t) (e : Expr.t) whnf : Expr.t =
+  let iota_at_head (env : Env.t) (e : Expr.t) whnf infer isDefEq : Expr.t =
     let module Logger = (val env.logger) in
     let hd, args = Expr.get_apps e in
     match Expr.node hd with
@@ -230,7 +230,7 @@ module Reduce = struct
         with Not_found -> (* unknown constant *) raise Not_found
       in
       (match decl with
-      | Decl.Rec { num_params; num_idx; num_motives; num_minors; rules; _ } ->
+      | Decl.Rec { num_params; num_idx; num_motives; num_minors; rules; is_K; _ } ->
         (* The rule value is a template with the recursor's own universe
            param names.  Substitute them with the actual universe levels
            from the const application. *)
@@ -241,7 +241,39 @@ module Reduce = struct
         if List.length args <= major_idx then
           e
         else (
-          let major = List.nth args major_idx in
+          let major0 = List.nth args major_idx in
+          (* K-like reduction for subsingleton eliminators (Eq/HEq/...):
+             replace a stuck major with its type's nullary constructor,
+             guarded by a defeq check. See inductive.h to_cnstr_when_K. *)
+          let major =
+            if not is_K then major0
+            else
+              let app_type = whnf env (infer env major0) in
+              let ind_hd, ind_args = Expr.get_apps app_type in
+              (match Expr.node ind_hd with
+               | Expr.Const { name = ind_name; uparams = ind_levels } ->
+                 (match Hashtbl.find_opt env.tbl ind_name with
+                  | Some (Decl.Inductive { ctor_names = [ctor_name]; _ })
+                    when List.exists
+                           (fun (r : Decl.Rec_rule.t) -> r.ctor_name = ctor_name)
+                           rules ->
+                    let params = CCList.take num_params ind_args in
+                    let cnstr_app =
+                      Expr.mk_app (Expr.const ~ups:ind_levels ctor_name) params
+                    in
+                    let new_type = infer env cnstr_app in
+                    let prev = Logs.level () in
+                    Logs.set_level None;
+                    let deq =
+                      Fun.protect ~finally:(fun () -> Logs.set_level prev)
+                        (fun () ->
+                          try isDefEq env app_type new_type
+                          with Defeq_failure _ -> false)
+                    in
+                    if deq then cnstr_app else major0
+                  | _ -> major0)
+               | _ -> major0)
+          in
           let major_whnf = whnf env major in
           Logger.debug "iota_at_head: rec=%a major_idx=%d major_whnf=@[%a@]"
             Name.pp rec_name major_idx Expr.pp major_whnf;
@@ -1078,7 +1110,7 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     let e2 = Reduce.beta e1 in
 
     (* Now attempt iota at head *)
-    let e3 = Reduce.iota_at_head env e2 whnf |> Reduce.beta in
+    let e3 = Reduce.iota_at_head env e2 whnf infer isDefEq |> Reduce.beta in
     if e3 == expr then
       e3
     else (

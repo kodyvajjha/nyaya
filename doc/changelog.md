@@ -5,6 +5,110 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: K-like reduction for subsingleton recursors (Eq/HEq/...); unblocks cast_eq
+
+### iota_at_head: implement K-reduction for is_K recursors, matching to_cnstr_when_K
+**File:** `tc.ml`, `iota_at_head` (`Decl.Rec` case)
+**Problem:** `cast_eq` (`cast rfl a = a`, i.e. `cast.{u} α α h a = a`) failed
+with `isDefEq: structural mismatch`, `lhs = cast α α h a` vs `rhs = a`.
+`cast` is defined via `Eq.mpr`/`Eq.rec` (ultimately `Eq.ndrec`/`Eq.rec`)
+applied to a proof `h : α = α` that is a free variable, not literally
+`Eq.refl`/constructor-headed -- ordinary iota can't fire because the major
+premise of the `Eq.rec` isn't whnf-reducible to a constructor application
+at all when the equality proof is symbolic. `nyaya`'s parser already reads
+and stores an `is_K : bool` flag per recursor (`Decl.Rec.is_K` in
+`decl.ml`) but nothing consumed it -- `iota_at_head` treated every
+recursor identically (require the major premise to whnf to a literal
+constructor application), so any `Eq.rec`/`HEq.rec`-style elimination with
+a non-constructor-headed (e.g. free-variable) major premise was
+permanently stuck, regardless of what the *type* of that premise could
+prove about it.
+
+**Kernel reference (found before writing the patch):** Lean 4's kernel
+implements exactly this as "K-like reduction," in
+`src/kernel/inductive.h` (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/inductive.h`):
+```cpp
+template<typename WHNF, typename INFER, typename IS_DEF_EQ>
+inline expr to_cnstr_when_K(environment const & env, recursor_val const & rval, expr const & e,
+                            WHNF const & whnf, INFER const & infer_type, IS_DEF_EQ const & is_def_eq) {
+    lean_assert(rval.is_k());
+    expr app_type    = whnf(infer_type(e));
+    expr const & app_type_I = get_app_fn(app_type);
+    if (!is_constant(app_type_I) || const_name(app_type_I) != rval.get_major_induct()) return e;
+    ...
+    optional<expr> new_cnstr_app = mk_nullary_cnstr(env, app_type, rval.get_nparams());
+    if (!new_cnstr_app) return e;
+    expr new_type    = infer_type(*new_cnstr_app);
+    if (!is_def_eq(app_type, new_type)) return e;
+    return *new_cnstr_app;
+}
+```
+called from `inductive_reduce_rec` (same file) as:
+```cpp
+if (rec_val.is_k()) {
+    major = to_cnstr_when_K(env, rec_val, major, whnf, infer_type, is_def_eq);
+}
+major = whnf(major);
+```
+i.e.: for a recursor flagged `is_k`, before whnf'ing the major premise the
+kernel infers its *type*, and if that type's head is (an application of)
+the recursor's own inductive with the SAME parameters, it synthesizes the
+inductive's (unique) nullary constructor applied to those same parameters
+(`mk_nullary_cnstr`, `src/kernel/inductive.cpp`: take the type's head
+constant, its first/only constructor, apply the type's own leading
+`num_params` arguments) and substitutes that in place of the stuck major
+premise -- but ONLY if a final `is_def_eq(app_type, new_type)` check
+passes, confirming the synthesized constructor really does inhabit the
+same type as the original stuck term. `rval.is_k()`/`is_K` is itself only
+ever set true at declaration time (`src/kernel/inductive.cpp`,
+`init_K_target`) for inductives that are "target for K-like reduction":
+single (non-mutual, non-nested) inductive, in `Prop` (`is_zero`
+result-level), with exactly one constructor -- `Eq`, `HEq`, `Acc`, `True`,
+etc. all qualify; this is precisely the "subsingleton eliminator" shape,
+so synthesizing an arbitrary same-typed inhabitant is sound (proof
+irrelevance / the type has at most one canonical shape) specifically
+because these preconditions hold, not more generally.
+
+**Fix:** `iota_at_head`'s `Decl.Rec` case now takes `infer`/`isDefEq` as
+extra parameters (threaded from `whnf_impl`'s call site, since `infer`,
+`isDefEq`, and `whnf` are mutually recursive in `tc.ml`) and, when the
+recursor's `is_K` flag is set, mirrors `to_cnstr_when_K` exactly before
+computing `major_whnf`: infer+whnf the major premise's type, check its
+head is a `Const` naming an `Inductive` decl with EXACTLY one constructor
+that is also one of this recursor's own `rules` (guards against a
+mismatched/foreign inductive), build `ctor_name` applied to the type's
+first `num_params` arguments, infer that synthesized term's type, and
+require `isDefEq` between the two types before accepting the substitution
+-- falling back to the original (unreduced) major premise on any failure
+at any step, exactly matching the kernel's own `return e` early-outs. The
+speculative `isDefEq` check reuses the same logging-suppression pattern as
+the existing `same_head_args_shortcut` (a failed attempt is a routine
+"doesn't apply" outcome, not a real failure, and must not raise or spam
+logs). This is a strict formalization of an existing-but-unused parser
+field (`is_K`), not a new heuristic -- it fires only where the kernel
+itself would, under the identical precondition (`is_K`, single-constructor
+Prop inductive) and the identical final defeq safety check.
+
+**Verification:** `NYAYA_ONLY_DECL=cast_eq` now passes. Regression: a full
+plain discovery walk (`NYAYA_SKIP_PREFIX="Quot,Quotient" dune exec
+bin/main.exe --root=.`, single process, one parse) ran past `cast_eq`
+without stopping and covered 31628 declarations (43 skipped) before
+hitting the next distinct failure (`StateT.run_modifyGet`, a separate,
+not-yet-investigated structure-eta-shaped mismatch) -- confirms no
+regression across everything checked along the way, a strictly larger
+regression surface than the individually-listed prior fixes from earlier
+entries in this changelog (all of which lie well before declaration
+#31628 in hash order and were implicitly re-checked by this same walk).
+**Kernel reference:** `src/kernel/inductive.h`'s `to_cnstr_when_K`,
+`mk_nullary_cnstr`, `inductive_reduce_rec` (quoted above, fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/inductive.h`),
+and `src/kernel/inductive.cpp`'s `init_K_target`/`mk_nullary_cnstr` (fetched
+via `raw.githubusercontent.com/leanprover/lean4/master/src/kernel/inductive.cpp`).
+**Declaration unblocked:** `cast_eq`
+
+---
+
 ## 2026-07-10: Partial iota for Nat.mod's second equation (succ-headed dividend); unblocks Nat.mod.eq_2
 
 ### Nat.mod: one-step delta unfold for a `Nat.succ`-headed symbolic dividend
