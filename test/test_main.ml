@@ -51,21 +51,64 @@ let ndjson_test_name path =
   else
     path
 
-(* Every file in the corpus -- whether it is a "good" (should typecheck) or
-   "bad" (should be rejected by the kernel) sample -- is syntactically valid
-   ndjson and must parse into a non-empty AST. This exercises the new parser
-   against the full range of nodes the corpus contains. *)
-let parse_ndjson filename () =
-  Logs.set_level None;
-  let ast = Nyaya_parser.Ndjson.parse_from_file filename in
-  Alcotest.(check bool)
-    "AST has items" true
-    (List.length ast.Nyaya_parser.Ast.items > 0)
+(* The nyaya binary, relative to the alcotest runtime cwd (_build/default/test).
+   Driving the real executable -- rather than calling [check_env_verdict] in
+   process -- exercises exactly the exit-code path the Lean Kernel Arena reads,
+   so a green test here is a faithful proxy for a passing arena run. *)
+let arena_bin = "../bin/main.exe"
 
-let ndjson_cases subdir =
+(* Per-file wall-clock cap. A hung checker must fail its own case rather than
+   stall the whole suite; the passing corpus checks in well under a second. *)
+let arena_timeout_s = 30.0
+
+(* Run [arena_bin] on [file] in arena mode and report how it terminated:
+   [`Exit code] with the process exit code, or [`Timeout] if it was killed for
+   exceeding [arena_timeout_s]. A signal/crash is reported as exit 3 (a checker
+   bug), matching the entry point's own "anything but 0/1/2 is a bug" mapping. *)
+let run_arena file : [ `Exit of int | `Timeout ] =
+  let devnull = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0 in
+  let env = Array.append (Unix.environment ()) [| "NYAYA_ARENA=1" |] in
+  let pid =
+    Unix.create_process_env arena_bin [| arena_bin; file |] env Unix.stdin
+      devnull devnull
+  in
+  Unix.close devnull;
+  let deadline = Unix.gettimeofday () +. arena_timeout_s in
+  let rec wait () =
+    let reaped, status = Unix.waitpid [ Unix.WNOHANG ] pid in
+    if reaped = 0 then
+      if Unix.gettimeofday () > deadline then (
+        (try Unix.kill pid Sys.sigkill with _ -> ());
+        ignore (Unix.waitpid [] pid);
+        `Timeout)
+      else (
+        Unix.sleepf 0.02;
+        wait ())
+    else
+      match status with
+      | Unix.WEXITED c -> `Exit c
+      | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> `Exit 3
+  in
+  wait ()
+
+(* Assert the checker's verdict on [file] against the arena outcome its corpus
+   encodes: [good/] files must accept (0), [bad/] files must reject (1). A
+   decline (2) is accepted either way -- the arena ignores declined tests for
+   scoring, so it is never a local failure. Every other code (3 = checker bug,
+   or a timeout) fails the case, with the offending value in the message. *)
+let arena_case ~accepts file () =
+  Logs.set_level None;
+  match run_arena file with
+  | `Timeout -> Alcotest.failf "%s: timed out after %.0fs" file arena_timeout_s
+  | `Exit 2 -> () (* declined: ignored, not a failure *)
+  | `Exit code ->
+    if not (accepts code) then
+      Alcotest.failf "%s: unexpected exit code %d" file code
+
+let ndjson_cases subdir ~accepts =
   ndjson_files (Filename.concat ndjson_root subdir)
   |> List.map (fun f ->
-         Alcotest.test_case (ndjson_test_name f) `Quick (parse_ndjson f))
+         Alcotest.test_case (ndjson_test_name f) `Quick (arena_case ~accepts f))
 
 let () =
   let cases =
@@ -78,6 +121,7 @@ let () =
     "Nyaya_parser/typechecker"
     [
       "export-files", cases;
-      "ndjson-parse-good", ndjson_cases "good";
-      "ndjson-parse-bad", ndjson_cases "bad";
+      (* good/ must accept (exit 0); bad/ must reject (exit 1). *)
+      "ndjson-arena-good", ndjson_cases "good" ~accepts:(fun c -> c = 0);
+      "ndjson-arena-bad", ndjson_cases "bad" ~accepts:(fun c -> c = 1);
     ]

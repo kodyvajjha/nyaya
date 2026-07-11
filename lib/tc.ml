@@ -8,6 +8,14 @@ exception Defeq_failure of string
 
 exception Not_well_posed of string
 
+(* Raised when the kernel encounters a construct it does not yet support checking
+   (e.g. an unimplemented reduction/computation rule). This is the "decline"
+   signal: it is NOT a claim that the declaration is invalid -- it means we cannot
+   verify it either way. The arena maps this to exit code 2 (declined), which is
+   ignored for soundness/completeness scoring. Nothing raises it yet; it is the
+   hook for deciding, decl-kind by decl-kind, what nyaya declines vs. checks. *)
+exception Unsupported of string
+
 module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
@@ -1196,6 +1204,61 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   in
 
   no_dup_uparams && no_free_vars && type_is_sort
+
+(* The three verdicts the Lean Kernel Arena understands, one per export file.
+   [Accept]  -> exit 0: every declaration checked out.
+   [Reject]  -> exit 1: at least one declaration is provably invalid.
+   [Decline] -> exit 2: we hit a construct we don't support and can't judge the
+                file either way (ignored by the arena for scoring).
+   The [string] carries the offending declaration + reason, for diagnostics. *)
+type verdict = Accept | Reject of string | Decline of string
+
+(* Produce a single arena verdict for a whole environment (one export file).
+
+   Precedence is [Reject] > [Decline] > [Accept], and it is sound in the sense
+   that matters: we never return [Accept] unless *every* declaration fully
+   checked. A concretely-detected invalidity (a failed [check], a type/defeq
+   error, or a malformed declaration) dominates -- it makes the file invalid
+   regardless of any unsupported declarations elsewhere -- so we short-circuit
+   on the first reject. An [Unsupported] declaration only downgrades an
+   otherwise-clean file to [Decline]; it never turns into a false accept.
+
+   [Stack_overflow]/[Out_of_memory] and any other unexpected exception are
+   deliberately *not* caught here: they propagate so the entry point can map
+   them to a checker-error exit code (not 0/1/2), matching the arena's
+   "anything else = a bug in the checker" rule. *)
+let check_env_verdict (env : Env.t) : verdict =
+  let exception Found_reject of string in
+  let declined = ref None in
+  let iter = env.tbl |> Iter.of_hashtbl in
+  try
+    Iter.iter2
+      (fun n d ->
+        (* Same per-declaration memo reset the discovery sweep does, so one
+           declaration's traces/caches don't bleed into the next. *)
+        InferTrace.reset ();
+        WhnfTrace.reset ();
+        DefEqTrace.reset ();
+        Hashtbl.reset whnf_memo;
+        Hashtbl.reset infer_memo;
+        Hashtbl.reset Expr.num_loose_bvars_memo;
+        let name = CCFormat.to_string Name.pp n in
+        try
+          let info = Decl.get_decl_info d in
+          if not (well_posed env info) then
+            raise (Found_reject (name ^ ": declaration not well-posed"))
+          else if not (check env d) then
+            raise (Found_reject (name ^ ": type mismatch"))
+        with
+        | Unsupported msg ->
+          if !declined = None then declined := Some (name ^ ": " ^ msg)
+        | TypeError m | Defeq_failure m | Not_well_posed m ->
+          raise (Found_reject (name ^ ": " ^ m))
+        | Nyaya_parser.Util.Depth_limit m ->
+          raise (Found_reject (name ^ ": depth limit: " ^ m)))
+      iter;
+    (match !declined with Some m -> Decline m | None -> Accept)
+  with Found_reject m -> Reject m
 
 let typecheck (env : Env.t) =
   let iter = env.tbl |> Iter.of_hashtbl in

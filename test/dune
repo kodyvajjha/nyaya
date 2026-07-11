@@ -1,3 +1,4 @@
 (tests
  (names test_main)
- (libraries nyaya containers alcotest))
+ (libraries nyaya containers alcotest unix)
+ (deps ../bin/main.exe))
