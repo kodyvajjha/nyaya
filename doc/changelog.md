@@ -5,6 +5,81 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: is_def_eq_unit_like, and FreeVar/FreeVar mismatch falls through to it; clears PUnit.ext/Unit.ext, `init.export` now 36688/36688
+
+**File:** `tc.ml`, `isDefEq_impl`
+
+**Problem:** `PUnit.ext`/`Unit.ext` (`∀ a b : PUnit, a = b`, proved by a bare
+`rfl` on the first argument, i.e. inferred type `Eq PUnit x x` vs declared
+`Eq PUnit x y`) failed. Tracing it down: the mismatch bottoms out at
+comparing the two bound variables `x` and `y` directly, which hits nyaya's
+`Expr.FreeVar, Expr.FreeVar` match arm. On an fvarId mismatch that arm
+returned `false` outright — a dead end, never trying struct-eta or any
+other fallback.
+
+**Kernel reference:** `kernel/type_checker.cpp`'s `quick_is_def_eq`
+explicitly declines to decide `FVar` (and `BVar`/`App`/`Const`/`Let`/`Proj`)
+by kind — `case ... FVar ...: break;` falls through to `l_undef`, not
+`l_false`. `is_def_eq_core` only returns `true` early for *matching* fvar
+ids (`is_fvar(t_n) && is_fvar(s_n) && fvar_name(t_n) == fvar_name(s_n)`);
+a mismatch falls through the entire remaining sequence
+(`is_def_eq_app` → `try_eta_expansion` → `try_eta_struct` →
+`try_string_lit_expansion` → **`is_def_eq_unit_like`**) before finally
+returning `false`. nyaya had no equivalent of that last step at all:
+
+```cpp
+bool type_checker::is_def_eq_unit_like(expr const & t, expr const & s) {
+    expr t_type = whnf(infer_type(t));
+    expr I = get_app_fn(t_type);
+    if (!is_constant(I) || !is_non_rec_structure(env(), const_name(I)))
+        return false;
+    name ctor_name = head(env().get(const_name(I)).to_inductive_val().get_cnstrs());
+    constructor_val ctor_val = env().get(ctor_name).to_constructor_val();
+    if (ctor_val.get_nfields() != 0)
+        return false;
+    return is_def_eq_core(t_type, infer_type(s));
+}
+```
+Any two terms of a non-recursive, single-constructor, **zero-field**
+structure type (`PUnit`, `Unit`, `True`, ...) are defeq unconditionally —
+the type has exactly one canonical inhabitant, so once the types agree
+there is nothing left to compare. This is a strictly narrower/different
+condition than `try_eta_struct`, which needs one side to already be
+literally constructor-headed (fine for e.g. `Prod`, useless here since
+neither `x` nor `y` is syntactically `PUnit.unit`).
+
+**Fix:**
+1. Added `is_def_eq_unit_like`, mirroring the C++ above: whnf the first
+   term's type, require its head to be a non-recursive single-constructor
+   inductive whose (sole) constructor has `num_fields = 0`, then just
+   compare the two terms' types via `isDefEq`.
+2. Hoisted `try_lam_eta`/`try_xor_one_step` (previously defined inline
+   inside the catch-all arm) alongside `try_struct_eta`, and combined all
+   four into one `final_fallback` closure ending in the existing
+   `Defeq_failure` raise.
+3. The catch-all arm (`| _ -> ...`) now just calls `final_fallback`.
+4. The `FreeVar, FreeVar` arm's mismatch case now also calls
+   `final_fallback` instead of returning `false` directly — the one
+   behavioral change, matching the kernel's actual control flow for this
+   node kind exactly.
+
+The `App, App` arm is untouched: it deliberately returns `false` rather
+than raising (it's used as a nested speculative sub-check elsewhere), so it
+keeps its own local `try_struct_eta`-only fallback rather than calling
+`final_fallback`.
+
+**Verification:** `dune runtest` (17 small export files) unchanged, all
+pass. `NYAYA_SWEEP_ALL=1 dune exec bin/main.exe --root=.` (full
+36688-declaration corpus, ~3m10s): **36688/36688 pass, 0 failing** — up
+from 36686/36688 (`PUnit.ext`/`Unit.ext` failing) before this fix, and up
+from 36682/36688 before the preceding `Quot` fix. `init.export` is now
+fully checked, start to finish, with zero exceptions and zero silent
+`check`-returns-`false` gaps.
+
+**Declarations unblocked:** `PUnit.ext`, `Unit.ext` (the last two).
+
+---
+
 ## 2026-07-10: Quot.ind/Quot.lift computation rules; `check` handles `Decl.Quot`; clears the quotient wall
 
 **File:** `tc.ml`, `iota_at_head` (new `Decl.Quot` case) and `check` (new `Quot` case)

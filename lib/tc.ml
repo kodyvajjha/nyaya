@@ -1362,6 +1362,63 @@ and isDefEq_impl env e1 e2 =
        | _ -> false)
     | _ -> false
   in
+  (* Unit-like defeq (is_def_eq_unit_like): any two terms of a type that is a
+     non-recursive, single-constructor, zero-field structure (PUnit, Unit,
+     True, ...) are defeq, since the type has exactly one canonical
+     inhabitant. Unlike try_struct_eta, neither term needs to be
+     constructor-headed -- only the types need to agree. *)
+  let is_def_eq_unit_like x y =
+    let x_type = whnf env (infer env x) in
+    let hd, _ = Expr.get_apps x_type in
+    match Expr.node hd with
+    | Expr.Const { name = ind_name; _ } ->
+      (match Hashtbl.find_opt env.tbl ind_name with
+       | Some (Decl.Inductive { ctor_names = [ctor_name]; num_idx = 0; is_recursive = false; _ }) ->
+         (match Hashtbl.find_opt env.tbl ctor_name with
+          | Some (Decl.Ctor { num_fields = 0; _ }) -> isDefEq env x_type (infer env y)
+          | _ -> false)
+       | _ -> false)
+    | _ -> false
+  in
+  (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
+  let try_lam_eta lam other =
+    match Expr.node lam with
+    | Expr.Lam { name; btype; body; binfo } ->
+      let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
+      isDefEq env
+        (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+        (Expr.app other fv)
+    | _ -> false
+  in
+  (* Nat.xor one-step; see the call site below (final_fallback) for why. *)
+  let try_xor_one_step other side =
+    match Expr.node side with
+    | Expr.Const { name; _ }
+      when name = Name.Str (Name.Str (Name.Anon, "Nat"), "xor") ->
+      let side' = Reduce.delta_at_head env side in
+      if side' == side then false else isDefEq env side' other
+    | _ -> false
+  in
+  (* Shared final fallback chain, reached whenever the fast structural match
+     doesn't decide -- both from the catch-all below and from FreeVar/FreeVar
+     with mismatched ids. Mirrors the real kernel's is_def_eq_core: FVar/FVar
+     is one of the kinds quick_is_def_eq explicitly declines to decide on a
+     mismatch (kernel/type_checker.cpp, quick_is_def_eq's `case ... FVar ...:
+     break`), falling through to the same generic sequence (eta-struct,
+     unit-like, ...) rather than failing outright. *)
+  let final_fallback e1' e2' =
+    if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
+    else if is_def_eq_unit_like e1' e2' || is_def_eq_unit_like e2' e1' then true
+    else if try_lam_eta e1' e2' || try_lam_eta e2' e1' then true
+    else if try_xor_one_step e1' e2' || try_xor_one_step e2' e1' then true
+    else
+      Logger.err
+        "@[<v 0>[isDefEq] structural mismatch@,\
+         \ lhs = %a@,\
+         \ rhs = %a@]"
+        (Defeq_failure "isDefEq: structural mismatch")
+        Expr.pp e1 Expr.pp e2
+  in
   let result =
     match Expr.node e1', Expr.node e2' with
     | Expr.Sort u1, Expr.Sort u2 ->
@@ -1370,7 +1427,8 @@ and isDefEq_impl env e1 e2 =
               Level.pp u1 Level.pp u2; false)
     | Expr.FreeVar { fvarId = f1; _ }, Expr.FreeVar { fvarId = f2; _ } ->
       if f1 = f2 then true
-      else (Logger.debug "defeq: FreeVar id mismatch"; false)
+      else (Logger.debug "defeq: FreeVar id mismatch, trying final fallback";
+            final_fallback e1' e2')
     | ( Expr.Forall { name = n; btype = s; body = a; binfo },
         Expr.Forall { btype = t; body = b; _ } ) ->
       if isDefEq env s t then (
@@ -1455,57 +1513,7 @@ and isDefEq_impl env e1 e2 =
         r
       ) else
         (Logger.debug "defeq: Let btype/value mismatch"; false)
-    | _ ->
-      (* try_struct_eta is hoisted above (shared with the App/App branch). *)
-      if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
-      else
-      (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
-      let try_lam_eta lam other =
-        match Expr.node lam with
-        | Expr.Lam { name; btype; body; binfo } ->
-          let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
-          isDefEq env
-            (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
-            (Expr.app other fv)
-        | _ -> false
-      in
-      if try_lam_eta e1' e2' || try_lam_eta e2' e1' then true
-      else
-      (* Nat.xor one-step: Nat.xor is a guarded builtin (is_nat_builtin_name;
-         see its doc) -- whnf deliberately stops at bare/applied `Nat.xor`
-         rather than delta-unfolding into Nat.bitwise's well-founded-
-         recursion body, which is what fixes the Depth_limit blowup on
-         UInt32.not_neg_one. But Nat.xor.eq_1 states its equation POINT-
-         FREE (`Nat.xor = Nat.bitwise bne`, no arguments applied at all),
-         so the App-level retry that lets nat_lit_reduce see Nat.xor
-         reapplied to its (literal-resolving) arguments never gets a
-         chance to fire here -- there are no arguments to reattach.
-         Handle this as a last-resort structural rule, exactly like
-         struct/lambda eta above: if one side is literally the bare
-         Nat.xor constant, try comparing its one-step delta-unfold
-         (via delta_at_head, so this is guaranteed to match Nat.xor's
-         real declaration value, not a hand-written guess) against the
-         other side. This does not touch whnf's own recursive behavior
-         at all, so it cannot reintroduce the depth-limit regression --
-         it only fires here, as a final fallback, after every other
-         comparison rule (including the App-level retry) has already
-         failed. *)
-      let try_xor_one_step other side =
-        match Expr.node side with
-        | Expr.Const { name; _ }
-          when name = Name.Str (Name.Str (Name.Anon, "Nat"), "xor") ->
-          let side' = Reduce.delta_at_head env side in
-          if side' == side then false else isDefEq env side' other
-        | _ -> false
-      in
-      if try_xor_one_step e1' e2' || try_xor_one_step e2' e1' then true
-      else
-        Logger.err
-          "@[<v 0>[isDefEq] structural mismatch@,\
-           \ lhs = %a@,\
-           \ rhs = %a@]"
-          (Defeq_failure "isDefEq: structural mismatch")
-          Expr.pp e1 Expr.pp e2
+    | _ -> final_fallback e1' e2'
   in
   result
 
