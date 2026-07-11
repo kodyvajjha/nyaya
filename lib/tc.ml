@@ -140,11 +140,7 @@ module Reduce = struct
       | None -> f)
     | _ -> f
 
-  (** Convert a string literal to its constructor representation:
-        [StrLit "ok" → String.mk (List.cons Char (Char.ofNat 111)
-                        (List.cons Char (Char.ofNat 107) (List.nil Char)))]
-      Uses [Char.ofNat] for each Unicode code point, matching the Lean 4
-      kernel's string_lit_to_constructor. *)
+  (* Convert a string literal to its constructor form, e.g. StrLit "ok" -> String.mk (List.cons ...). *)
   let string_lit_to_ctor (s : string) : Expr.t =
     let mk_name base field = Name.Str (Name.Str (Name.Anon, base), field) in
     let char_type = Expr.const (Name.Str (Name.Anon, "Char")) in
@@ -184,41 +180,7 @@ module Reduce = struct
     ) list_nil !code_points in
     Expr.mk_app string_mk [char_list]
 
-  (**
-     One-step iota reduction at the head of [e].
-
-     Iota reduction fires when [e] is a recursor applied to a
-     constructor-headed major premise.  The general shape of a reducible
-     application is:
-
-       R  p₁…pₙ  motive  minor₁…minorₖ  (C  q₁…qₘ  f₁…fⱼ)  s₁…sₜ
-
-     where:
-       - R          is the recursor constant
-       - p₁…pₙ     are the recursor parameters
-       - motive     is the motive (one or more)
-       - minor₁…   are the minor premises (one per constructor)
-       - C q… f…   is the major premise, already whnf'd to a constructor
-                   application; q… are the constructor's own type parameters
-                   and f… are its fields (= the ctor_num_args trailing args)
-       - s₁…sₜ     are any *extra* arguments that appear after the major
-                   in the full spine (e.g. motive indices that trail the
-                   major, or additional arguments to the overall type such
-                   as the [List.below] proof in brecOn-based recursors)
-
-     The iota rule value [rule.value] is a closed term lambda-bound over
-     (params, motives, minors, ctor_fields), i.e. it expects exactly
-     [prefix @ field_args].  The extra suffix args [s₁…sₜ] are NOT part
-     of the rule RHS; they must be passed on to the result:
-
-       result = rule.value  p₁…pₙ  motive  minor₁…  f₁…fⱼ  s₁…sₜ
-
-     Omitting [suffix] was the original bug: specialised recursors such as
-     [List.lengthTRAux.match_1] take a [List.below] proof after the major
-     premise.  Without [suffix], that proof was silently dropped, leaving
-     the minor result partially applied (e.g. [fun (_ : List.below …) => x]
-     instead of [x]).
-  *)
+  (* One-step iota reduction at the head of [e]: a recursor applied to a constructor-headed major premise. *)
   let iota_at_head (env : Env.t) (e : Expr.t) whnf infer isDefEq : Expr.t =
     let module Logger = (val env.logger) in
     let hd, args = Expr.get_apps e in
@@ -231,9 +193,7 @@ module Reduce = struct
       in
       (match decl with
       | Decl.Rec { num_params; num_idx; num_motives; num_minors; rules; is_K; _ } ->
-        (* The rule value is a template with the recursor's own universe
-           param names.  Substitute them with the actual universe levels
-           from the const application. *)
+        (* The rule value's universe params get substituted with the actual application's levels. *)
         let decl_uparams =
           CCList.map Level.param (Decl.get_uparams decl)
         in
@@ -242,9 +202,7 @@ module Reduce = struct
           e
         else (
           let major0 = List.nth args major_idx in
-          (* K-like reduction for subsingleton eliminators (Eq/HEq/...):
-             replace a stuck major with its type's nullary constructor,
-             guarded by a defeq check. See inductive.h to_cnstr_when_K. *)
+          (* K-like reduction: replace a stuck major with its type's nullary constructor, guarded by defeq. *)
           let major =
             if not is_K then major0
             else
@@ -291,34 +249,10 @@ module Reduce = struct
               (* Not a constructor the recursor knows about *)
               e
             | Some rule ->
-              (**
-                 The major premise is constructor-headed at this point, so
-                 [maj_args] contains *all* arguments of that constructor
-                 application — including constructor parameters (e.g. the
-                 implicit type parameter [α] in [MyList.nil α]).
-
-                 But the recursor's [prefix] already contains the recursor
-                 parameters/indices/motives/minors, which themselves include
-                 those constructor parameters.
-
-                 If we append all of [maj_args], params are passed twice and we
-                 over-apply the rule RHS (example bug: [MyList.nil α α]), which
-                 later shows up as confusing defeq failures.
-
-                 So for iota reduction we must append only the constructor
-                 *field* arguments (the final [rule.ctor_num_args] arguments),
-                 not all constructor arguments.
-              *)
-              (* The rule value expects: params, motives, minors, then
-                 ctor fields.  Indices sit between minors and major in
-                 the recursor spine but are NOT passed to the rule — they
-                 are determined by the constructor. *)
+              (* Append only the constructor's own field args (not its params, already in prefix), or params get passed twice. *)
               let prefix_len = num_params + num_motives + num_minors in
               let prefix = CCList.take prefix_len args in
-              (* Args in the spine that come after the major premise.
-                 These are not part of the rule RHS and must be re-applied
-                 to the result.  See the docstring on [iota_at_head] for
-                 why this matters. *)
+              (* Args after the major premise aren't part of the rule RHS; re-apply them to the result. *)
               let suffix = CCList.drop (major_idx + 1) args in
               let maj_num_args = List.length maj_args in
               if maj_num_args < rule.ctor_num_args then
@@ -339,15 +273,7 @@ module Reduce = struct
                 red
               ))
           | Expr.Literal (Expr.NatLit n) ->
-            (* NatLit iota: the major premise is a Nat literal, not a
-               constructor application.  Convert to constructor form and
-               apply the matching rule directly.
-                 NatLit 0   → Nat.zero rule, field_args = []
-                 NatLit n+1 → Nat.succ rule, field_args = [NatLit (n-1)]
-               We apply the rule directly rather than re-calling
-               iota_at_head to avoid looping with the Nat.succ kernel
-               builtin (which would whnf Nat.succ(NatLit n) back to
-               NatLit(n+1)). *)
+            (* NatLit major: treat as Nat.zero/Nat.succ and apply the matching rule directly. *)
             let mk_nat s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
             let ctor_name, field_args =
               if Z.equal n Z.zero then (mk_nat "zero", [])
@@ -372,11 +298,7 @@ module Reduce = struct
               Logger.debug "iota (natlit): %a" Expr.pp red;
               red)
           | _ ->
-            (* major isn't constructor-headed — try structure eta.
-               For structure-like types (single constructor, no indices,
-               not recursive), reduce the recursor by projecting out
-               each field:
-                 S.rec params motive minor x  →  minor (x.0) (x.1) … *)
+            (* major isn't constructor-headed: try structure eta, projecting out each field. *)
             (match rec_name with
             | Name.Str (ind_name, _) ->
               (match Hashtbl.find_opt env.tbl ind_name with
@@ -403,7 +325,7 @@ module Reduce = struct
             | _ -> e)
         )
       | Decl.Quot _ ->
-        (* Quot.ind/Quot.lift computation rules; see changelog. *)
+        (* Quot.ind/Quot.lift computation rules. *)
         let quot_ind_name = Name.Str (Name.Str (Name.Anon, "Quot"), "ind") in
         let quot_lift_name = Name.Str (Name.Str (Name.Anon, "Quot"), "lift") in
         let quot_mk_name = Name.Str (Name.Str (Name.Anon, "Quot"), "mk") in
@@ -432,21 +354,7 @@ module Reduce = struct
       | _ -> e)
     | _ -> e
 
-  (** Kernel builtin reductions for Nat literals.
-
-      When the head constant is a known Nat builtin and the relevant
-      arguments (after whnf) are NatLit values, compute the result
-      directly.  Returns [Some result] if a reduction fired, [None]
-      otherwise.
-
-      Unary:  Nat.succ
-      Binary arithmetic: Nat.add, Nat.sub, Nat.mul, Nat.pow, Nat.div, Nat.mod
-      Binary comparisons: Nat.beq, Nat.ble  (produce Bool constructors)
-      Bitwise: Nat.land, Nat.lor, Nat.xor
-      Shifts:  Nat.shiftLeft, Nat.shiftRight
-      Bit test: Nat.testBit  (produces Bool constructors)
-
-      Reference: "Type Checking in Lean 4", §3.5 (Literals). *)
+  (* Builtin reductions for Nat literal ops; returns [Some result] if a reduction fired. *)
   let nat_lit_reduce (env : Env.t) (e : Expr.t) whnf : Expr.t option =
     let hd, args = Expr.get_apps e in
     match Expr.node hd with
@@ -480,11 +388,7 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.add m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.add:
-               Nat.add x 0           → x
-               Nat.add x (NatLit n+1) → Nat.succ (Nat.add x (NatLit n))
-               Nat.add x (Nat.succ y) → Nat.succ (Nat.add x y)
-             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
+          (* Partial iota for Nat.add with a symbolic/successor-headed second arg (NatLit case bounded to n <= 64). *)
           match args with
           | [a; b] ->
             (match as_nat_lit b with
@@ -494,7 +398,7 @@ module Reduce = struct
                 let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [inner])
             | _ ->
-              (* Symbolic successor: Nat.add x (Nat.succ y) → Nat.succ (Nat.add x y) *)
+              (* Symbolic successor: Nat.add x (Nat.succ y) -> Nat.succ (Nat.add x y). *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
@@ -508,26 +412,7 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rule for Nat.sub with symbolic args, matching the
-             real definition exactly (Nat.sub, Init/Prelude.lean):
-               protected def Nat.sub : Nat → Nat → Nat
-                 | a, 0      => a
-                 | a, succ b => pred (Nat.sub a b)
-             This recurses ONLY on the second argument (the subtrahend);
-             the first argument [a] is never pattern-matched and may stay
-             fully symbolic. "succ" matches both Nat.succ x and
-             NatLit (k+1).
-             NOTE: an earlier version of this rule additionally special-
-             cased "Nat.sub 0 _ → 0" and "Nat.sub (succ n) (succ m) →
-             Nat.sub n m" (paired decrement, skipping the intermediate
-             Nat.pred). Both are only PROPOSITIONALLY true (provable by
-             induction on the second argument), not definitionally true
-             by iota alone when that argument is symbolic — e.g.
-             Nat.sub 0 (succ b) really iota-reduces to
-             Nat.pred (Nat.sub 0 b), which is stuck when b is a free
-             variable, not the literal 0 the old rule claimed. That was
-             an unsound over-generalization; removed in favor of this
-             faithful single-step reproduction. *)
+          (* Partial iota for Nat.sub: recurses only on the subtrahend, matching Nat.sub's own equations. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -559,11 +444,7 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.mul m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.mul:
-               Nat.mul x 0           → 0
-               Nat.mul x (NatLit n+1) → Nat.add (Nat.mul x (NatLit n)) x
-               Nat.mul x (Nat.succ y) → Nat.add (Nat.mul x y) x
-             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
+          (* Partial iota for Nat.mul with a symbolic/successor-headed second arg (NatLit case bounded to n <= 64). *)
           match args with
           | [a; b] ->
             (match as_nat_lit b with
@@ -573,7 +454,7 @@ module Reduce = struct
                 let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "add")) [inner; a])
             | _ ->
-              (* Symbolic successor: Nat.mul x (Nat.succ y) → Nat.add (Nat.mul x y) x *)
+              (* Symbolic successor: Nat.mul x (Nat.succ y) -> Nat.add (Nat.mul x y) x. *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
@@ -587,14 +468,7 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n))) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.pow, matching the real definition
-             exactly (Init/Prelude.lean):
-               protected def Nat.pow (m : Nat) : Nat → Nat
-                 | 0      => 1
-                 | succ n => Nat.mul (Nat.pow m n) m
-             This recurses ONLY on the exponent (second argument); the base
-             [m] is never pattern-matched and may stay fully symbolic.
-             NatLit case bounded to n ≤ 64 to avoid O(n) blowup. *)
+          (* Partial iota for Nat.pow: recurses only on the exponent (NatLit case bounded to n <= 64). *)
           match args with
           | [a; b] ->
             (match as_nat_lit b with
@@ -604,7 +478,7 @@ module Reduce = struct
                 let inner = Expr.mk_app hd [a; Expr.natlit (Z.pred n)] in
                 Some (Expr.mk_app (Expr.const (mk_name "Nat" "mul")) [inner; a])
             | _ ->
-              (* Symbolic successor: Nat.pow m (Nat.succ y) → Nat.mul (Nat.pow m y) m *)
+              (* Symbolic successor: Nat.pow m (Nat.succ y) -> Nat.mul (Nat.pow m y) m. *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
@@ -620,9 +494,7 @@ module Reduce = struct
           else Expr.natlit (Z.div m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.div with symbolic args:
-               Nat.div 0 n → 0
-               Nat.div n 0 → 0  (Lean kernel convention) *)
+          (* Partial iota for Nat.div: 0 with either symbolic arg zero. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -634,34 +506,12 @@ module Reduce = struct
           | _ -> None))
       | n when n = mk_name "Nat" "mod" ->
         (match binary (fun m n ->
-          (* Nat.mod's own doc comment (Init/Prelude.lean): "When the
-             divisor is 0, the result is the dividend rather than an
-             error" — explicit example given there: `5 % 0 = 5`. So
-             div-by-zero returns the numerator [m], not 0. *)
+          (* Divisor 0 returns the dividend, not 0 (Nat.mod's own doc comment: "5 % 0 = 5"). *)
           if Z.equal n Z.zero then Expr.natlit m
           else Expr.natlit (Z.rem m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.mod with symbolic args.
-             Real definition (Nat.mod, Init/Prelude.lean):
-               | 0, _ => 0
-               | n@(succ _), m => ite (LE.le m n) (Nat.modCore n m) n
-             with divisor-0 handled by that same `ite`: `LE.le 0 n` is
-             always true, so it takes the `Nat.modCore n 0` branch, and
-             `Nat.modCore n 0` returns `n` (its `dite (0 < 0) ... (fun _
-             => x)` always takes the `x` branch when the divisor is 0).
-             So:
-               Nat.mod 0 n → 0
-               Nat.mod n 0 → n   (dividend; divisor 0 is not an error —
-                 see doc comment above, "5 % 0 = 5")
-             And when [n] (first arg) is a concrete positive literal and
-             [m] (second arg) is structurally provable > n via the
-             existing Nat.ble partial-iota chain (i.e. `Nat.ble m n`
-             reduces to `false`), the `ite` condition is false and the
-             result is [n]. This is exactly the documented Fin-literal
-             reduction: "Nat.mod n (m' + n + 1) reduces to n for concrete
-             literal n" (needed so the OfNat instance for Fin reduces
-             definitionally). *)
+          (* Partial iota for Nat.mod, including the Fin-literal case (Nat.ble proves m > n). *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -679,8 +529,7 @@ module Reduce = struct
                 Some (Expr.natlit k)
               | _ -> None)
             | _ ->
-              (* Nat.mod's 2nd equation: succ-headed dividend => one delta
-                 step exposes `ite (LE.le m n) (modCore n m) n`. *)
+              (* Succ-headed dividend: one delta step exposes the ite that this whnf's further. *)
               let a' = whnf env a in
               let ahd, aargs = Expr.get_apps a' in
               (match Expr.node ahd, aargs with
@@ -695,10 +544,7 @@ module Reduce = struct
         (match binary (fun m n -> bool_const (Z.equal m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.beq with symbolic args:
-               Nat.beq 0 (succ _)        → Bool.false
-               Nat.beq (succ _) 0        → Bool.false
-               Nat.beq (succ n) (succ m) → Nat.beq n m *)
+          (* Partial iota for Nat.beq: peel matching Nat.succ off both sides, else zero-vs-succ is false. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -728,10 +574,7 @@ module Reduce = struct
         (match binary (fun m n -> bool_const (Z.leq m n)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota rules for Nat.ble with symbolic args:
-               Nat.ble 0 _             → Bool.true
-               Nat.ble (succ _) 0      → Bool.false
-               Nat.ble (succ n) (succ m) → Nat.ble n m *)
+          (* Partial iota for Nat.ble: peel matching Nat.succ off both sides, else zero-vs-succ decides it. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -769,21 +612,7 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.logxor m n)) with
         | Some _ as r -> r
         | None ->
-          (* Nat.xor is guarded in [is_nat_builtin_name] (see that
-             function's doc for why: unblocking UInt32.not_neg_one without
-             this guard needs delta-unfolding Nat.xor into Nat.bitwise's
-             well-founded-recursion body, which blows the depth limit).
-             But Nat.xor.eq_1 (an auto-generated equation lemma) needs
-             `Nat.xor n m` to delta-unfold exactly one step, to
-             `Nat.bitwise bne n m`, with n/m left fully symbolic -- the
-             guard would otherwise block that too. Reproduce exactly that
-             one step here via [delta_at_head] on the bare head (rather
-             than hand-writing the `bne`/instance subterm, which risks
-             getting it subtly wrong): this looks up Nat.xor's own
-             declaration value, the same thing ordinary delta would do.
-             The result is headed by [Nat.bitwise], which is ALSO guarded,
-             so this cannot recurse into the well-founded-recursion body:
-             whnf'ing this result stops immediately. *)
+          (* Nat.xor is delta-guarded (is_nat_builtin_name); restore just its one-step unfold to Nat.bitwise. *)
           match args with
           | [_; _] ->
             let hd' = delta_at_head env hd in
@@ -800,56 +629,7 @@ module Reduce = struct
       | _ -> None)
     | _ -> None
 
-  (** Returns [true] when [name] is a primitive Nat kernel builtin whose
-      definition recurses linearly (O(n)) and must NOT be delta-unfolded
-      when [nat_lit_reduce] fails on symbolic args.
-
-      [Nat.xor] and [Nat.bitwise] ARE guarded here (added alongside
-      add/sub/mul/div/mod/beq/ble). [Nat.land], [Nat.lor], [Nat.shiftLeft],
-      [Nat.shiftRight], [Nat.testBit] are deliberately left UNGUARDED,
-      unchanged from before -- this asymmetry is intentional; see below.
-
-      Root cause of the bug this fixes (Depth_limit on
-      UInt32.not_neg_one): [Nat.xor]'s reference definition is
-      `Nat.bitwise bne`, and [Nat.bitwise] is implemented via
-      [Nat.bitwise._unary], built on [WellFounded.fix]/[Acc.rec], whose
-      *accessibility proof* is resolved via ordinary structural Nat
-      recursion (through [Nat.eq_or_lt_of_le]-style comparison lemmas
-      applied to the concrete operands) -- genuinely O(n) in the operand
-      value, not O(log n) as an earlier version of this comment assumed,
-      when forced by kernel iota. The real Lean 4 kernel never pays this
-      cost: its [type_checker.cpp] reduces Nat.land/Nat.lor/Nat.xor/
-      Nat.shiftLeft/Nat.shiftRight natively via GMP bit operations
-      (reduce_nat's dispatch table, alongside add/sub/mul/pow/gcd/mod/div/
-      beq/ble) -- it never delta-unfolds [Nat.bitwise] (or, separately,
-      [Nat.shiftLeft]/[Nat.shiftRight]'s own [Nat.brecOn]-based reference
-      definitions) for any of these.
-
-      Why ONLY xor/bitwise are guarded, not land/lor/shiftLeft/shiftRight
-      too, even though the same unfaithfulness argument applies to all
-      five: guarding an outer name here blocks ALL delta on it, including
-      the single unconditional step some already-passing equation lemma
-      needs. Confirmed empirically (reproducing each as a regression
-      before deciding): `Nat.lor.eq_1`, `Nat.land.eq_1`,
-      `Nat.shiftLeft.eq_1`, `Nat.shiftLeft.eq_2` all currently pass and
-      need exactly one delta step of their respective outer name (to
-      `Nat.bitwise <op> n m` for land/lor, or straight into
-      `Nat.brecOn ...` for shiftLeft, which is NOT a `Nat.bitwise`-shaped
-      one-liner at all -- unlike land/lor/xor, shiftLeft/shiftRight's
-      *reference* definition really is the Nat.brecOn recursion itself,
-      so there is no shallow "unfold once, then stop" form available for
-      them the way there is for the bitwise trio). `Nat.xor.eq_1` ALSO
-      currently passes and has the exact same one-step need as
-      `Nat.lor.eq_1` -- so guarding [Nat.xor] here would reintroduce that
-      regression too, EXCEPT [nat_lit_reduce]'s `Nat.xor` case (below)
-      specifically restores that one step via [delta_at_head] before
-      falling through to this guard, so [Nat.xor.eq_1] keeps working. No
-      similar targeted fallback exists yet for land/lor/shiftLeft/
-      shiftRight, so they stay unguarded rather than being broken; if a
-      future declaration needs the same O(n)-blowup fix for one of them,
-      add the same kind of targeted one-step [nat_lit_reduce] fallback
-      then, backed by that declaration's own citation, rather than
-      widening this guard set speculatively now. *)
+  (* Nat ops whose real definition is O(n)/well-founded recursion and must not be delta-unfolded on symbolic args. *)
   let is_nat_builtin_name (name : Name.t) : bool =
     let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
     name = mk_name "succ" || name = mk_name "add"
@@ -890,13 +670,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.FreeVar { name; expr; info; fvarId } ->
     expr
   | Expr.Lam { name; btype; binfo; body } ->
-    (*
-      infer Lambda(binder, body):
-       assert! infersAsSort(binder.type)
-       let binderFvar := fvar(binder)
-       let bodyType := infer $ instantiate(body, binderFVar)
-       Pi binder (abstract bodyType binderFVar)
-    *)
+    (* infer Lam: Pi binder (abstract (infer (instantiate body binderFvar)) binderFvar). *)
     (match whnf env (infer env btype) |> Expr.node with
     | Expr.Sort _ ->
       let binder_free_var =
@@ -913,12 +687,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.err "infer Lam: binder type is not a sort: %a"
         (TypeError "infer Lam: binder type not a sort") Expr.pp expr)
   | Expr.Forall { name; btype; binfo; body } ->
-    (*
-      infer Pi binder body:
-      let l := inferSortOf binder
-      let r := inferSortOf $ instantiate body (fvar(binder))
-      imax(l, r)
-    *)
+    (* infer Forall: imax(sortOf binder, sortOf (instantiate body (fvar binder))). *)
     let l = infer_sort_of env btype in
     let free_var =
       Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
@@ -929,31 +698,17 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     in
     Expr.sort (Level.IMax (l, r) |> Level.simplify)
   | Expr.Const { name; uparams } ->
-    (*
-       infer Const name levels:
-       let knownType := environment[name].type
-       substituteLevels (e := knownType) (ks := knownType.uparams) (vs := levels)
-    *)
+    (* infer Const: the declared type with its own uparams substituted by this application's levels. *)
     let known_type : Decl.t = Hashtbl.find env.tbl name in
     let known_type_uparams =
       CCList.map Level.param (Decl.get_uparams known_type)
     in
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | Expr.App (f, arg) ->
-    (*
-    infer App(f, arg):
-      match (whnf $ infer f) with
-      | Pi binder body => 
-        assert! defEq(binder.type, infer arg)
-        instantiate(body, arg)
-      | _ => error
-    *)
+    (* infer App: whnf(infer f) must be a Pi; check binder.type =?= infer arg, instantiate body with arg. *)
     (match whnf env (infer env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
-      (* When the expected parameter type is a Prop, skip the defeq
-         check on the argument — proof irrelevance means the exact
-         proof term doesn't matter, and inferring/normalising complex
-         auto-generated proofs (omega, decide) is very expensive. *)
+      (* Skip the defeq check when the parameter type is a Prop: proof irrelevance makes it pointless and it can be expensive. *)
       let btype_is_prop =
         match Expr.node (whnf env (infer env btype)) with
         | Expr.Sort u -> Level.is_zero u
@@ -976,12 +731,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.err "infer App: expected forall, got @[%a@]"
         (TypeError "infer App: whnf of fn type not a forall") Expr.pp expr)
   | Let { name; btype; value; body }  ->
-    (*
-       infer Let binder val body:
-       assert! inferSortOf binder
-       assert! defEq(infer(val), binder.type)
-       infer (instantiate body val)
-    *)
+    (* infer Let: check binder.type is a sort and infer(val) =?= binder.type, then infer (instantiate body val). *)
     (match infer env btype |> Expr.node with
     | Sort _ ->
       if not (isDefEq env btype (infer env value)) then
@@ -997,29 +747,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.err "infer Let: binder type is not a sort: %a"
         (TypeError "infer Let: binder type not a sort") Expr.pp expr)
   | Proj { name; nat; expr } ->
-    (*
-       let structType := whnf (infer structure)
-       let (const structTyName levels) tyArgs := structType.unfoldApps
-       let InductiveInfo := env[structTyName]
-       -- This inductive should only have the one constructor since it's claiming to be a structure.
-       let ConstructorInfo := env[InductiveInfo.constructorNames[0]]
-
-       let mut constructorType := substLevels ConstructorInfo.type (newLevels := levels)
-
-       for tyArg in tyArgs.take constructorType.numParams
-         match (whnf constructorType) with
-           | pi _ body => inst body tyArg
-           | _ => error
-
-       for i in [0:projIdx]
-         match (whnf constructorType) with
-           | pi _ body => inst body (proj i structure)
-           | _ => error
-
-       match (whnf constructorType) with
-         | pi binder _=> binder.type
-         | _ => error
-    *)
+    (* infer Proj: instantiate the sole constructor's type with the struct's params, then with each prior projection, up to nat. *)
     let struct_type = infer env expr |> whnf env in
     let const, ty_args = Expr.get_apps struct_type in
     (match const |> Expr.node with
@@ -1078,9 +806,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
     | Expr.StrLit _ -> Expr.const (Name.of_string "String"))
   | BoundVar _ ->
-    (* Since we are using the locally nameless approach, we should not run into
-       bound variables during type inference, because all open binders will be
-       instantiated with the appropriate free variables. *)
+    (* Locally nameless: a bound variable here means a binder wasn't instantiated with a free var. *)
     Logger.err
       "@[<v 0>@[infer BoundVar: encountered bound variable during inference:@,\
        @[<hv 2> %a@]@]@]" (TypeError "infer: unexpected bound variable") Expr.pp expr
@@ -1114,18 +840,13 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   | Expr.Sort u -> Expr.sort (Level.simplify u)
   | Expr.App (f, arg) ->
     let hd, args = Expr.get_apps expr in
-    (* Try kernel numeric builtins BEFORE delta, so that e.g. Nat.add
-       on two NatLit args computes in O(1) instead of O(n) iota steps. *)
+    (* Try Nat literal builtins before delta, so e.g. Nat.add on two NatLits computes in O(1) instead of O(n) iota. *)
     (match Reduce.nat_lit_reduce env expr whnf with
     | Some r ->
       Logger.debug "whnf: nat-builtin";
       whnf env r
     | None ->
-    (* If the head is a known Nat kernel builtin but nat_lit_reduce couldn't
-       fire, do NOT delta-unfold — unfolding would expose an O(n) Nat.brecOn
-       reduction on huge literals (e.g. UInt32 operations with 2^32).
-       Partial reductions like Nat.add x 1 → Nat.succ x are handled
-       directly in nat_lit_reduce instead. *)
+    (* Don't delta-unfold an unreduced Nat builtin: that would expose its O(n) recursive definition on huge literals. *)
     if Reduce.is_nat_builtin expr then expr
     else
     let hd' =
@@ -1150,12 +871,10 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     Logger.debug "whnf: zeta";
     whnf env (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
   | Expr.Const { name; uparams }  ->
-    (* Nat.zero is definitionally equal to NatLit 0 in the Lean kernel.
-       Normalize it here so that isDefEq doesn't need a Const-vs-Literal case. *)
+    (* Normalize Nat.zero to NatLit 0 so isDefEq doesn't need a Const-vs-Literal case. *)
     if name = Name.Str (Name.Str (Name.Anon, "Nat"), "zero") then
       Expr.natlit Z.zero
-    (* Don't delta-unfold Nat kernel builtins — they may later be applied
-       to huge literals, and their Nat.brecOn definitions would loop. *)
+    (* Don't delta-unfold Nat builtins: they may later apply to huge literals and loop. *)
     else if Reduce.is_nat_builtin_name name then expr
     else
       let e' = Reduce.delta_at_head env expr in
@@ -1166,8 +885,7 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     expr
   | Expr.Proj {name; nat; expr = inner} ->
       let inner' = whnf env inner in
-      (* String literals are not constructor-headed; expand to String.mk before
-         attempting proj-reduce so that e.g. "".String.0 → List.nil Char. *)
+      (* String literals aren't constructor-headed; expand to String.mk first so proj-reduce can fire. *)
       let inner' =
         match Expr.node inner' with
         | Expr.Literal (Expr.StrLit s) -> Reduce.string_lit_to_ctor s
@@ -1176,10 +894,7 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let (hd, args) = Expr.get_apps inner' in
       (match Expr.node hd with
        | Expr.Const { name = cname; _ } ->
-         (* Only reduce if the head is actually a constructor of the
-            projected inductive type.  Without this guard, stuck recursor
-            applications (e.g. List.rec … stuck_arg) would be mistaken
-            for constructor applications and a random argument extracted. *)
+         (* Only reduce if the head is actually a constructor of the projected type, not a stuck recursor. *)
          let ind_decl = Hashtbl.find env.tbl name in
          let ctor_names = Decl.get_inductive_ctors ind_decl in
          if List.mem cname ctor_names then
@@ -1195,9 +910,7 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
        | _ -> Expr.proj name nat inner')
   | _ -> expr
 
-(* TODO: optimize def eq checking by implementing union-find.
-   TODO: ensure no other wasteful whnfs show up elsewhere before def eq check
-*)
+(* TODO: optimize def eq checking with union-find; audit for other wasteful whnfs before def eq check. *)
 and isDefEq env e1 e2 =
   let frame = DefEqTrace.enter env (e1, e2) in
   match isDefEq_impl env e1 e2 with
@@ -1213,18 +926,7 @@ and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
   if e1 == e2 then true
   else
-  (* Early proof irrelevance check BEFORE whnf: if both terms inhabit
-     definitionally equal Props, they are equal.  This avoids expensive
-     whnf of proof terms (e.g. Nat.bitwise_lt_two_pow which unfolds
-     Nat.rec on the bit-width).  infer is memoised and cheap.
-     This must run BEFORE the same-head-args shortcut below, not after:
-     if it ran second, that shortcut would eagerly compare a proof-term's
-     own data arguments (e.g. two proofs `f n1` / `f n2` of the same Prop,
-     with n1/n2 large or symbolic Nat/BitVec data) via isDefEq before ever
-     getting the chance to notice both are proofs of the same
-     proposition -- reintroducing exactly the kind of deep-unfold blowup
-     the shortcut below exists to avoid, just relocated to proof terms
-     instead of the data terms it was written for. *)
+  (* Proof irrelevance, before whnf and before the same-head-args shortcut below (else that shortcut deep-unfolds proof data first). *)
   let is_prop ty =
     match Expr.node (whnf env (infer env ty)) with
     | Expr.Sort u -> Level.is_zero u
@@ -1234,50 +936,7 @@ and isDefEq_impl env e1 e2 =
   let t = infer env e2 in
   if is_prop s && is_prop t && isDefEq env s t then true
   else
-  (* Lazy-delta-reduction "same head" shortcut, BEFORE whnf. Mirrors the
-     Lean 4 kernel's optimization in type_checker.cpp's
-     lazy_delta_reduction_step: when both sides of a defeq check are
-     applications of the exact same declaration (same Const name, same
-     universe params) with the same arity, try comparing corresponding
-     arguments pairwise via isDefEq *before* delta-unfolding that shared
-     head, and only fall through to unfolding if that fails.
-       bool type_checker::is_def_eq_app(expr const & t, expr const & s) {
-         if (is_app(t) && is_app(s)) {
-           ... expr t_fn = get_app_args(t, t_args);
-               expr s_fn = get_app_args(s, s_args);
-           if (is_def_eq(t_fn, s_fn) && t_args.size() == s_args.size()) {
-             for (i = 0; i < t_args.size(); i++)
-               if (!is_def_eq(t_args[i], s_args[i])) break;
-             if (i == t_args.size()) return true;
-       (and, gating entry into this path on both heads being the identical
-       declaration with equal universe params:)
-           if (is_app(t_n) && is_app(s_n) && is_eqp(d_t_deref, d_s_deref) &&
-               d_t_hints_is_regular) {
-             if (is_def_eq(const_levels(get_app_fn(t_n)), const_levels(get_app_fn(s_n))) &&
-                 is_def_eq_args(t_n, s_n))
-               return reduction_status::DefEqual;
-     This must run BEFORE our own whnf, not after: our whnf's delta-
-     unfolding is exactly what turns a shared-head application (e.g.
-     BitVec.signExtend applied to two different BitVec arguments) into its
-     full computational body -- observed exploding into raw Nat.sub
-     arithmetic on a ~2^64 literal and hitting the depth limit for
-     Int64.toInt32_ofBitVec -- before the arguments (where the real
-     equality lives, e.g. Int64.toBitVec (Int64.ofBitVec b) reducing to b
-     via a couple of cheap constructor/projection steps) are ever compared
-     directly. This is soundness-safe as a pure early-exit: congruence
-     (f a1..an ≡ f b1..bn whenever each ai ≡ bi) is a theorem of
-     definitional equality, so returning true here can never be a false
-     positive. If the shortcut doesn't apply (different heads, arity
-     mismatch) or any argument pair fails, we fall through completely
-     unchanged to the existing whnf-based algorithm below -- exactly as if
-     this check were absent -- matching the real kernel's fallback (failed
-     argument comparison unfolds both sides and continues, it does not
-     conclude inequality). We don't replicate the kernel's
-     `d_t->get_hints().is_regular()` gate (a performance heuristic
-     restricting this to plain, non-reducible/non-irreducible definitions);
-     omitting it only means we also attempt the shortcut for declarations
-     the kernel wouldn't bother trying it on, which is still sound (same
-     congruence argument), just a superset of when it fires. *)
+  (* Same-head-args shortcut, before whnf: if both sides are the same Const applied to equal-arity args, compare args first. *)
   let same_head_args_shortcut () =
     let h1, args1 = Expr.get_apps e1 in
     let h2, args2 = Expr.get_apps e2 in
@@ -1288,31 +947,7 @@ and isDefEq_impl env e1 e2 =
         && List.length args1 = List.length args2
         && CCList.fold_left2 (fun acc u v -> acc && Level.(u === v)) true us vs
       ->
-      (* isDefEq's own final fallback (below, "structural mismatch") does
-         not return [false] on failure -- it RAISES [Defeq_failure] via
-         Logger.err, and the [isDefEq] wrapper re-raises it uncaught. A
-         failed argument comparison here must be treated exactly like any
-         other "shortcut doesn't apply" outcome -- fall through to the
-         original whnf-based algorithm below, which may still succeed via
-         a completely different route (e.g. reducing an argument first
-         reveals an equality that comparing it raw does not) -- not let
-         the exception escape and abort the entire outer comparison. This
-         mirrors the real kernel's lazy_delta_reduction_step, which caches
-         a failed is_def_eq_args and falls through to unfolding rather
-         than concluding the whole thing unequal. *)
-      (* This comparison is speculative: a failed argument pair here is an
-         expected, routine outcome (fall through to the pre-existing
-         whnf-based algorithm below), not a real declaration failure. But
-         every raise site in this codebase (Logger.err) logs unconditionally
-         before raising, so without suppression this prints a scary
-         "[isDefEq] structural mismatch ... Exception: Defeq_failure" for
-         every argument pair that doesn't happen to match syntactically,
-         even when the overall declaration goes on to type-check
-         successfully via the fallback path a moment later. Silence logging
-         for the duration of this speculative attempt only; restore it
-         (even if something other than Defeq_failure is raised) before
-         returning, so a genuine failure surfacing later still gets logged
-         normally by the top-level handler in [typecheck]. *)
+      (* Speculative: suppress logging and treat a failed/raising comparison as "shortcut doesn't apply", not a real failure. *)
       let prev_level = Logs.level () in
       Logs.set_level None;
       Fun.protect
@@ -1328,12 +963,7 @@ and isDefEq_impl env e1 e2 =
   let e2' = whnf env e2 in
   if e1' == e2' then true
   else
-  (* Structure eta (defEqEtaStruct x y): y is constructor-headed for
-     a structure type T; compare Proj(i, x) against yArgs[i+numParams]
-     for each field, after checking the inferred types are defeq
-     (which ensures the parameters agree). Hoisted above the match so
-     both the App/App branch and the catch-all below can reach it --
-     see the App/App branch for why. *)
+  (* Structure eta: y is constructor-headed for a structure type T; compare Proj(i, x) against each of y's fields. *)
   let try_struct_eta x y =
     let hd, y_args = Expr.get_apps y in
     match Expr.node hd with
@@ -1354,7 +984,7 @@ and isDefEq_impl env e1 e2 =
                 else
                   isDefEq env
                     (Expr.proj inductive_name i x)
-                    (List.nth y_args (num_params + i))
+                    (CCList.nth y_args (num_params + i))
                   && check (i + 1)
               in
               check 0)
@@ -1362,11 +992,7 @@ and isDefEq_impl env e1 e2 =
        | _ -> false)
     | _ -> false
   in
-  (* Unit-like defeq (is_def_eq_unit_like): any two terms of a type that is a
-     non-recursive, single-constructor, zero-field structure (PUnit, Unit,
-     True, ...) are defeq, since the type has exactly one canonical
-     inhabitant. Unlike try_struct_eta, neither term needs to be
-     constructor-headed -- only the types need to agree. *)
+  (* Unit-like defeq: any two terms of a non-recursive, single-ctor, zero-field structure type are defeq once their types agree. *)
   let is_def_eq_unit_like x y =
     let x_type = whnf env (infer env x) in
     let hd, _ = Expr.get_apps x_type in
@@ -1390,7 +1016,7 @@ and isDefEq_impl env e1 e2 =
         (Expr.app other fv)
     | _ -> false
   in
-  (* Nat.xor one-step; see the call site below (final_fallback) for why. *)
+  (* Nat.xor is delta-guarded; as a last resort try one manual delta step of it. *)
   let try_xor_one_step other side =
     match Expr.node side with
     | Expr.Const { name; _ }
@@ -1399,13 +1025,7 @@ and isDefEq_impl env e1 e2 =
       if side' == side then false else isDefEq env side' other
     | _ -> false
   in
-  (* Shared final fallback chain, reached whenever the fast structural match
-     doesn't decide -- both from the catch-all below and from FreeVar/FreeVar
-     with mismatched ids. Mirrors the real kernel's is_def_eq_core: FVar/FVar
-     is one of the kinds quick_is_def_eq explicitly declines to decide on a
-     mismatch (kernel/type_checker.cpp, quick_is_def_eq's `case ... FVar ...:
-     break`), falling through to the same generic sequence (eta-struct,
-     unit-like, ...) rather than failing outright. *)
+  (* Shared final fallback, reached from the catch-all below and from a FreeVar/FreeVar id mismatch. *)
   let final_fallback e1' e2' =
     if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
     else if is_def_eq_unit_like e1' e2' || is_def_eq_unit_like e2' e1' then true
@@ -1443,23 +1063,7 @@ and isDefEq_impl env e1 e2 =
       ) else
         (Logger.debug "defeq: Forall btype mismatch"; false)
     | Expr.App (f, a), Expr.App (g, b) ->
-      (* Mirrors the real kernel's is_def_eq_core sequencing exactly:
-         is_def_eq_app (this per-argument congruence) is tried first; if it
-         fails -- INCLUDING if a sub-comparison would otherwise raise, which
-         the real is_def_eq_app cannot do since it's a plain bool-returning
-         function -- fall through to try_eta_struct on the WHOLE (already
-         whnf'd) e1'/e2', not on the partially-decomposed fn/arg pieces.
-         Without the exception guard here, a deep recursive isDefEq call
-         that lands on nyaya's catch-all case (e.g. comparing a bare free
-         variable against a partially-applied constructor one spine layer
-         in) raises Defeq_failure immediately and uncaught, which escapes
-         straight past this branch's own "did congruence fail" check --
-         so struct-eta on the outer, fully-applied terms (e.g. `f s` vs
-         `Prod.mk a s (Prod.fst ... ) (Prod.snd ...)`, StateT.run_modifyGet)
-         never gets a chance to run. Suppressing logs + catching
-         Defeq_failure here reuses the exact pattern already established
-         for same_head_args_shortcut above: a failed speculative attempt is
-         a routine "doesn't apply", not a real failure to report. *)
+      (* Try per-argument congruence first (suppressing a nested raise); only then fall back to struct-eta on the whole terms. *)
       let try_cong () =
         let prev = Logs.level () in
         Logs.set_level None;
@@ -1523,22 +1127,12 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
   | Decl.Ctor { num_params; inductive_name; _ } ->
     let inductive = Hashtbl.find env.tbl inductive_name in
     assert (num_params = Decl.get_inductive_num_params inductive);
-    (* The constructor's type/telescope has to share the same parameters as the
-       type of the inductive being declared. *)
-    let ensure_same_params = true in
-    (* For the non-parameter elements of the constructor type's telescope, the
-       binder type must actually be a type (must infer as Sort _). *)
-    let non_param_as_sort = true in
-    (* For any non-parameter element of the constructor type's telescope, the
-       element's inferred sort must be less than or equal to the inductive type's
-       sort, or the inductive type being declared has to be a prop. *)
-    let sort_le_inductive_sort = true in
-    (* No argument to the constructor may contain a non-positive occurrence of
-       the type being declared *)
-    let non_positive = true in
-    (* The end of the constructor's telescope must be a valid application of
-       arguments to the type being declared *)
-    let end_of_telescope_match = true in
+    (* TODO: stubs, always true. *)
+    let ensure_same_params = true (* ctor telescope's params match the inductive's. *) in
+    let non_param_as_sort = true (* each non-param binder infers as a Sort. *) in
+    let sort_le_inductive_sort = true (* each non-param binder's sort <= the inductive's, unless it's a Prop. *) in
+    let non_positive = true (* no non-positive occurrence of the inductive in a ctor argument. *) in
+    let end_of_telescope_match = true (* telescope ends in a valid application to the inductive. *) in
     ensure_same_params && non_param_as_sort && sort_le_inductive_sort
     && non_positive && end_of_telescope_match
   | _ -> Logger.err "Ctor check called on non-ctor declaration" (Failure "")
@@ -1579,8 +1173,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Rec _ -> (* TODO: what goes here? *) true
   | Inductive _ -> (* TODO: what goes here? *) true
 
-(** We check if any declaration in the environment has 1) duplicate uparams or 2) lingering free variables in the type or 3) the type of its type is a sort. 
-  If yes, we call that declaration well-posed and only typecheck those. *)
+(* Well-posed: no duplicate uparams, no free vars in the type, and the type's type is a sort. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let module Logger = (val env.logger) in
   let rec dup_exist = function
@@ -1609,19 +1202,9 @@ let typecheck (env : Env.t) =
   let total = Hashtbl.length env.tbl in
   let success = ref 0 in
   let skipped = ref 0 in
-  (* NYAYA_ONLY_DECL restricts the sweep to a single named declaration, for
-     fast iterate-fix-verify cycles: `check` only inspects the target
-     declaration's own value/type (dependencies are looked up from `env`
-     during infer/whnf but not re-verified as top-level decls), so skipping
-     every other declaration here has no effect on the result for the one
-     we do check. *)
+  (* NYAYA_ONLY_DECL restricts the sweep to one named declaration, for fast iterate-fix-verify cycles. *)
   let only_decl = Sys.getenv_opt "NYAYA_ONLY_DECL" in
-  (* NYAYA_SKIP_PREFIX excludes declarations by namespace prefix from a
-     discovery walk (comma-separated, e.g. "Quot,Quotient"), so a known,
-     not-yet-fixed wall (e.g. missing quotient-type support) doesn't block
-     seeing what else is failing further into the corpus. A "skipped"
-     declaration is neither checked nor counted as passing or failing --
-     it's simply not looked at this run, same as if it didn't exist. *)
+  (* NYAYA_SKIP_PREFIX excludes declarations by namespace prefix (comma-separated) from a discovery walk. *)
   let skip_prefixes =
     match Sys.getenv_opt "NYAYA_SKIP_PREFIX" with
     | Some s ->
@@ -1640,16 +1223,7 @@ let typecheck (env : Env.t) =
         && String.equal (String.sub decl_name_str 0 (plen + 1)) (prefix ^ "."))
       skip_prefixes
   in
-  (* NYAYA_SWEEP_ALL checks every declaration, catching all failures (not
-     just TypeError/Defeq_failure -- also Depth_limit, Not_well_posed, etc.)
-     instead of stopping at the first one, and reports the complete
-     pass/fail set at the end. This is the regression gate for the autoloop:
-     a plain run dies at the first failing declaration in hash order, so it
-     cannot by itself confirm "no previously-passing declaration regressed."
-     No debug_*.txt files are written here -- the failure set for this
-     codebase is currently large, and writing one file per failure would
-     litter the repo. Use NYAYA_ONLY_DECL (or NYAYA_DECL_DEBUG) separately
-     to get a trace for one specific declaration. *)
+  (* NYAYA_SWEEP_ALL checks every declaration and reports the full pass/fail set, instead of stopping at the first failure. *)
   let sweep_all =
     match Sys.getenv_opt "NYAYA_SWEEP_ALL" with
     | Some ("1" | "true" | "TRUE") -> true
@@ -1676,10 +1250,7 @@ let typecheck (env : Env.t) =
         Hashtbl.reset Expr.num_loose_bvars_memo;
         let record_failure () =
           failures := decl_name_str :: !failures;
-          (* Print as we go, not just in the final summary: a long sweep can
-             be killed (e.g. OOM from unbounded hash-cons growth, a known
-             TODO) before it finishes, and a streamed line survives that
-             where a summary computed at the end wouldn't. *)
+          (* Stream failures as they happen, so a killed sweep still leaves a partial record. *)
           Logger.info "SWEEP_ALL_FAIL: %s" decl_name_str
         in
         try
@@ -1734,8 +1305,7 @@ let typecheck (env : Env.t) =
           "Failed after checking %d declarations (%d skipped) in \
            environment; %d declarations remaining."
           !success !skipped remaining;
-        (* Auto-debug: re-run the failing declaration with debug logging
-           to a file so the trace is available without a manual second run. *)
+        (* Auto-debug: re-run the failing declaration with debug logging to a file. *)
         let sanitized =
           String.map (fun c -> if c = '.' || c = ' ' || c = '/' then '_' else c)
             decl_name_str
