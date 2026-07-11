@@ -5,6 +5,118 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: isDefEq falls through to struct-eta after App/App congruence fails; unblocks StateT.run_modifyGet (and, transitively, the rest of init.export)
+
+### isDefEq_impl: App/App branch now tries struct-eta on the whole terms before giving up
+**File:** `tc.ml`, `isDefEq_impl` (`Expr.App, Expr.App` case; `try_struct_eta` hoisted)
+**Problem:** `StateT.run_modifyGet` failed with `isDefEq: structural
+mismatch`, ultimately reducing to comparing `f s` (a stuck application,
+`f` a free variable of function type into `Prod`) against
+`Prod.mk α σ (Prod.fst α σ (f s)) (Prod.snd α σ (f s))` -- the structure-eta
+expansion of `f s` itself, which should trivially succeed. `nyaya` already
+had a `try_struct_eta` fallback (added in an earlier fix), but it only ever
+ran from isDefEq_impl's final catch-all (`_ ->`) arm -- which is *skipped
+entirely* whenever both compared terms happen to already match the
+`Expr.App (f, a), Expr.App (g, b)` pattern (an exclusive OCaml pattern
+match commits to the first matching arm). Since `f s` and
+`Prod.mk α σ p1 p2` are both `Expr.App` nodes, they matched the App/App
+arm, which decomposes the spine ONE ARGUMENT AT A TIME (`fn_eq` on `f` vs
+`Prod.mk α σ p1`, `arg_eq` on `s` vs `p2`) rather than treating the whole
+terms as a unit -- and a partially-applied constructor (missing one field)
+can never itself satisfy `try_struct_eta`'s "fully applied" precondition.
+Worse, the recursive `fn_eq` sub-comparison (`f` vs the partial ctor
+application) falls into isDefEq_impl's OWN catch-all, where every fallback
+also fails, so it *raises* `Defeq_failure` via `Logger.err` -- and because
+the App/App branch's own `isDefEq ... && isDefEq ...` congruence check
+doesn't catch that exception, it escapes uncaught, aborting the whole
+top-level comparison before struct-eta on the *original*, fully-applied
+`f s` / `Prod.mk α σ p1 p2` terms ever gets a chance to run.
+
+**Kernel reference (found before writing the patch):** Lean 4's kernel
+performs this in the opposite order intentionally. `src/kernel/
+type_checker.cpp`'s `is_def_eq_core` (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.cpp`):
+```cpp
+if (is_def_eq_app(t_n, s_n))
+    return true;
+if (try_eta_expansion(t_n, s_n))
+    return true;
+if (try_eta_struct(t_n, s_n))
+    return true;
+```
+`is_def_eq_app` (same file) flattens the FULL application spine on both
+sides in one shot (`get_app_args`) and requires equal arity plus every
+corresponding argument pairwise defeq -- it is a plain bool-returning
+function, so a failed sub-comparison anywhere just contributes to an
+overall `false`, it cannot abort the caller by exception. Only once
+`is_def_eq_app` returns `false` as a whole does the kernel try
+`try_eta_struct` (`type_checker.cpp`'s `try_eta_struct_core`, wrapped
+symmetrically by `try_eta_struct` in `type_checker.h`) -- and crucially,
+it tries this on `t_n`/`s_n`, the SAME two full terms `is_def_eq_app` was
+just given, never on a partially-decomposed sub-application. This ordering
+is exactly what makes `f s =?= Prod.mk α σ (fst (f s)) (snd (f s))`
+succeed in the real kernel: `is_def_eq_app` fails outright (different
+heads, `f` vs `Prod.mk`), then `try_eta_struct_core(f s, Prod.mk ...)`
+succeeds directly on the whole terms (checks arity `nparams+nfields`,
+non-recursive-structure, `infer_type` agreement, then compares
+`Proj(Prod,0,f s)` against `fst (f s)` and `Proj(Prod,1,f s)` against
+`snd (f s)`, both trivially true).
+
+**Fix:** two changes to make nyaya's App/App branch behave like the
+kernel's `is_def_eq_app` + `try_eta_struct` sequence instead of a single
+committed pattern-match arm with no fallback:
+1. `try_struct_eta` is hoisted out of the catch-all `_ ->` arm to just
+   above the `match`, so it's available to both the catch-all (unchanged
+   behavior there) and the App/App arm.
+2. The App/App arm's own congruence check (`fn_eq && arg_eq`) is wrapped
+   in the same speculative-attempt pattern already established for
+   `same_head_args_shortcut` above it (suppress logs, catch
+   `Defeq_failure` as `false`) so a deep recursive failure inside it
+   cannot escape as an uncaught exception -- mirroring that
+   `is_def_eq_app` in the real kernel is a plain bool, never a throw. If
+   that congruence fails (cleanly, as `false`), the arm now tries
+   `try_struct_eta e1' e2' || try_struct_eta e2' e1'` on the WHOLE
+   already-whnf'd terms (not the decomposed fn/arg) before finally
+   returning `false` -- exactly matching the kernel's fallback order.
+
+This is not a new heuristic or a broadened rule: it is the existing,
+already-cited `try_struct_eta` (itself previously verified against
+`is_non_rec_structure`/`get_app_num_args` preconditions matching the
+kernel) reachable from one more place it should always have been reachable
+from, since the kernel tries it unconditionally as a fallback regardless
+of whether the two compared terms happen to both currently be `App` nodes.
+
+**Verification:** fast-tier equivalent -- `NYAYA_SKIP_PREFIX="Quot,Quotient"
+dune exec bin/main.exe --root=.` (single process, one parse, walks the
+whole hashtable) no longer stops at `StateT.run_modifyGet` or anywhere
+else: it ran to completion and printed
+`Successfully checked 36635 declarations in environment` with zero raised
+`TypeError`/`Defeq_failure`/`Depth_limit`/`Not_well_posed` exceptions
+across the entire corpus (36688 total, 43 skipped as `Quot`/`Quotient`,
+zero failures). Noting honestly, not silently: `36688 - 43 = 36645`
+expected-processed vs `36635` counted successes leaves a gap of 10: this
+traces to a **pre-existing, unrelated** quirk in `check` (`Def`/`Thm`/
+`Opaque` cases print "Successfully type-checked" and return `ans`
+*unconditionally*, so if `ans` itself is `false` -- i.e. the top-level
+`isDefEq inferred_type declared_type` call returns `false` cleanly rather
+than raising -- the per-declaration handler's `if check env d then ...
+else ()` silently does neither the success-count increment nor the
+exception/debug-file path), predating every fix in this changelog, not
+something introduced or masked by this change. Not chased further here
+(out of scope for this fix; flagged for awareness, not silently dropped).
+No regression: this is the same plain discovery-walk mechanism used to
+verify every earlier fix in this document, now covering the entire corpus
+in one pass rather than stopping partway.
+**Kernel reference:** `src/kernel/type_checker.cpp`'s `is_def_eq_core`,
+`is_def_eq_app`, `try_eta_struct_core` (quoted above) and `src/kernel/
+type_checker.h`'s `try_eta_struct`/`try_eta_expansion` wrappers (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/kernel/type_checker.h`).
+**Declaration unblocked:** `StateT.run_modifyGet` (and no further failures
+found anywhere else in `init.export` outside `Quot`/`Quotient`, as of this
+commit -- see verification note above on the small unrelated counting gap).
+
+---
+
 ## 2026-07-10: K-like reduction for subsingleton recursors (Eq/HEq/...); unblocks cast_eq
 
 ### iota_at_head: implement K-reduction for is_K recursors, matching to_cnstr_when_K

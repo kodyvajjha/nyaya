@@ -1301,6 +1301,40 @@ and isDefEq_impl env e1 e2 =
   let e2' = whnf env e2 in
   if e1' == e2' then true
   else
+  (* Structure eta (defEqEtaStruct x y): y is constructor-headed for
+     a structure type T; compare Proj(i, x) against yArgs[i+numParams]
+     for each field, after checking the inferred types are defeq
+     (which ensures the parameters agree). Hoisted above the match so
+     both the App/App branch and the catch-all below can reach it --
+     see the App/App branch for why. *)
+  let try_struct_eta x y =
+    let hd, y_args = Expr.get_apps y in
+    match Expr.node hd with
+    | Expr.Const { name = ctor_name; _ } ->
+      (match Hashtbl.find_opt env.tbl ctor_name with
+       | Some (Decl.Ctor { inductive_name; num_params; num_fields; _ }) ->
+         (match Hashtbl.find_opt env.tbl inductive_name with
+          | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
+            when List.length ctor_names = 1
+              && num_idx = 0
+              && not is_recursive
+              && List.length y_args = num_params + num_fields ->
+            if not (isDefEq env (infer env x) (infer env y)) then false
+            else (
+              Logger.debug "defeq: struct-eta for %a" Name.pp inductive_name;
+              let rec check i =
+                if i >= num_fields then true
+                else
+                  isDefEq env
+                    (Expr.proj inductive_name i x)
+                    (List.nth y_args (num_params + i))
+                  && check (i + 1)
+              in
+              check 0)
+          | _ -> false)
+       | _ -> false)
+    | _ -> false
+  in
   let result =
     match Expr.node e1', Expr.node e2' with
     | Expr.Sort u1, Expr.Sort u2 ->
@@ -1324,16 +1358,36 @@ and isDefEq_impl env e1 e2 =
       ) else
         (Logger.debug "defeq: Forall btype mismatch"; false)
     | Expr.App (f, a), Expr.App (g, b) ->
-      let fn_eq =
-        isDefEq env (Reduce.delta_at_head env f) (Reduce.delta_at_head env g)
+      (* Mirrors the real kernel's is_def_eq_core sequencing exactly:
+         is_def_eq_app (this per-argument congruence) is tried first; if it
+         fails -- INCLUDING if a sub-comparison would otherwise raise, which
+         the real is_def_eq_app cannot do since it's a plain bool-returning
+         function -- fall through to try_eta_struct on the WHOLE (already
+         whnf'd) e1'/e2', not on the partially-decomposed fn/arg pieces.
+         Without the exception guard here, a deep recursive isDefEq call
+         that lands on nyaya's catch-all case (e.g. comparing a bare free
+         variable against a partially-applied constructor one spine layer
+         in) raises Defeq_failure immediately and uncaught, which escapes
+         straight past this branch's own "did congruence fail" check --
+         so struct-eta on the outer, fully-applied terms (e.g. `f s` vs
+         `Prod.mk a s (Prod.fst ... ) (Prod.snd ...)`, StateT.run_modifyGet)
+         never gets a chance to run. Suppressing logs + catching
+         Defeq_failure here reuses the exact pattern already established
+         for same_head_args_shortcut above: a failed speculative attempt is
+         a routine "doesn't apply", not a real failure to report. *)
+      let try_cong () =
+        let prev = Logs.level () in
+        Logs.set_level None;
+        Fun.protect ~finally:(fun () -> Logs.set_level prev)
+          (fun () ->
+            try
+              isDefEq env (Reduce.delta_at_head env f) (Reduce.delta_at_head env g)
+              && isDefEq env a b
+            with Defeq_failure _ -> false)
       in
-      if not fn_eq then
-        (Logger.debug "defeq: App fn mismatch"; false)
-      else
-        let arg_eq = isDefEq env a b in
-        if not arg_eq then
-          (Logger.debug "defeq: App arg mismatch"; false)
-        else true
+      if try_cong () then true
+      else if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
+      else (Logger.debug "defeq: App fn/arg mismatch (and struct-eta failed)"; false)
     | ( Expr.Const { name = n1; uparams = us },
         Expr.Const { name = n2; uparams = vs } ) ->
       if n1 = n2
@@ -1375,38 +1429,7 @@ and isDefEq_impl env e1 e2 =
       ) else
         (Logger.debug "defeq: Let btype/value mismatch"; false)
     | _ ->
-      (* Structure eta (defEqEtaStruct x y): y is constructor-headed for
-         a structure type T; compare Proj(i, x) against yArgs[i+numParams]
-         for each field, after checking the inferred types are defeq
-         (which ensures the parameters agree). *)
-      let try_struct_eta x y =
-        let hd, y_args = Expr.get_apps y in
-        match Expr.node hd with
-        | Expr.Const { name = ctor_name; _ } ->
-          (match Hashtbl.find_opt env.tbl ctor_name with
-           | Some (Decl.Ctor { inductive_name; num_params; num_fields; _ }) ->
-             (match Hashtbl.find_opt env.tbl inductive_name with
-              | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
-                when List.length ctor_names = 1
-                  && num_idx = 0
-                  && not is_recursive
-                  && List.length y_args = num_params + num_fields ->
-                if not (isDefEq env (infer env x) (infer env y)) then false
-                else (
-                  Logger.debug "defeq: struct-eta for %a" Name.pp inductive_name;
-                  let rec check i =
-                    if i >= num_fields then true
-                    else
-                      isDefEq env
-                        (Expr.proj inductive_name i x)
-                        (List.nth y_args (num_params + i))
-                      && check (i + 1)
-                  in
-                  check 0)
-              | _ -> false)
-           | _ -> false)
-        | _ -> false
-      in
+      (* try_struct_eta is hoisted above (shared with the App/App branch). *)
       if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
       else
       (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
