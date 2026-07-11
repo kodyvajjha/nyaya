@@ -619,7 +619,18 @@ module Reduce = struct
               | Expr.Const { name = bn; _ } when bn = mk_name "Bool" "false" ->
                 Some (Expr.natlit k)
               | _ -> None)
-            | _ -> None)
+            | _ ->
+              (* Nat.mod's 2nd equation: succ-headed dividend => one delta
+                 step exposes `ite (LE.le m n) (modCore n m) n`. *)
+              let a' = whnf env a in
+              let ahd, aargs = Expr.get_apps a' in
+              (match Expr.node ahd, aargs with
+               | Expr.Const { name = sn; _ }, [_]
+                 when sn = mk_name "Nat" "succ" ->
+                 let unfolded = delta_at_head env hd in
+                 if unfolded != hd then Some (Expr.mk_app unfolded args)
+                 else None
+               | _ -> None))
           | _ -> None))
       | n when n = mk_name "Nat" "beq" ->
         (match binary (fun m n -> bool_const (Z.equal m n)) with

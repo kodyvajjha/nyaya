@@ -5,6 +5,80 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: Partial iota for Nat.mod's second equation (succ-headed dividend); unblocks Nat.mod.eq_2
+
+### Nat.mod: one-step delta unfold for a `Nat.succ`-headed symbolic dividend
+**File:** `tc.ml`, `nat_lit_reduce` (`Nat.mod` case)
+**Problem:** `Nat.mod.eq_2` failed with `isDefEq: structural mismatch`
+(`lhs = forall (h : LE.le ...), (fun _ => Nat) (Decidable.isTrue ... #0)`,
+`rhs = Nat`). The equation lemma states
+`Nat.mod (Nat.succ n) x = ite (LE.le x (Nat.succ n)) (Nat.modCore (Nat.succ n) x) (Nat.succ n)`,
+provable by `rfl` because the RHS is exactly `Nat.mod`'s second defining
+equation. Type-checking that `rfl` needs the LHS `Nat.mod (Nat.succ n) x`
+to reduce to that same `ite`. But `Nat.mod` is (correctly) in
+`is_nat_builtin_name`'s guarded set -- the guard blocks *all* delta on
+`Nat.mod` so that whnf never unary-decrements a huge concrete dividend
+through `modCore`'s well-founded recursion. With the O(1) literal path
+unable to fire (`x` symbolic) and delta blocked, the LHS stayed stuck as
+`Nat.mod (Nat.succ n) x` while the RHS was the explicit `ite`. The two
+then fell into a positional structural-congruence comparison of a
+`Nat.mod`-spine (2 args) against the unfolded `Decidable.rec`-spine
+(5 args), which mismatched -- surfacing as the malformed
+`Decidable.rec P motive minorFalse _` where a `Nat` free variable landed
+in the `isTrue`-minor slot. Same *shape* of guarded-builtin gap that the
+`Nat.pow`/`Nat.xor` entries handled: the guard has to stay, but the one
+cheap step the real kernel gets for free needs an explicit escape hatch.
+
+**Why one step is safe and bounded:** `Nat.mod`'s reference definition
+(`Nat.mod`, `Init/Prelude.lean`) is
+```lean
+@[extern "lean_nat_mod"]
+protected def Nat.mod : @& Nat → @& Nat → Nat
+  | 0, _          => 0
+  | n@(succ _), m => ite (LE.le m n) (Nat.modCore n m) n
+```
+The match is on the *dividend*. For a `Nat.succ`-headed dividend the
+`succ`-branch fires in a single match-iota step, exposing the `ite`;
+`Nat.modCore` sits inside the ite's then-branch (itself an `@[extern]`
+well-founded def, and left unforced here since the `Decidable` instance
+`Nat.decLe m n` is stuck for symbolic `m`), so no well-founded recursion
+is entered. The `@[extern "lean_nat_mod"]` attribute is a compiler
+directive only, irrelevant to kernel defeq; the kernel's own native mod
+fast path (`type_checker.cpp`'s `reduce_nat`/`reduce_bin_nat_op`) requires
+*both* operands to be concrete literals and, when that fails, falls
+straight through to ordinary delta+iota -- exactly the one step reproduced
+here. nyaya can't "fall through to delta" the way the C++ `whnf` loop does
+(the guard exists precisely to stop that on concrete huge dividends), so
+the safe one-step case needs its own hatch.
+
+**Fix:** in `Nat.mod`'s `nat_lit_reduce` fallback, when the O(1) and
+zero/ble rules don't fire, whnf the dividend; if it is `Nat.succ`-headed,
+return one delta step of `Nat.mod` (`delta_at_head` on the bare head,
+re-applied to the args) and let the recursive whnf perform the beta +
+match-iota. Using `delta_at_head` reproduces `Nat.mod`'s real body rather
+than hand-reconstructing the `ite`/`LE.le`/`Nat.decLe` subterms (which
+would risk a subtly-wrong substitute, cf. the `Nat.xor` entry). This
+fires *only* for a `Nat.succ`-headed dividend -- deliberately narrower
+than the real match (which also takes the succ-branch for a positive
+`NatLit`): a bare symbolic dividend or a positive literal stays stuck as
+before, so no currently-passing `Nat.mod`-shaped declaration changes. A
+narrower reduction can only lose completeness, never soundness (congruence
+is preserved either way).
+
+**Verification:** fast-tier (`Nat.mod.eq_2`, now passes). Regression:
+re-ran individually and confirmed still passing:
+`Nat.two_pow_succ`, `UInt32.not_neg_one`, `Fin.castSucc_one`,
+`Nat.sub_one`, `Nat.add_succ_sub_one`, `Nat.lor.eq_1`, `Int.pred_toNat`,
+`Int64.toInt32_ofBitVec`, `BitVec.replicate_zero`, `Fin.zero_le`.
+**Kernel reference:** `src/Init/Prelude.lean`'s `Nat.mod`/`Nat.modCore`
+definitions (fetched via
+`raw.githubusercontent.com/leanprover/lean4/master/src/Init/Prelude.lean`),
+and `src/kernel/type_checker.cpp`'s `reduce_nat`/`reduce_bin_nat_op` native
+Nat fast path + `whnf` main loop.
+**Declaration unblocked:** `Nat.mod.eq_2`
+
+---
+
 ## 2026-07-10: Partial iota rule for Nat.pow with symbolic exponent; unblocks Nat.two_pow_succ
 
 ### Nat.pow: add a bounded partial-iota fallback, matching Nat.add/Nat.sub/Nat.mul
