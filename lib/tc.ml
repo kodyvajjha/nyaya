@@ -1506,7 +1506,9 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
 
 let typecheck (env : Env.t) =
   let iter = env.tbl |> Iter.of_hashtbl in
+  let total = Hashtbl.length env.tbl in
   let success = ref 0 in
+  let skipped = ref 0 in
   (* NYAYA_ONLY_DECL restricts the sweep to a single named declaration, for
      fast iterate-fix-verify cycles: `check` only inspects the target
      declaration's own value/type (dependencies are looked up from `env`
@@ -1514,6 +1516,30 @@ let typecheck (env : Env.t) =
      every other declaration here has no effect on the result for the one
      we do check. *)
   let only_decl = Sys.getenv_opt "NYAYA_ONLY_DECL" in
+  (* NYAYA_SKIP_PREFIX excludes declarations by namespace prefix from a
+     discovery walk (comma-separated, e.g. "Quot,Quotient"), so a known,
+     not-yet-fixed wall (e.g. missing quotient-type support) doesn't block
+     seeing what else is failing further into the corpus. A "skipped"
+     declaration is neither checked nor counted as passing or failing --
+     it's simply not looked at this run, same as if it didn't exist. *)
+  let skip_prefixes =
+    match Sys.getenv_opt "NYAYA_SKIP_PREFIX" with
+    | Some s ->
+      String.split_on_char ',' s
+      |> List.map String.trim
+      |> List.filter (fun s -> s <> "")
+    | None -> []
+  in
+  let is_skipped decl_name_str =
+    List.exists
+      (fun prefix ->
+        String.equal decl_name_str prefix
+        ||
+        let plen = String.length prefix in
+        String.length decl_name_str > plen
+        && String.equal (String.sub decl_name_str 0 (plen + 1)) (prefix ^ "."))
+      skip_prefixes
+  in
   (* NYAYA_SWEEP_ALL checks every declaration, catching all failures (not
      just TypeError/Defeq_failure -- also Depth_limit, Not_well_posed, etc.)
      instead of stopping at the first one, and reports the complete
@@ -1538,6 +1564,9 @@ let typecheck (env : Env.t) =
         | Some target -> not (String.equal target decl_name_str)
         | None -> false
       then ()
+      else if only_decl = None && is_skipped decl_name_str then (
+        skipped := !skipped + 1;
+        Logger.info "SKIPPED (NYAYA_SKIP_PREFIX): %s" decl_name_str)
       else if sweep_all then (
         InferTrace.reset ();
         WhnfTrace.reset ();
@@ -1600,8 +1629,11 @@ let typecheck (env : Env.t) =
                      | TypeError _ | Defeq_failure _ | Not_well_posed _
                      | Nyaya_parser.Util.Depth_limit _ -> true
                      | _ -> false) ->
-        Logger.success "Failed after checking %d declarations in environment."
-          !success;
+        let remaining = total - !success - !skipped - 1 in
+        Logger.success
+          "Failed after checking %d declarations (%d skipped) in \
+           environment; %d declarations remaining."
+          !success !skipped remaining;
         (* Auto-debug: re-run the failing declaration with debug logging
            to a file so the trace is available without a manual second run. *)
         let sanitized =
@@ -1632,8 +1664,9 @@ let typecheck (env : Env.t) =
       Logs.set_level prev_level)
     iter;
   if sweep_all then (
-    let total = !success + List.length !failures in
-    Logger.info "SWEEP_ALL: %d/%d declarations passed." !success total;
+    let total_checked = !success + List.length !failures in
+    Logger.info "SWEEP_ALL: %d/%d declarations passed (%d skipped)." !success
+      total_checked !skipped;
     Logger.info "SWEEP_ALL: %d failing declarations:" (List.length !failures);
     List.iter (fun name -> Logger.info "SWEEP_ALL_FAIL: %s" name)
       (List.sort String.compare !failures)
