@@ -5,6 +5,66 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-10: Quot.ind/Quot.lift computation rules; `check` handles `Decl.Quot`; clears the quotient wall
+
+**File:** `tc.ml`, `iota_at_head` (new `Decl.Quot` case) and `check` (new `Quot` case)
+
+**Problem:** two separate gaps, both scoped to `Quot`:
+1. `whnf`'s `iota_at_head` only special-cased `Decl.Rec` (ordinary inductive
+   recursors). `Quot.ind`/`Quot.lift` have no `Decl.Rec` entry and no
+   `value` to delta-unfold (`Decl.Quot` carries only a type) — applications
+   like `Quot.lift f h (Quot.mk r a)` were simply stuck, so anything built
+   on `Quotient`/`Setoid` (43 declarations, previously excluded from the
+   sweep via `NYAYA_SKIP_PREFIX="Quot,Quotient"`) couldn't be checked.
+2. `check` had no case for `Decl.Quot` at all — it fell into the old
+   catch-all `_ ->` arm and raised unconditionally, so even `Quot`,
+   `Quot.mk`, `Quot.lift`, `Quot.ind` themselves (which have no value to
+   check, same as `Axiom`) failed outright.
+
+**Fix:**
+1. Added a `Decl.Quot` arm to `iota_at_head` implementing the two kernel
+   computation rules verbatim from "Type Checking in Lean 4" /
+   `kernel/type_checker.cpp`'s `reduce_quot_rec`: for `Quot.ind` (major
+   premise at spine index 4) and `Quot.lift` (major premise at spine index
+   5), whnf the major; if it's headed by `Quot.mk` with exactly 3 args
+   (`α`, `r`, `a`), the reduct is `f a` (`f` = spine arg 3) with any
+   trailing spine args re-applied. No universe/level substitution is
+   needed here (unlike ordinary `Rec_rule`s) since `f`/`a` are taken
+   directly from the actual application, not a stored template.
+2. Added a `Quot` arm to `check` mirroring `Axiom`: no value, so nothing
+   to check beyond well-posedness (already verified separately).
+
+**Verification:** `NYAYA_SWEEP_ALL=1 dune exec bin/main.exe --root=.`
+(no `NYAYA_SKIP_PREFIX` — full 36688-declaration corpus, ~3m15s) went from
+43 declarations excluded outright to all `Quot`/`Quotient` declarations
+checked and passing. Remaining failures: `PUnit.ext`/`Unit.ext` only —
+pre-existing and unrelated to `Quot` (see below), already present before
+this fix but silently swallowed by the plain discovery walk's
+success-counter quirk (the "gap of 10" noted in the previous entry), only
+surfaced now because `NYAYA_SWEEP_ALL` treats a `check` returning `false`
+without raising as a recorded failure rather than a silent no-op.
+
+**Known remaining gap (not fixed here, out of scope for quotients):**
+`PUnit.ext`/`Unit.ext` fail because `x =?= y` for two free variables of a
+zero-field-constructor type (`PUnit`/`Unit`) is never tried via struct-eta
+at the point they're compared — congruence decomposes
+`Eq PUnit x x =?= Eq PUnit x y` down to comparing `x` against `y`, but
+that sub-comparison isn't logged/attempted before the whole-term
+struct-eta fallback (which doesn't apply, since `Eq _ _ _` itself isn't a
+struct type) gives up. Needs struct-eta to also fire when comparing two
+bare free variables of a subsingleton type, not just App-headed terms.
+
+**Declarations unblocked:** all 43 previously-skipped `Quot`/`Quotient`
+declarations (`Quot`, `Quot.mk`, `Quot.lift`, `Quot.ind`, `Quot.sound`,
+`Quotient.mk`, `Quotient.lift`, `Quotient.ind`, `Quotient.sound`, and
+downstream users) now pass. Confirmed via a full unrestricted
+`NYAYA_SWEEP_ALL=1` run: 36686/36688 pass, 2 failing (`PUnit.ext`,
+`Unit.ext` — the pre-existing unrelated gap above, not `Quot`-prefixed and
+not part of the 43). `init.export` is now fully checked start to finish
+modulo those 2 declarations.
+
+---
+
 ## 2026-07-10: isDefEq falls through to struct-eta after App/App congruence fails; unblocks StateT.run_modifyGet (and, transitively, the rest of init.export)
 
 ### isDefEq_impl: App/App branch now tries struct-eta on the whole terms before giving up

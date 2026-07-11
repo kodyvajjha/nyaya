@@ -402,6 +402,33 @@ module Reduce = struct
               | _ -> e)
             | _ -> e)
         )
+      | Decl.Quot _ ->
+        (* Quot.ind/Quot.lift computation rules; see changelog. *)
+        let quot_ind_name = Name.Str (Name.Str (Name.Anon, "Quot"), "ind") in
+        let quot_lift_name = Name.Str (Name.Str (Name.Anon, "Quot"), "lift") in
+        let quot_mk_name = Name.Str (Name.Str (Name.Anon, "Quot"), "mk") in
+        let major_idx =
+          if rec_name = quot_ind_name then Some 4
+          else if rec_name = quot_lift_name then Some 5
+          else None
+        in
+        (match major_idx with
+        | None -> e
+        | Some idx ->
+          if List.length args <= idx then e
+          else
+            let major = whnf env (List.nth args idx) in
+            let maj_hd, maj_args = Expr.get_apps major in
+            (match Expr.node maj_hd with
+            | Expr.Const { name; _ }
+              when name = quot_mk_name && List.length maj_args = 3 ->
+              let a = List.nth maj_args 2 in
+              let f = List.nth args 3 in
+              let suffix = CCList.drop (idx + 1) args in
+              let red = Expr.mk_app f (a :: suffix) in
+              Logger.debug "iota (quot): %a" Expr.pp red;
+              red
+            | _ -> e))
       | _ -> e)
     | _ -> e
 
@@ -1529,6 +1556,10 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Axiom { name; uparams; ty } ->
     Logger.debugf Pp.pp_check_name (name, ty);
     true
+  | Quot { info } ->
+    (* Primitive, like Axiom: no value to check. *)
+    Logger.debugf Pp.pp_check_name (info.name, info.ty);
+    true
   | Opaque { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
     let inf = (infer env value) in
@@ -1539,11 +1570,6 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Ctor { info; inductive_name; _ } as d -> check_ctor d env
   | Rec _ -> (* TODO: what goes here? *) true
   | Inductive _ -> (* TODO: what goes here? *) true
-  | _ ->
-    (* Logger.warn "not checking decl: %a" Decl.pp decl;
-       true *)
-    Logger.err "failed checking decl: %a" (Failure "type checking failed")
-      Decl.pp decl
 
 (** We check if any declaration in the environment has 1) duplicate uparams or 2) lingering free variables in the type or 3) the type of its type is a sort. 
   If yes, we call that declaration well-posed and only typecheck those. *)
