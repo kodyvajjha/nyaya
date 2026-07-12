@@ -1204,7 +1204,29 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     ans
   | Ctor { info; inductive_name; _ } as d -> check_ctor d env
   | Rec _ -> (* TODO: what goes here? *) true
-  | Inductive _ -> (* TODO: what goes here? *) true
+  | Inductive { info; _ } ->
+    (* An inductive's type must be an arity: a Pi-telescope of parameters and
+       indices ending in a sort. The kernel's [check_inductive_types]
+       (src/kernel/inductive.cpp) whnf's the type, peels every Pi (instantiating
+       the body), then finishes with [type = ensure_sort(type)], which throws if
+       the conclusion is not a [Sort]. Without this nyaya accepts an inductive
+       whose type is an arbitrary non-sort constant, e.g.
+       bad/tutorial/044_inductBadNonSort2 (type := aType, an axiom of type
+       Sort 1 -- itself well-typed, but not a sort). *)
+    let rec ends_in_sort ty =
+      match Expr.node (whnf env ty) with
+      | Expr.Sort _ -> true
+      | Expr.Forall { name; btype; binfo; body } ->
+        let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
+        ends_in_sort
+          (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+      | _ -> false
+    in
+    if ends_in_sort info.ty then true
+    else
+      Logger.err "check Inductive: type of %a is not an arity ending in a sort"
+        (TypeError "inductive type is not an arity ending in a sort")
+        Name.pp info.name
 
 (* Well-posed: no duplicate uparams, no free vars in the type, and the type's type is a sort. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =

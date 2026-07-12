@@ -5,6 +5,26 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: inductive type must be an arity ending in a sort; clears arena bad/044_inductBadNonSort2
+
+**File:** `tc.ml`, `check` `Inductive` case (was hardcoded `true`)
+
+**Problem:** `bad/tutorial/044_inductBadNonSort2` declares an inductive whose
+`type` is `aType` — a `const` naming an axiom of type `Sort 1`. That type is
+perfectly well-typed (so `well_posed`, which only checks `infer info.ty` is a
+sort, passed), but it is not itself a *sort*, and an inductive's type must be an
+*arity*: a Pi-telescope of parameters/indices ending in `Sort u`. nyaya's
+`Inductive` check was a hardcoded `true`, so it accepted this.
+
+**Fix:** In `check`'s `Inductive` branch, whnf the type and peel every `Forall`
+(instantiating the body with a fresh free var), then require the conclusion to
+be a `Sort`; otherwise raise `TypeError` (→ `Reject`).
+
+**Kernel reference:** Lean's `check_inductive_types` (`src/kernel/inductive.cpp`)
+does exactly this — `type = whnf(type); while (is_pi(type)) { … type = instantiate(binding_body(type), …); type = whnf(type); } … type = ensure_sort(type);` — where `ensure_sort` throws if the conclusion is not a sort.
+
+**Case unblocked:** arena `bad/tutorial/044_inductBadNonSort2` (26 → 25 red).
+
 ## 2026-07-12: theorem type must be a proposition; clears arena bad/011_nonPropThm
 
 **File:** `tc.ml`, `check` `Thm` case
