@@ -94,6 +94,38 @@ loop fix — the autoloop reverted the naive change (no regression left) and
 deferred `proj-of-prop` behind this item rather than either shipping an
 unsound accept or a good-case regression.
 
+**2026-07-12 (second attempt — the coupling is broader than "one `Nat.div`
+step"):** Removing the Prop-skip and requiring `is_def_eq(arg_type, btype)` for
+every argument does correctly reject `proj-of-prop` (and incidentally
+`bad/nat-rec-rules`). But it regresses **two** valid files, not just
+`grind-ring-5`: `good/init-prelude` also fails, at `Nat.modCoreGo_lt`. Both
+regressions are in the same cluster — the fuel-recursive definitions of
+`Nat.div` / `Nat.modCore`.
+
+Concretely: `Nat.div n m` unfolds to a helper `Nat.div.go y hy fuel x h` (fuel
+is the 3rd argument; `go` recurses structurally on `fuel`), and likewise
+`Nat.modCore.go`. Their own soundness lemmas (`Nat.div.go.fuel_congr`,
+`Nat.modCoreGo_lt`, …) contain `Prop`-typed obligations that the App-case skip
+was hiding wholesale. Verifying them needs nyaya to (a) reduce `go` on a
+symbolic dividend/divisor and get *stuck at the manifest `dite`* rather than
+either blowing up or refusing to reduce, and (b) discharge a `dite`
+vs `Decidable.casesOn` congruence between the two sides. Attempted mitigations
+that do **not** suffice on their own:
+
+- Restoring one delta step of the guarded `Nat.div` (so `Nat.div x y` exposes
+  its `dite`) — necessary but not sufficient.
+- A *fuel-aware* guard on `Nat.div.go`/`Nat.modCore.go` (leave them unreduced
+  only while `fuel` is symbolic, still reduce on a literal/`succ` fuel) — this
+  removes the blowup and makes `grind-ring-5` fast again, but the proofs still
+  fail to type-check because the residual `dite`/`Decidable.casesOn` congruence
+  is not discharged.
+
+So the honest scope is a `whnf`/`isDefEq` completeness pass over the whole
+fuel-recursive `Nat.div`/`Nat.modCore` reduction (helper reduction + the
+`dite`/`Decidable.casesOn` congruence it bottoms out in), verified against
+`init-prelude` and `grind-ring-5`, not a single equation-lemma step. Reverted
+again; `proj-of-prop` stays deferred behind this item.
+
 ---
 
 ## 2. Exported recursor reduction rules are trusted, not reconstructed
