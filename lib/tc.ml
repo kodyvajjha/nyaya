@@ -707,7 +707,20 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     Expr.sort (Level.IMax (l, r) |> Level.simplify)
   | Expr.Const { name; uparams } ->
     (* infer Const: the declared type with its own uparams substituted by this application's levels. *)
-    let known_type : Decl.t = Hashtbl.find env.tbl name in
+    let known_type : Decl.t =
+      match Hashtbl.find_opt env.tbl name with
+      | Some d -> d
+      | None ->
+        (* Referencing a constant absent from the environment is a kernel-level
+           type error, not a nyaya bug: Lean's [type_checker::infer_constant]
+           calls [env().get(const_name(e))], and [environment::get] throws
+           [unknown_constant_exception] when the name is not present
+           (src/kernel/environment.cpp), which fails the declaration. Raise a
+           [TypeError] so the arena verdict is [Reject] rather than an escaping
+           [Not_found] that maps to a checker-error exit code. *)
+        Logger.err "infer Const: unknown constant %a"
+          (TypeError "infer Const: unknown constant") Name.pp name
+    in
     let known_type_uparams =
       CCList.map Level.param (Decl.get_uparams known_type)
     in

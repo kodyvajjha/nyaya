@@ -5,6 +5,36 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-11: `infer` rejects (not crashes) on an unknown constant; clears arena bad/large-elim-param
+
+**File:** `tc.ml`, `infer_impl` `Const` case
+
+**Problem:** The arena soundness case `bad/large-elim-param` builds an
+inductive `MyBool.{u} : Sort u | tt | ff` and then references
+`MyBool.rec.{1,0}` in a proof of `False` — but the export ships MyBool with an
+empty `recs` list, so `MyBool.rec` is never added to the environment (nyaya
+reads recursors from the export; it does not synthesize them). Inferring the
+type of `Const MyBool.rec` did a bare `Hashtbl.find env.tbl name`, which raised
+OCaml's `Not_found`. That exception is not one of the arena verdict handler's
+recognized rejection exceptions, so it escaped to the entry point and became a
+checker-error exit code (3) instead of a reject (1). The case therefore failed
+even though the correct verdict — reject — was reachable.
+
+**Fix:** In the `infer` `Const` case, look the name up with `Hashtbl.find_opt`
+and, on `None`, raise `TypeError "infer Const: unknown constant"` (via
+`Logger.err`). `check_env_verdict` maps `TypeError` to `Reject`, so a reference
+to an undeclared constant now rejects the file cleanly.
+
+**Kernel reference:** Lean's `type_checker::infer_constant`
+(`src/kernel/type_checker.cpp`) infers a constant's type via
+`constant_info info = env().get(const_name(e));`, and `environment::get`
+(`src/kernel/environment.cpp`) throws when the name is absent:
+`object * o = lean_environment_find(...); if (is_scalar(o)) throw unknown_constant_exception(*this, n);`.
+A reference to a nonexistent constant is thus a kernel-level type error that
+fails the declaration — exactly a `Reject`, never a checker bug.
+
+**Case unblocked:** arena `bad/large-elim-param` (28 → 27 red).
+
 ## 2026-07-11: level `leq` normalizes both sides at entry; clears arena good/012–014 (levelComp1/2/3)
 
 **File:** `level.ml`, `( <= )`
