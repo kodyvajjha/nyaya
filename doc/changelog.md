@@ -25,6 +25,28 @@ does exactly this — `type = whnf(type); while (is_pi(type)) { … type = insta
 
 **Case unblocked:** arena `bad/tutorial/044_inductBadNonSort2` (26 → 25 red).
 
+## 2026-07-12: inductive arity must have exactly numParams+numIndices binders; clears arena bad/046_inductTooFewParams
+
+**File:** `tc.ml`, `check` `Inductive` case
+
+**Problem:** `bad/tutorial/046_inductTooFewParams` declares `numParams = 2` but
+its type is a single `Π (x : Prop), Prop` — one binder. The previous arity
+check (added for 044) peeled *all* Pis and only checked the conclusion was a
+sort, so it accepted a type with fewer binders than the declared parameter
+count.
+
+**Fix:** Generalize the arity check to a counted peel: require exactly
+`num_params + num_idx` leading `Forall`s (each must be present after whnf),
+then require the conclusion to be a `Sort`. This subsumes the 044 case
+(`num_params + num_idx = 0`, so the type itself must be a sort).
+
+**Kernel reference:** Lean's `check_inductive_types` (`src/kernel/inductive.cpp`)
+peels the parameters and indices one Pi at a time and throws "number of
+parameters mismatch" if it runs out of Pis before consuming all declared
+parameters/indices, then `ensure_sort(type)`.
+
+**Case unblocked:** arena `bad/tutorial/046_inductTooFewParams` (25 → 24 red).
+
 ## 2026-07-12: theorem type must be a proposition; clears arena bad/011_nonPropThm
 
 **File:** `tc.ml`, `check` `Thm` case

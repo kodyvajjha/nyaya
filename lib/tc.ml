@@ -1204,29 +1204,36 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     ans
   | Ctor { info; inductive_name; _ } as d -> check_ctor d env
   | Rec _ -> (* TODO: what goes here? *) true
-  | Inductive { info; _ } ->
-    (* An inductive's type must be an arity: a Pi-telescope of parameters and
-       indices ending in a sort. The kernel's [check_inductive_types]
-       (src/kernel/inductive.cpp) whnf's the type, peels every Pi (instantiating
-       the body), then finishes with [type = ensure_sort(type)], which throws if
-       the conclusion is not a [Sort]. Without this nyaya accepts an inductive
-       whose type is an arbitrary non-sort constant, e.g.
-       bad/tutorial/044_inductBadNonSort2 (type := aType, an axiom of type
-       Sort 1 -- itself well-typed, but not a sort). *)
-    let rec ends_in_sort ty =
+  | Inductive { info; num_params; num_idx; _ } ->
+    (* An inductive's type must be an arity: a Pi-telescope of exactly
+       [num_params] parameters followed by [num_idx] indices, ending in a sort.
+       The kernel's [check_inductive_types] (src/kernel/inductive.cpp) peels the
+       parameters and indices one Pi at a time
+       ([type = instantiate(binding_body(type), ...); type = whnf(type);]),
+       throws "number of parameters mismatch" if it runs out of Pis before
+       consuming all declared parameters/indices, and finishes with
+       [type = ensure_sort(type)], which throws if the conclusion is not a
+       [Sort]. Two ways this is violated by the corpus:
+       - the whole type is a non-sort constant
+         (bad/tutorial/044_inductBadNonSort2: type := aType : Sort 1);
+       - fewer Pi binders than the declared parameter count
+         (bad/tutorial/046_inductTooFewParams: numParams = 2, type = one Pi). *)
+    let rec peel k ty =
       match Expr.node (whnf env ty) with
-      | Expr.Sort _ -> true
-      | Expr.Forall { name; btype; binfo; body } ->
+      | Expr.Forall { name; btype; binfo; body } when k > 0 ->
         let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
-        ends_in_sort
+        peel (k - 1)
           (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+      | Expr.Sort _ when k = 0 -> true
       | _ -> false
     in
-    if ends_in_sort info.ty then true
+    if peel (num_params + num_idx) info.ty then true
     else
-      Logger.err "check Inductive: type of %a is not an arity ending in a sort"
-        (TypeError "inductive type is not an arity ending in a sort")
-        Name.pp info.name
+      Logger.err
+        "check Inductive: type of %a is not an arity of %d parameter(s) + %d \
+         index(es) ending in a sort"
+        (TypeError "inductive type is not a valid arity")
+        Name.pp info.name num_params num_idx
 
 (* Well-posed: no duplicate uparams, no free vars in the type, and the type's type is a sort. *)
 let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
