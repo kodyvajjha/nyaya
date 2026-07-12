@@ -5,6 +5,39 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: restrict projections out of a proposition; clears arena bad/085, 087, 088, 089
+
+**File:** `tc.ml`, `infer` `Proj` case
+
+**Problem:** A structure that lives in `Prop` is a subsingleton — proof
+irrelevance equates all its inhabitants — so projecting a *data* (non-`Prop`)
+field out of it is unsound: it would let distinct data be proved equal. nyaya
+computed the projection's type but never enforced this, so the arena `projProp`
+cluster (all expected **reject**) was **accepted**: `085_projProp2` /
+`087_projProp4` project data fields directly, and `088_projProp5` /
+`089_projProp6` project fields sitting after a depended-upon data field.
+
+**Fix:** After computing whether the structure's type is a `Prop`
+(`is_prop_type`), add the two guards the kernel applies:
+- when peeling each earlier field, if a later field depends on it
+  (`num_loose_bvars body > 0`) and it is data, reject — a Prop structure may not
+  carry a depended-upon data field before the projected one (`088`, `089`);
+- the projected field's own type must be a `Prop` (`085`, `087`).
+
+Non-`Prop` structures are unaffected (both guards are gated on `is_prop_type`),
+and proof projections that only follow non-dependent data stay valid
+(`good/tutorial/084_projProp1`, `086_projProp3` still accept).
+
+**Kernel reference:** `src/kernel/type_checker.cpp` `infer_proj` — the
+`is_prop_type && !is_prop(binding_domain(r))` check inside the pre-field loop
+(guarded by `has_loose_bvars(binding_body(r))`) and the final
+`is_prop_type && !is_prop(r)` check on the projected field.
+
+**Cases unblocked:** arena `bad/tutorial/085_projProp2`, `087_projProp4`,
+`088_projProp5`, `089_projProp6` (12 → 8 red).
+
+---
+
 ## 2026-07-12: validate constructor headers + field universes; clears arena bad/047–050, 053, 058
 
 **File:** `tc.ml`, `check_ctor` (was five stubs hardcoded `true`)

@@ -801,11 +801,29 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
             "infer Proj: ctor type instantiation expected Forall, got %a"
             (TypeError "infer Proj: ctor type not a forall") Expr.pp for_ty
       done;
+      (* Projecting out of a proposition is only sound for proof (Prop-typed)
+         fields: proof irrelevance equates all inhabitants of the structure, so
+         a data projection could equate distinct data. A field is also rejected
+         when an earlier depended-upon field is data. Non-Prop structures are
+         unrestricted. *)
+      let is_prop t =
+        match Expr.node (whnf env (infer env t)) with
+        | Expr.Sort u -> Level.is_zero u
+        | _ -> false
+      in
+      let is_prop_type = is_prop struct_type in
       (* Now, instantiate the projections *)
       for i = 0 to nat - 1 do
         let for_ty = whnf env !ctor_type in
         match for_ty |> Expr.node with
-        | Forall { body; _ } ->
+        | Forall { btype; body; _ } ->
+          (* A field that a later field depends on must itself be a proof. *)
+          if is_prop_type && Expr.num_loose_bvars body > 0 && not (is_prop btype)
+          then
+            Logger.err
+              "infer Proj: projection out of a proposition depends on data field %d"
+              (TypeError "infer Proj: projection out of a proposition depends on data")
+              i;
           let proj_expr = Expr.proj name i expr  in
           ctor_type :=
             Expr.instantiate ~logger:env.logger ~free_var:proj_expr ~expr:body
@@ -818,7 +836,12 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       (* Now, the next binder's type is the projection type *)
       let final_ty = whnf env !ctor_type in
       (match final_ty |> Expr.node with
-      | Forall { btype; _ } -> btype
+      | Forall { btype; _ } ->
+        (* The projected field itself must be a proof when the structure is. *)
+        if is_prop_type && not (is_prop btype) then
+          Logger.err "infer Proj: data projection out of a proposition"
+            (TypeError "infer Proj: data projection out of a proposition");
+        btype
       | _ ->
         Logger.err "infer Proj: final type expected Forall, got %a"
           (TypeError "infer Proj: final type not a forall") Expr.pp final_ty)
