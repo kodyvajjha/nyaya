@@ -145,8 +145,13 @@ and cases l1 l2 p balance =
        (simplify (subst ~level:l2 ~ks:[ Param p ] ~vs:[ Succ (Param p) ]))
        balance
 
-(** Partial order on levels. *)
-let ( <= ) l1 l2 = leq l1 l2 0
+(** Partial order on levels. Normalize both sides first, mirroring the real
+    kernel's [is_geq l1 l2 = is_geq_core (normalize l1) (normalize l2)]
+    (src/kernel/level.cpp): [leq]'s case analysis assumes its inputs are
+    normalized (in particular that no [IMax] has a concrete, non-parameter
+    second argument), which the kernel guarantees by normalizing at this
+    boundary rather than inside the core recursion. *)
+let ( <= ) l1 l2 = leq (simplify l1) (simplify l2) 0
 
 let eq l1 l2 = l1 <= l2 && l2 <= l1
 

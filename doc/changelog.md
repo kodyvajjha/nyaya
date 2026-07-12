@@ -5,6 +5,39 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-11: level `leq` normalizes both sides at entry; clears arena good/012–014 (levelComp1/2/3)
+
+**File:** `level.ml`, `( <= )`
+
+**Problem:** The arena cases `good/tutorial/012_levelComp1` (`Sort (imax 1 0)`
+at type `Sort 1`), `013_levelComp2` (`imax 0 1`), and `014_levelComp3`
+(`imax 2 1`) crashed the checker (`exit 3`) with
+`leq : not defined for that case where x,y = (imax(1,0),0)!`. `leq`'s case
+analysis has no arm for an `IMax` whose second argument is a concrete
+non-parameter level (`Zero` or `Succ _`), so it fell through to the
+`Logger.err`/`Failure "leq"` catch-all. Such forms only reach `leq` because
+the entry point `( <= )` passed its arguments straight to `leq` without
+normalizing — the sort-defeq check compares `succ (imax 1 0)` against
+`succ 0`, descending to `leq (imax 1 0) 0`.
+
+**Fix:** Normalize both operands with `simplify` before entering `leq`:
+`let ( <= ) l1 l2 = leq (simplify l1) (simplify l2) 0`. `simplify` already
+collapses `imax` with a concrete second argument (`imax _ 0 → 0`,
+`imax 1 r → r`, `imax a (succ b) → max a (succ b)`), so no `IMax(_, Zero|Succ)`
+survives to `leq`; the remaining post-normalization `IMax` forms all have a
+parameter (or nested-imax/max) second argument, which the existing arms
+handle.
+
+**Kernel reference:** `src/kernel/level.cpp` normalizes at exactly this
+boundary rather than inside the core recursion:
+`bool is_geq(level const & l1, level const & l2) { return is_geq_core(normalize(l1), normalize(l2)); }`
+and `bool is_equivalent(level const & lhs, level const & rhs) { return lhs == rhs || normalize(lhs) == normalize(rhs); }`.
+`is_geq_core` (the analog of nyaya's `leq`) therefore assumes normalized
+inputs. `simplify` is nyaya's `normalize`.
+
+**Case unblocked:** arena `good/tutorial/012_levelComp1`,
+`013_levelComp2`, `014_levelComp3` (31 → 28 red).
+
 ## 2026-07-10: is_def_eq_unit_like, and FreeVar/FreeVar mismatch falls through to it; clears PUnit.ext/Unit.ext, `init.export` now 36688/36688
 
 **File:** `tc.ml`, `isDefEq_impl`
