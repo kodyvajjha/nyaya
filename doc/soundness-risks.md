@@ -149,37 +149,43 @@ unsoundness — `dune build @runtest` shows `bad/nat-rec-rules`, `bad/130`,
 
 ---
 
-## 3. Constructor validation (`check_ctor`) is stubbed to `true`
+## 3. Constructor strict positivity (`check_positivity`) is not done
 
-**File:** `lib/tc.ml`, `check_ctor` (~line 1146). All five obligations are
-hardcoded `true`: `ensure_same_params`, `non_param_as_sort`,
-`sort_le_inductive_sort`, `non_positive`, `end_of_telescope_match`. Only the
-inductive's *arity* is now checked (see `doc/changelog.md`, 2026-07-12); the
-constructors themselves are not validated at all.
+**File:** `lib/tc.ml`, `check_ctor` (~line 1157).
 
-**Why this is unsound:** a constructor with an ill-formed type lets you inhabit
-an inductive incorrectly. The arena cluster `bad/tutorial/047–058` (all
-expected **reject**, all currently **accepted**) exercises this:
-- `047_inductWrongCtorParams`, `048_inductWrongCtorResParams`,
-  `049_inductWrongCtorResLevel` — the constructor's parameter binders / result
-  arguments / result universe levels don't match the inductive's
-  (constructor-header consistency).
-- `050_inductInIndex`, `051_indNeg`, `054_indNegRec` — **strict positivity**:
-  the inductive occurs in an index position or to the left of an arrow in a
-  constructor field.
-- `053_reduceCtor…`, `058_typeWith…` — related constructor/reduction defects.
+**Update (2026-07-12):** `check_ctor` no longer stubs everything to `true`. The
+header-consistency and universe obligations are now a faithful port of Lean's
+`check_constructors` — parameter binders def-eq the inductive's, field universes
+`≤` the inductive's (or `Prop`), and the manifest result is `is_valid_ind_app`
+(correct head const with its universe params, correct parameter fvars, no
+inductive occurrence in the result indices). That cleared the header/universe
+half of the old cluster: `bad/tutorial/047, 048, 049, 050, 053, 058` (see
+`doc/changelog.md`). The remaining gap is **strict positivity only**.
 
-**What a correctly-scoped version needs:** the constructor half of the kernel's
-inductive checker (`check_constructors` / positivity checking in
-`src/kernel/inductive.cpp`): validate each constructor's telescope against the
-shared parameter context, each field's sort against the inductive's sort, strict
-positivity of the inductive's occurrences, and the constructor's result shape
-`I params indices`. This is genuine architectural work (the plan's named
-stop-and-surface condition), not a localized patch — and doing it piecemeal
-risks both regressing valid inductives and rejecting the bad ones for an
-incidental reason that would silently flip back to accept later. **Deferred by
-the user (2026-07-12) to continue top-down with the localized duplicate-name
-reds (`126–133`); this cluster is left for a scoped build-out.**
+**Why this is unsound:** a constructor field with a non-positive occurrence of
+the inductive (the inductive to the left of an arrow) lets you derive `False`.
+Two arena cases (both expected **reject**, both currently **accepted**) exercise
+exactly this:
+- `051_indNeg` — the classic negative occurrence: a field of type
+  `(I → I) → I`, with `I` to the left of the inner arrow.
+- `054_indNegReducible` — a negative occurrence nested inside a head-normal form
+  that *could* reduce it away (`constType aType I → I`); the kernel treats it as
+  negative anyway, without reducing past hnf.
 
-**Status:** unresolved; open architectural item, detected (cluster
-`bad/tutorial/047–058` red).
+**Why it was NOT ported with the rest:** the kernel's `check_positivity` runs
+*after* `add_inductive_fn` un-nests nested inductives into fresh auxiliary
+parameters. nyaya reads inductives straight from the export and does **not**
+un-nest, so a naive port of `check_positivity` — which only accepts recursive
+occurrences that are literally `I params indices` via `is_valid_ind_app` — would
+false-reject the valid nested inductives in the good corpus (e.g. a field of
+type `List (Tree a)`). Positivity is the plan's named stop-and-surface
+architectural item, and it is coupled to the missing nested-inductive support.
+
+**What a correctly-scoped version needs:** the nested-inductive un-nesting the
+real kernel performs before `check_positivity`, then the positivity recursion
+itself (`check_positivity` in `src/kernel/inductive.cpp`: whnf to hnf; if a
+`pi`, the domain must have no inductive occurrence and recurse into the body;
+else it must be a valid recursive application).
+
+**Status:** unresolved; open architectural item, detected (`bad/tutorial/051`,
+`054` red). Narrowed from the original 047–058 cluster to positivity only.

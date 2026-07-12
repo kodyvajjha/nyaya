@@ -5,6 +5,46 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: validate constructor headers + field universes; clears arena bad/047–050, 053, 058
+
+**File:** `tc.ml`, `check_ctor` (was five stubs hardcoded `true`)
+
+**Problem:** `check_ctor` validated nothing about a constructor — every
+obligation returned `true`, so the arena cluster `bad/tutorial/047–058` (all
+expected **reject**) was **accepted**. The defects: a constructor whose
+parameter binder does not match the inductive's (`047`), whose result applies
+the inductive to the wrong parameters (`048`) or wrong universe levels (`049`)
+or leaves the inductive occurring in a result index (`050`), whose type reduces
+to — but is not manifestly — the inductive (`053`), or whose field lives in a
+universe higher than the inductive's (`058`).
+
+**Fix:** Port the header-consistency and universe half of Lean's
+`check_constructors`. Peel the constructor's telescope *without* reducing it
+(matching the kernel's `while (is_pi(t))`): def-eq each parameter binder against
+the inductive's shared parameters, universe-check each field
+(`sort ≤ inductive level`, or the inductive is a `Prop`), and require the
+manifest result to be `is_valid_ind_app` — head is the inductive applied (with
+its own universe params, compared structurally by name) to exactly the shared
+parameter fvars, with no index mentioning the inductive.
+
+**Deliberately not done — strict positivity (`051`, `054`).** The kernel's
+`check_positivity` runs only after nested inductives are un-nested; nyaya does
+not un-nest, so a naive port would false-reject valid nested inductives in the
+good corpus. Those two purely-positivity cases stay deferred (see
+`doc/soundness-risks.md` #3, now narrowed to just positivity).
+
+**Kernel reference:** `src/kernel/inductive.cpp` — `check_constructors` (the
+`is_def_eq(binding_domain, get_param_type)` parameter check, the
+`is_geq(m_result_level, sort_level(s)) || is_zero(m_result_level)` universe
+check) and `is_valid_ind_app` (head/param/index-occurrence check).
+
+**Cases unblocked:** arena `bad/tutorial/047_inductWrongCtorParams`,
+`048_inductWrongCtorResParams`, `049_inductWrongCtorResLevel`,
+`050_inductInIndex`, `053_reduceCtorType`, `058_typeWithTooHighTypeField`
+(18 → 12 red). `051_indNeg` and `054_indNegReducible` remain (positivity).
+
+---
+
 ## 2026-07-12: projection type must be a single-constructor structure; clears arena bad/083_projNotStruct
 
 **File:** `tc.ml`, `infer` `Proj` case

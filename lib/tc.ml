@@ -1154,20 +1154,143 @@ and isDefEq_impl env e1 e2 =
   in
   result
 
-(* TODO: complete ctor checks. *)
+(* Constructor validation. Faithfully reproduces the header-consistency and
+   universe obligations of Lean's [check_constructors] (src/kernel/inductive.cpp,
+   the [while (is_pi(t))] loop and [is_valid_ind_app]): each constructor's
+   parameters must match the inductive's, each field must live in an acceptable
+   universe, and the manifest result must be [I params indices].
+
+   Strict positivity ([check_positivity] in inductive.cpp) is deliberately NOT
+   done here. The real kernel un-nests nested inductives before that check;
+   nyaya does not, so a naive port would false-reject valid nested inductives in
+   the good corpus. That obligation stays deferred -- see doc/soundness-risks.md
+   #3 -- so the two purely-positivity arena cases (bad/tutorial/051_indNeg,
+   054_indNegReducible) remain accepted, while the header/universe cases (047,
+   048, 049, 050, 053, 058) are now rejected. *)
 let check_ctor (decl : Decl.t) (env : Env.t) =
+  let module Logger = (val env.logger) in
   match decl with
-  | Decl.Ctor { num_params; inductive_name; _ } ->
+  | Decl.Ctor { info = ctor_info; inductive_name; num_params; _ } ->
     let inductive = Hashtbl.find env.tbl inductive_name in
+    let ind_info = Decl.get_decl_info inductive in
+    let num_idx =
+      match inductive with Decl.Inductive { num_idx; _ } -> num_idx | _ -> 0
+    in
     assert (num_params = Decl.get_inductive_num_params inductive);
-    (* TODO: stubs, always true. *)
-    let ensure_same_params = true (* ctor telescope's params match the inductive's. *) in
-    let non_param_as_sort = true (* each non-param binder infers as a Sort. *) in
-    let sort_le_inductive_sort = true (* each non-param binder's sort <= the inductive's, unless it's a Prop. *) in
-    let non_positive = true (* no non-positive occurrence of the inductive in a ctor argument. *) in
-    let end_of_telescope_match = true (* telescope ends in a valid application to the inductive. *) in
-    ensure_same_params && non_param_as_sort && sort_le_inductive_sort
-    && non_positive && end_of_telescope_match
+    (* Peel the inductive's own arity to build the shared parameter free
+       variables [m_params] and read off its resultant universe
+       [m_result_level] (Lean's [add_inductive_fn] ctor + [get_param_type]).
+       The arity was already validated by the [Inductive] arm of [check], so
+       this peeling reaches a [Sort]. *)
+    let m_params = ref [] in
+    let rec peel_ind k ty =
+      if k <= 0 then ty
+      else
+        match Expr.node (whnf env ty) with
+        | Expr.Forall { name; btype; binfo; body } ->
+          let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
+          if List.length !m_params < num_params then
+            m_params := !m_params @ [ fv ];
+          peel_ind (k - 1)
+            (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+        | _ -> ty
+    in
+    let ind_result = peel_ind (num_params + num_idx) ind_info.ty in
+    let m_result_level =
+      match Expr.node (whnf env ind_result) with
+      | Expr.Sort l -> l
+      | _ -> Level.Zero
+    in
+    let params_arr = Array.of_list !m_params in
+    let param_type i =
+      match Expr.node params_arr.(i) with
+      | Expr.FreeVar { expr; _ } -> expr
+      | _ -> assert false
+    in
+    (* [has_ind_occ]: does [e] mention the inductive being defined? Free
+       variables and other atoms are leaves, matching inductive.cpp's [find]. *)
+    let rec has_ind_occ (e : Expr.t) : bool =
+      match Expr.node e with
+      | Expr.Const { name; _ } -> name = inductive_name
+      | Expr.App (f, a) -> has_ind_occ f || has_ind_occ a
+      | Expr.Lam { btype; body; _ } | Expr.Forall { btype; body; _ } ->
+        has_ind_occ btype || has_ind_occ body
+      | Expr.Let { btype; value; body; _ } ->
+        has_ind_occ btype || has_ind_occ value || has_ind_occ body
+      | Expr.Proj { expr; _ } -> has_ind_occ expr
+      | Expr.BoundVar _ | Expr.FreeVar _ | Expr.Sort _ | Expr.Literal _ -> false
+    in
+    (* [is_valid_ind_app] (inductive.cpp:338): [t] is [I params indices] with
+       [I] the inductive being defined, applied with its own universe parameters
+       to exactly the shared parameter fvars, and no index mentioning [I].
+       Universe parameters are compared structurally by name -- nyaya's [Name.t]
+       is not interned, so the physical comparison in [Level.eq] is unreliable
+       across the separately-parsed inductive and constructor declarations. *)
+    let is_valid_ind_app t =
+      let head, args = Expr.get_apps t in
+      let head_ok =
+        match Expr.node head with
+        | Expr.Const { name; uparams } ->
+          name = inductive_name
+          && (try
+                List.for_all2
+                  (fun lvl nm ->
+                    match lvl with Level.Param p -> p = nm | _ -> false)
+                  uparams ind_info.uparams
+              with Invalid_argument _ -> false)
+        | _ -> false
+      in
+      head_ok
+      && List.length args = num_params + num_idx
+      &&
+      let params_args, index_args = CCList.take_drop num_params args in
+      (try List.for_all2 (fun a p -> a == p) params_args !m_params
+       with Invalid_argument _ -> false)
+      && not (List.exists has_ind_occ index_args)
+    in
+    (* Peel the constructor's telescope WITHOUT reducing it: [check_constructors]
+       loops on [is_pi] over the manifest type, never [whnf]-ing it
+       (bad/tutorial/053_reduceCtorType relies on this -- a constructor whose type
+       reduces to the inductive is still rejected because its manifest head is not
+       a [forall]/the inductive). Parameters are def-eq-checked against the
+       inductive's; fields are universe-checked. *)
+    let rec loop i t =
+      match Expr.node t with
+      | Expr.Forall { name; btype = dom; binfo; body } ->
+        let fv =
+          if i < num_params then begin
+            (* inductive.cpp:430 -- parameter binder must match the inductive's. *)
+            if not (isDefEq env dom (param_type i)) then
+              Logger.err
+                "check_ctor: parameter %d of %a does not match the inductive's"
+                (TypeError "constructor parameter does not match inductive")
+                (i + 1) Name.pp ctor_info.name;
+            params_arr.(i)
+          end
+          else begin
+            (* inductive.cpp:435-442 -- field sort <= inductive level, or the
+               inductive is a Prop (resultant level zero, large elimination). *)
+            let s = infer_sort_of env dom in
+            if not (Level.(s <= m_result_level) || Level.is_zero m_result_level)
+            then
+              Logger.err
+                "check_ctor: field %d of %a has a universe too big for the \
+                 inductive"
+                (TypeError "constructor field universe too big")
+                (i + 1) Name.pp ctor_info.name;
+            Expr.fvar name dom binfo (Nyaya_parser.Util.Uid.mk ())
+          end
+        in
+        loop (i + 1)
+          (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+      | _ ->
+        if is_valid_ind_app t then true
+        else
+          Logger.err "check_ctor: invalid return type for %a"
+            (TypeError "constructor has an invalid return type")
+            Name.pp ctor_info.name
+    in
+    loop 0 ctor_info.ty
   | _ -> Logger.err "Ctor check called on non-ctor declaration" (Failure "")
 
 let check (env : Env.t) (decl : Decl.t) : bool =
