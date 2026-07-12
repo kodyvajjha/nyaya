@@ -155,6 +155,11 @@ module MakeTrace (Data : TRACE_DATA) = struct
 
   let stack : frame list ref = ref []
 
+  (* Recursion depth, maintained as an O(1) counter. Kept in sync with [stack]
+     but used in place of [List.length !stack] so the per-call depth-limit check
+     does not cost O(depth) (which makes deep reductions O(depth^2)). *)
+  let depth = ref 0
+
   let next_id = ref 0
 
   let elide_ok =
@@ -176,13 +181,12 @@ module MakeTrace (Data : TRACE_DATA) = struct
       |> List.rev
       |> CCList.map (fun frame -> string_of_int frame.id)
     in
-    let depth = List.length !stack in
-    if depth > max_path_entries then
+    if !depth > max_path_entries then
       "..." ^ ">" ^ String.concat ">" entries
     else
       String.concat ">" entries
 
-  let current_depth () = List.length !stack
+  let current_depth () = !depth
 
   let enter (env : Data.env) (input : Data.input) : frame =
     let module Logger = (val Data.env_logger env) in
@@ -190,11 +194,11 @@ module MakeTrace (Data : TRACE_DATA) = struct
     let frame = { id; input } in
     incr next_id;
     stack := frame :: !stack;
-    let depth = current_depth () in
-    if depth > max_depth then (
+    incr depth;
+    if !depth > max_depth then (
       let msg =
         Printf.sprintf "[%s#%d] depth %d exceeds max %d, input=%s" Data.kind id
-          depth max_depth (Data.input_summary input)
+          !depth max_depth (Data.input_summary input)
       in
       Logger.app "DEPTH LIMIT: %s" msg;
       raise (Depth_limit msg)
@@ -209,13 +213,14 @@ module MakeTrace (Data : TRACE_DATA) = struct
        heavily-shared hash-consed DAG this can single-handedly OOM. See
        project_nyaya_oom_investigation memory / Vector.pmap_attach. *)
     if not elide_ok && Logs.level () = Some Logs.Debug then
-      Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id depth
+      Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id !depth
         (current_path ()) (Data.input_summary input);
     frame
 
   let leave_success (env : Data.env) (frame : frame) (output : Data.output) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
+    decr depth;
     if not elide_ok && Logs.level () = Some Logs.Debug then
       Logger.debug "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
         (current_depth ()) (current_path ())
@@ -224,6 +229,7 @@ module MakeTrace (Data : TRACE_DATA) = struct
   let leave_failure (env : Data.env) (frame : frame) (exn : exn) =
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
+    decr depth;
     match exn with
     | Depth_limit _ -> () (* already logged once at the point of origin *)
     | _ ->
