@@ -134,3 +134,40 @@ autoloop stopped here rather than half-building it.
 **Status:** unresolved; open architectural item. This is a *detected*
 unsoundness — `dune build @runtest` shows `bad/nat-rec-rules` red — unlike
 entry 1, which the current corpus does not catch.
+
+---
+
+## 3. Constructor validation (`check_ctor`) is stubbed to `true`
+
+**File:** `lib/tc.ml`, `check_ctor` (~line 1146). All five obligations are
+hardcoded `true`: `ensure_same_params`, `non_param_as_sort`,
+`sort_le_inductive_sort`, `non_positive`, `end_of_telescope_match`. Only the
+inductive's *arity* is now checked (see `doc/changelog.md`, 2026-07-12); the
+constructors themselves are not validated at all.
+
+**Why this is unsound:** a constructor with an ill-formed type lets you inhabit
+an inductive incorrectly. The arena cluster `bad/tutorial/047–058` (all
+expected **reject**, all currently **accepted**) exercises this:
+- `047_inductWrongCtorParams`, `048_inductWrongCtorResParams`,
+  `049_inductWrongCtorResLevel` — the constructor's parameter binders / result
+  arguments / result universe levels don't match the inductive's
+  (constructor-header consistency).
+- `050_inductInIndex`, `051_indNeg`, `054_indNegRec` — **strict positivity**:
+  the inductive occurs in an index position or to the left of an arrow in a
+  constructor field.
+- `053_reduceCtor…`, `058_typeWith…` — related constructor/reduction defects.
+
+**What a correctly-scoped version needs:** the constructor half of the kernel's
+inductive checker (`check_constructors` / positivity checking in
+`src/kernel/inductive.cpp`): validate each constructor's telescope against the
+shared parameter context, each field's sort against the inductive's sort, strict
+positivity of the inductive's occurrences, and the constructor's result shape
+`I params indices`. This is genuine architectural work (the plan's named
+stop-and-surface condition), not a localized patch — and doing it piecemeal
+risks both regressing valid inductives and rejecting the bad ones for an
+incidental reason that would silently flip back to accept later. **Deferred by
+the user (2026-07-12) to continue top-down with the localized duplicate-name
+reds (`126–133`); this cluster is left for a scoped build-out.**
+
+**Status:** unresolved; open architectural item, detected (cluster
+`bad/tutorial/047–058` red).
