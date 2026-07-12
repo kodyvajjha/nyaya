@@ -149,47 +149,36 @@ unsoundness — `dune build @runtest` shows `bad/nat-rec-rules`, `bad/130`,
 
 ---
 
-## 3. Constructor strict positivity (`check_positivity`) is not done
+## 3. Strict positivity is not checked for *nested* inductives
 
-**File:** `lib/tc.ml`, `check_ctor` (~line 1157).
+**File:** `lib/tc.ml`, `check_ctor`.
 
-**Update (2026-07-12):** `check_ctor` no longer stubs everything to `true`. The
-header-consistency and universe obligations are now a faithful port of Lean's
-`check_constructors` — parameter binders def-eq the inductive's, field universes
-`≤` the inductive's (or `Prop`), and the manifest result is `is_valid_ind_app`
-(correct head const with its universe params, correct parameter fvars, no
-inductive occurrence in the result indices). That cleared the header/universe
-half of the old cluster: `bad/tutorial/047, 048, 049, 050, 053, 058` (see
-`doc/changelog.md`). The remaining gap is **strict positivity only**.
+**Update (2026-07-12):** `check_ctor` now checks strict positivity of every
+constructor field (`check_positivity`): the inductive may not occur to the left
+of an arrow, and may otherwise occur only as a plain recursive application. That
+cleared the detected cases `bad/tutorial/051_indNeg`, `054_indNegReducible`, and
+`111_reflOccLeft` (see `doc/changelog.md`). Together with the earlier
+header/universe checks, the whole detected 047–058/111 cluster is now rejected.
 
-**Why this is unsound:** a constructor field with a non-positive occurrence of
-the inductive (the inductive to the left of an arrow) lets you derive `False`.
-Two arena cases (both expected **reject**, both currently **accepted**) exercise
-exactly this:
-- `051_indNeg` — the classic negative occurrence: a field of type
-  `(I → I) → I`, with `I` to the left of the inner arrow.
-- `054_indNegReducible` — a negative occurrence nested inside a head-normal form
-  that *could* reduce it away (`constType aType I → I`); the kernel treats it as
-  negative anyway, without reducing past hnf.
-- `111_reflOccLeft` — a recursive occurrence to the left of an arrow inside a
-  constructor field (`Nat → (I → Nat)`), i.e. the same negative-occurrence
-  defect via a function-typed field.
+**Remaining gap — nested inductives.** The positivity check is gated on
+`num_nested = 0`. The real kernel un-nests nested inductives into fresh
+parameters *before* checking positivity; nyaya does not un-nest, so running the
+check on a nested field (e.g. `List I`) would false-reject it — the recursive
+occurrence sits inside `List` rather than being a bare `I params indices`. The
+export's `num_nested` count is the kernel's own signal for whether un-nesting is
+needed, so positivity runs only when it is zero. **Consequently a nested
+inductive skips positivity entirely and an unsound nested occurrence would be
+accepted.**
 
-**Why it was NOT ported with the rest:** the kernel's `check_positivity` runs
-*after* `add_inductive_fn` un-nests nested inductives into fresh auxiliary
-parameters. nyaya reads inductives straight from the export and does **not**
-un-nest, so a naive port of `check_positivity` — which only accepts recursive
-occurrences that are literally `I params indices` via `is_valid_ind_app` — would
-false-reject the valid nested inductives in the good corpus (e.g. a field of
-type `List (Tree a)`). Positivity is the plan's named stop-and-surface
-architectural item, and it is coupled to the missing nested-inductive support.
+**Why this is (still) unsound:** a nested inductive can encode a non-positive
+occurrence through the nesting type, and nyaya would not catch it. No arena case
+currently exercises this (the corpus's positivity cases are all `num_nested =
+0`), so unlike before, this gap is **undetected** by `dune build @runtest`.
 
 **What a correctly-scoped version needs:** the nested-inductive un-nesting the
-real kernel performs before `check_positivity`, then the positivity recursion
-itself (`check_positivity` in `src/kernel/inductive.cpp`: whnf to hnf; if a
-`pi`, the domain must have no inductive occurrence and recurse into the body;
-else it must be a valid recursive application).
+real kernel performs before `check_positivity` (specialising each nesting
+container into an auxiliary inductive), after which the existing positivity
+recursion would apply directly.
 
-**Status:** unresolved; open architectural item, detected (`bad/tutorial/051`,
-`054`, `111` red). Narrowed from the original 047–058 cluster to positivity
-only.
+**Status:** unresolved; open architectural item, **undetected** (no red test).
+Narrowed from the original 047–058 cluster to nested-inductive positivity only.

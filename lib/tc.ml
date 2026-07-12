@@ -1183,6 +1183,11 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
     let num_idx =
       match inductive with Decl.Inductive { num_idx; _ } -> num_idx | _ -> 0
     in
+    let num_nested =
+      match inductive with
+      | Decl.Inductive { num_nested; _ } -> num_nested
+      | _ -> 0
+    in
     assert (num_params = Decl.get_inductive_num_params inductive);
     (* Peel the inductive's arity to recover the shared parameter free variables
        and its resultant universe level. *)
@@ -1250,6 +1255,35 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
        with Invalid_argument _ -> false)
       && not (List.exists has_ind_occ index_args)
     in
+    (* Strict positivity of a field's type: the inductive may occur only in the
+       result of a function type (never to the left of an arrow) and only as a
+       plain recursive application. Reduces to head-normal form but no further, so
+       an occurrence that could be reduced away still counts. Only sound for
+       inductives with no nested occurrences: a nested one (e.g. a field of type
+       [List I]) is rejected by the final case here, but the real kernel un-nests
+       it into a fresh parameter first, which nyaya does not do -- so the check is
+       gated on [num_nested = 0] below. *)
+    let rec check_positivity t =
+      let t = whnf env t in
+      if not (has_ind_occ t) then ()
+      else
+        match Expr.node t with
+        | Expr.Forall { name; btype = dom; binfo; body } ->
+          if has_ind_occ dom then
+            Logger.err
+              "check_ctor: non-positive occurrence of %a in a field of %a"
+              (TypeError "constructor has a non-positive occurrence")
+              Name.pp inductive_name Name.pp ctor_info.name;
+          let fv = Expr.fvar name dom binfo (Nyaya_parser.Util.Uid.mk ()) in
+          check_positivity
+            (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
+        | _ ->
+          if not (is_valid_ind_app t) then
+            Logger.err
+              "check_ctor: invalid occurrence of %a in a field of %a"
+              (TypeError "constructor has an invalid recursive occurrence")
+              Name.pp inductive_name Name.pp ctor_info.name
+    in
     (* Peel the constructor's telescope without reducing it -- the type must be
        manifest foralls, so a type that merely reduces to the inductive is still
        rejected. Parameters are def-eq-checked against the inductive's; fields
@@ -1276,6 +1310,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
                  inductive"
                 (TypeError "constructor field universe too big")
                 (i + 1) Name.pp ctor_info.name;
+            if num_nested = 0 then check_positivity dom;
             Expr.fvar name dom binfo (Nyaya_parser.Util.Uid.mk ())
           end
         in

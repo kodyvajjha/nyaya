@@ -5,6 +5,44 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: strict positivity for non-nested inductives; clears arena bad/051, 054, 111
+
+**File:** `tc.ml`, `check_ctor`
+
+**Problem:** A constructor field in which the inductive occurs to the left of an
+arrow (a non-positive occurrence) makes the type logically inconsistent. This
+was the remaining unchecked constructor obligation, so the arena cases
+`051_indNeg` (`(I → I) → I`), `054_indNegReducible` (a negative occurrence
+hidden behind a reducible `constType aType I → I`), and `111_reflOccLeft`
+(`Nat → (I → Nat)`) were **accepted**.
+
+**Fix:** Add `check_positivity`, run on each constructor field. It reduces the
+field to head-normal form (so a negative occurrence that could otherwise be
+reduced away, as in `054`, still counts) and then: a function type's domain may
+not mention the inductive (recurse into its result), a plain recursive
+application is fine, and anything else mentioning the inductive is rejected.
+
+**Gated on `num_nested = 0`.** The real kernel un-nests nested inductives into
+fresh parameters before checking positivity; nyaya does not un-nest, so a naive
+check would false-reject a valid nested field such as `List I`. The
+`num_nested` count (from the export) is exactly the kernel's signal for whether
+un-nesting is needed, so positivity runs only when it is zero. Nested
+inductives therefore still skip the check — a remaining over-permissive gap, now
+the sole content of `doc/soundness-risks.md` #3.
+
+Verified no false-reject on valid recursive inductives in the good corpus
+(`035_twoBool`, `052_reduceCtorParam` with recursive `constType (I α) (I α)`
+fields, the `*Rec` cases, etc. all still accept).
+
+**Kernel reference:** `src/kernel/inductive.cpp` `check_positivity` (whnf; `pi`
+with an inductive-free domain recurses; a valid recursive application is
+accepted; otherwise reject) and its `!m_is_unsafe` / nested-inductive handling.
+
+**Cases unblocked:** arena `bad/tutorial/051_indNeg`, `054_indNegReducible`,
+`111_reflOccLeft` (8 → 5 red).
+
+---
+
 ## 2026-07-12: restrict projections out of a proposition; clears arena bad/085, 087, 088, 089
 
 **File:** `tc.ml`, `infer` `Proj` case
