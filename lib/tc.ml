@@ -776,8 +776,20 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let inductive_info = Hashtbl.find env.tbl name in
       let ctor_names = Decl.get_inductive_ctors inductive_info in
       let ctor_num_params = Decl.get_inductive_num_params inductive_info in
-      (* This inductive should only have the one constructor since it's claiming to be a structure. *)
-      assert (CCList.length ctor_names = 1);
+      (* A projection is only valid when its type is a structure: an inductive
+         with exactly one constructor. The kernel's [infer_proj]
+         (src/kernel/type_checker.cpp) throws [invalid_proj_exception] when
+         [length(I_val.get_cnstrs()) != 1]. Previously nyaya [assert]ed this,
+         crashing (checker error) on a projection of a multi-constructor
+         inductive such as bad/tutorial/083_projNotStruct (projecting an [N]
+         with [zero]/[succ]); raise a [TypeError] so the verdict is [Reject]. *)
+      if CCList.length ctor_names <> 1 then
+        Logger.err
+          "infer Proj: type %a is not a single-constructor structure (%d \
+           constructors)"
+          (TypeError "infer Proj: type is not a single-constructor structure")
+          Name.pp name
+          (CCList.length ctor_names);
       let ctor_info = ctor_names |> CCList.hd |> Hashtbl.find env.tbl in
       let ctor_info_type = ctor_info |> Decl.get_type in
       let ctor_uparams = CCList.map Level.param (Decl.get_uparams ctor_info) in

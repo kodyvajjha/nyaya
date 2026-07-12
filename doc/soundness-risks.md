@@ -131,9 +131,21 @@ work (recursor-rule reconstruction), not a localized patch — flagged in
 `doc/arena-correctness-loop-plan.md` as a stop-and-surface condition. The
 autoloop stopped here rather than half-building it.
 
+**2026-07-12 — recursor naming/generation (`bad/130`, `bad/131`):** Because
+nyaya reads recursors from the export instead of generating them, it also can't
+catch a *misnamed* or *duplicated* recursor. `130_misnamed_rec_user` ships the
+recursor as `misnamed_rec.not_rec` (a real kernel recursor is always generated
+as `<inductive>.rec`) and a def that uses it; `131_dup_rec_def2` additionally
+puts a plain `def` on the reserved `dup_rec_def2.rec` name. A sound kernel
+generates `<inductive>.rec` and rejects the clash / the missing-canonical
+recursor. A pure name-suffix heuristic ("a `Decl.Rec` must be named `.rec`")
+would catch both but has no kernel citation (the kernel *generates* the name,
+never *checks* an incoming one), so it is RISKY and was not committed. These two
+belong with this recursor-reconstruction item.
+
 **Status:** unresolved; open architectural item. This is a *detected*
-unsoundness — `dune build @runtest` shows `bad/nat-rec-rules` red — unlike
-entry 1, which the current corpus does not catch.
+unsoundness — `dune build @runtest` shows `bad/nat-rec-rules`, `bad/130`,
+`bad/131` red — unlike entry 1, which the current corpus does not catch.
 
 ---
 

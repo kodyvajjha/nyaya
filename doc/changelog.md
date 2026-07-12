@@ -5,6 +5,25 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: projection type must be a single-constructor structure; clears arena bad/083_projNotStruct
+
+**File:** `tc.ml`, `infer` `Proj` case
+
+**Problem:** `bad/tutorial/083_projNotStruct` projects field 0 of an `x : N`
+where `N` is a two-constructor inductive (`zero`/`succ`). A projection is only
+valid on a *structure* — an inductive with exactly one constructor. nyaya
+`assert`ed `CCList.length ctor_names = 1`, so it **crashed** (assertion failure,
+checker-error exit 3) instead of rejecting.
+
+**Fix:** Replace the assertion with a real check: if the projected type's
+inductive does not have exactly one constructor, raise `TypeError` (→ `Reject`).
+
+**Kernel reference:** Lean's `infer_proj` (`src/kernel/type_checker.cpp`) throws
+`invalid_proj_exception` when `length(I_val.get_cnstrs()) != 1` (also when the
+head is not a constant/inductive, or the argument count ≠ params+indices).
+
+**Case unblocked:** arena `bad/tutorial/083_projNotStruct` (19 → 18 red).
+
 ## 2026-07-12: reject duplicate declaration names; clears arena bad/126–129, 133
 
 **File:** `env.ml` (new `duplicates` field + detection), `tc.ml`
