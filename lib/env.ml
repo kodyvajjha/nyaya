@@ -4,9 +4,8 @@ type t = {
   tbl: (Name.t, Decl.t) Hashtbl.t;
   logger: (module LOGGER);
   duplicates: Name.t list;
-      (** Names declared more than once in the export. The kernel rejects the
-          second declaration of a name; we collect the collisions during
-          construction (resolution silently dedupes them) so the verdict layer
+      (** Names declared more than once in the export, collected here during
+          construction (resolution otherwise dedupes them) so the verdict layer
           can reject the file. *)
 }
 
@@ -250,12 +249,10 @@ let table
       | None -> failwith "Decl resolution failed")
   in
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) decl_table;
-  (* Duplicate-name detection: the kernel's [environment::add]
-     (src/kernel/environment.cpp) throws [already_declared] if a declaration's
-     name is already present. [decl_table] is built with [Hashtbl.add], so a
-     name declared more than once appears as several bindings under the same
-     name id; [resolve] collapses them into one [resolved_table] entry, so we
-     detect the collision from [decl_table] here. *)
+  (* Duplicate-name detection: [decl_table] is built with [Hashtbl.add], so a
+     name declared more than once appears as several bindings under the same name
+     id. [resolve] collapses them into one [resolved_table] entry, so we detect
+     the collision from [decl_table] here instead. *)
   let duplicates =
     let seen = Hashtbl.create 16 in
     let dup_nids = ref [] in

@@ -711,13 +711,9 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       match Hashtbl.find_opt env.tbl name with
       | Some d -> d
       | None ->
-        (* Referencing a constant absent from the environment is a kernel-level
-           type error, not a nyaya bug: Lean's [type_checker::infer_constant]
-           calls [env().get(const_name(e))], and [environment::get] throws
-           [unknown_constant_exception] when the name is not present
-           (src/kernel/environment.cpp), which fails the declaration. Raise a
-           [TypeError] so the arena verdict is [Reject] rather than an escaping
-           [Not_found] that maps to a checker-error exit code. *)
+        (* Referencing a constant absent from the environment is a type error,
+           not a nyaya bug. Raise a [TypeError] (so the verdict is [Reject])
+           rather than let a [Not_found] escape as a checker error. *)
         Logger.err "infer Const: unknown constant %a"
           (TypeError "infer Const: unknown constant") Name.pp name
     in
@@ -777,12 +773,8 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let ctor_names = Decl.get_inductive_ctors inductive_info in
       let ctor_num_params = Decl.get_inductive_num_params inductive_info in
       (* A projection is only valid when its type is a structure: an inductive
-         with exactly one constructor. The kernel's [infer_proj]
-         (src/kernel/type_checker.cpp) throws [invalid_proj_exception] when
-         [length(I_val.get_cnstrs()) != 1]. Previously nyaya [assert]ed this,
-         crashing (checker error) on a projection of a multi-constructor
-         inductive such as bad/tutorial/083_projNotStruct (projecting an [N]
-         with [zero]/[succ]); raise a [TypeError] so the verdict is [Reject]. *)
+         with exactly one constructor. Raise a [TypeError] (verdict [Reject])
+         otherwise, rather than crashing on a multi-constructor inductive. *)
       if CCList.length ctor_names <> 1 then
         Logger.err
           "infer Proj: type %a is not a single-constructor structure (%d \
@@ -1154,19 +1146,11 @@ and isDefEq_impl env e1 e2 =
   in
   result
 
-(* Constructor validation. Faithfully reproduces the header-consistency and
-   universe obligations of Lean's [check_constructors] (src/kernel/inductive.cpp,
-   the [while (is_pi(t))] loop and [is_valid_ind_app]): each constructor's
-   parameters must match the inductive's, each field must live in an acceptable
-   universe, and the manifest result must be [I params indices].
-
-   Strict positivity ([check_positivity] in inductive.cpp) is deliberately NOT
-   done here. The real kernel un-nests nested inductives before that check;
-   nyaya does not, so a naive port would false-reject valid nested inductives in
-   the good corpus. That obligation stays deferred -- see doc/soundness-risks.md
-   #3 -- so the two purely-positivity arena cases (bad/tutorial/051_indNeg,
-   054_indNegReducible) remain accepted, while the header/universe cases (047,
-   048, 049, 050, 053, 058) are now rejected. *)
+(* Validate a constructor: its parameters must match the inductive's, each field
+   must live in a universe no larger than the inductive's (unless the inductive
+   is a Prop), and its result must apply the inductive to those parameters and
+   its indices. Strict positivity of the inductive's occurrences is not yet
+   checked -- see doc/soundness-risks.md #3. *)
 let check_ctor (decl : Decl.t) (env : Env.t) =
   let module Logger = (val env.logger) in
   match decl with
@@ -1177,11 +1161,8 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
       match inductive with Decl.Inductive { num_idx; _ } -> num_idx | _ -> 0
     in
     assert (num_params = Decl.get_inductive_num_params inductive);
-    (* Peel the inductive's own arity to build the shared parameter free
-       variables [m_params] and read off its resultant universe
-       [m_result_level] (Lean's [add_inductive_fn] ctor + [get_param_type]).
-       The arity was already validated by the [Inductive] arm of [check], so
-       this peeling reaches a [Sort]. *)
+    (* Peel the inductive's arity to recover the shared parameter free variables
+       and its resultant universe level. *)
     let m_params = ref [] in
     let rec peel_ind k ty =
       if k <= 0 then ty
@@ -1207,8 +1188,8 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
       | Expr.FreeVar { expr; _ } -> expr
       | _ -> assert false
     in
-    (* [has_ind_occ]: does [e] mention the inductive being defined? Free
-       variables and other atoms are leaves, matching inductive.cpp's [find]. *)
+    (* Whether [e] mentions the inductive being defined; free variables and
+       other atoms are leaves. *)
     let rec has_ind_occ (e : Expr.t) : bool =
       match Expr.node e with
       | Expr.Const { name; _ } -> name = inductive_name
@@ -1220,12 +1201,10 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
       | Expr.Proj { expr; _ } -> has_ind_occ expr
       | Expr.BoundVar _ | Expr.FreeVar _ | Expr.Sort _ | Expr.Literal _ -> false
     in
-    (* [is_valid_ind_app] (inductive.cpp:338): [t] is [I params indices] with
-       [I] the inductive being defined, applied with its own universe parameters
-       to exactly the shared parameter fvars, and no index mentioning [I].
-       Universe parameters are compared structurally by name -- nyaya's [Name.t]
-       is not interned, so the physical comparison in [Level.eq] is unreliable
-       across the separately-parsed inductive and constructor declarations. *)
+    (* Whether [t] applies the inductive (with its own universe parameters) to
+       exactly the shared parameter fvars and its indices, with no index
+       mentioning the inductive. Universe parameters are compared structurally by
+       name, since [Name.t] is not interned. *)
     let is_valid_ind_app t =
       let head, args = Expr.get_apps t in
       let head_ok =
@@ -1248,18 +1227,15 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
        with Invalid_argument _ -> false)
       && not (List.exists has_ind_occ index_args)
     in
-    (* Peel the constructor's telescope WITHOUT reducing it: [check_constructors]
-       loops on [is_pi] over the manifest type, never [whnf]-ing it
-       (bad/tutorial/053_reduceCtorType relies on this -- a constructor whose type
-       reduces to the inductive is still rejected because its manifest head is not
-       a [forall]/the inductive). Parameters are def-eq-checked against the
-       inductive's; fields are universe-checked. *)
+    (* Peel the constructor's telescope without reducing it -- the type must be
+       manifest foralls, so a type that merely reduces to the inductive is still
+       rejected. Parameters are def-eq-checked against the inductive's; fields
+       are universe-checked. *)
     let rec loop i t =
       match Expr.node t with
       | Expr.Forall { name; btype = dom; binfo; body } ->
         let fv =
           if i < num_params then begin
-            (* inductive.cpp:430 -- parameter binder must match the inductive's. *)
             if not (isDefEq env dom (param_type i)) then
               Logger.err
                 "check_ctor: parameter %d of %a does not match the inductive's"
@@ -1268,8 +1244,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
             params_arr.(i)
           end
           else begin
-            (* inductive.cpp:435-442 -- field sort <= inductive level, or the
-               inductive is a Prop (resultant level zero, large elimination). *)
+            (* field sort <= inductive level, or the inductive is a Prop. *)
             let s = infer_sort_of env dom in
             if not (Level.(s <= m_result_level) || Level.is_zero m_result_level)
             then
@@ -1306,13 +1281,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     ans
   | Thm { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
-    (* A theorem's type must be a proposition. Lean's [environment.cpp]
-       [add_theorem] does exactly this before checking the proof:
-       [if (!checker.is_prop(type)) throw theorem_type_is_not_prop(...)], where
-       [is_prop(e) = whnf(infer_type(e)) == mk_Prop()]. Definitions carry no
-       such restriction. Without it nyaya accepts a [thmDecl] whose type is,
-       e.g., [Sort 0] itself (whose type is [Sort 1], not a Prop) --
-       bad/tutorial/011_nonPropThm. *)
+    (* A theorem's type must be a proposition (unlike a definition's). *)
     (match Expr.node (whnf env (infer env info.ty)) with
     | Expr.Sort u when Level.is_zero u -> ()
     | _ ->
@@ -1341,18 +1310,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Rec _ -> (* TODO: what goes here? *) true
   | Inductive { info; num_params; num_idx; _ } ->
     (* An inductive's type must be an arity: a Pi-telescope of exactly
-       [num_params] parameters followed by [num_idx] indices, ending in a sort.
-       The kernel's [check_inductive_types] (src/kernel/inductive.cpp) peels the
-       parameters and indices one Pi at a time
-       ([type = instantiate(binding_body(type), ...); type = whnf(type);]),
-       throws "number of parameters mismatch" if it runs out of Pis before
-       consuming all declared parameters/indices, and finishes with
-       [type = ensure_sort(type)], which throws if the conclusion is not a
-       [Sort]. Two ways this is violated by the corpus:
-       - the whole type is a non-sort constant
-         (bad/tutorial/044_inductBadNonSort2: type := aType : Sort 1);
-       - fewer Pi binders than the declared parameter count
-         (bad/tutorial/046_inductTooFewParams: numParams = 2, type = one Pi). *)
+       [num_params] parameters followed by [num_idx] indices, ending in a sort. *)
     let rec peel k ty =
       match Expr.node (whnf env ty) with
       | Expr.Forall { name; btype; binfo; body } when k > 0 ->
@@ -1420,9 +1378,7 @@ let check_env_verdict (env : Env.t) : verdict =
   let exception Found_reject of string in
   let declined = ref None in
   let iter = env.tbl |> Iter.of_hashtbl in
-  (* A name declared more than once makes the file invalid: the kernel rejects
-     the second [environment::add] of an existing name. Env construction records
-     these collisions (resolution otherwise dedupes them away). *)
+  (* A name declared more than once makes the file invalid. *)
   match env.duplicates with
   | dup :: _ ->
     Reject (CCFormat.sprintf "%a: duplicate declaration name" Name.pp dup)
