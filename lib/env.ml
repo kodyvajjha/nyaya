@@ -3,6 +3,11 @@ module type LOGGER = Nyaya_parser.Util.LOGGER
 type t = {
   tbl: (Name.t, Decl.t) Hashtbl.t;
   logger: (module LOGGER);
+  duplicates: Name.t list;
+      (** Names declared more than once in the export. The kernel rejects the
+          second declaration of a name; we collect the collisions during
+          construction (resolution silently dedupes them) so the verdict layer
+          can reject the file. *)
 }
 
 let logger (env : t) = env.logger
@@ -245,9 +250,26 @@ let table
       | None -> failwith "Decl resolution failed")
   in
   Hashtbl.iter (fun nid _ -> ignore (resolve nid)) decl_table;
+  (* Duplicate-name detection: the kernel's [environment::add]
+     (src/kernel/environment.cpp) throws [already_declared] if a declaration's
+     name is already present. [decl_table] is built with [Hashtbl.add], so a
+     name declared more than once appears as several bindings under the same
+     name id; [resolve] collapses them into one [resolved_table] entry, so we
+     detect the collision from [decl_table] here. *)
+  let duplicates =
+    let seen = Hashtbl.create 16 in
+    let dup_nids = ref [] in
+    Hashtbl.iter
+      (fun nid _ ->
+        if Hashtbl.mem seen nid then (
+          if not (List.mem nid !dup_nids) then dup_nids := nid :: !dup_nids)
+        else Hashtbl.add seen nid ())
+      decl_table;
+    CCList.filter_map (fun nid -> CCHashtbl.get name_table nid) !dup_nids
+  in
   Logger.info "Finished environment construction. Total number of mappings: %d"
     (Hashtbl.length decl_table);
-  { tbl = resolved_table; logger }
+  { tbl = resolved_table; logger; duplicates }
 
 let mk (ast : Ast.t) : t =
   let name_table = Name.table ast in

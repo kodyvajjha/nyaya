@@ -5,6 +5,32 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: reject duplicate declaration names; clears arena bad/126–129, 133
+
+**File:** `env.ml` (new `duplicates` field + detection), `tc.ml`
+`check_env_verdict`
+
+**Problem:** The arena `dup_*` cases declare the same name twice (e.g.
+`126_dup_defs` ships two identical `def dup_defs`; `128_dup_ctor_def`,
+`129_dup_rec_def`, `133_DupConCon` duplicate a constructor/recursor name). nyaya
+accepted them: env construction stores declarations in a table built with
+`Hashtbl.add` and resolution dedupes multiple bindings of a name into one
+`resolved_table` entry, so the collision was silently dropped and never became a
+verdict.
+
+**Fix:** During env construction, detect any name id with more than one binding
+in `decl_table` and record the offending `Name.t`s in a new `Env.t.duplicates`
+field. `check_env_verdict` returns `Reject` when it is non-empty.
+
+**Kernel reference:** Lean's `environment::add` (`src/kernel/environment.cpp`)
+throws `already_declared_exception` when a declaration's name is already present
+in the environment — a duplicate name makes the file invalid.
+
+**Cases unblocked:** arena `bad/tutorial/126_dup_defs`, `127_dup_ind_def`,
+`128_dup_ctor_def`, `129_dup_rec_def`, `133_DupConCon` (24 → 19 red).
+`130_misnamed_rec_user` and `131_dup_rec_def2` encode a different defect and
+remain.
+
 ## 2026-07-12: inductive type must be an arity ending in a sort; clears arena bad/044_inductBadNonSort2
 
 **File:** `tc.ml`, `check` `Inductive` case (was hardcoded `true`)

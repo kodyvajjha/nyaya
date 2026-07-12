@@ -1285,6 +1285,13 @@ let check_env_verdict (env : Env.t) : verdict =
   let exception Found_reject of string in
   let declined = ref None in
   let iter = env.tbl |> Iter.of_hashtbl in
+  (* A name declared more than once makes the file invalid: the kernel rejects
+     the second [environment::add] of an existing name. Env construction records
+     these collisions (resolution otherwise dedupes them away). *)
+  match env.duplicates with
+  | dup :: _ ->
+    Reject (CCFormat.sprintf "%a: duplicate declaration name" Name.pp dup)
+  | [] ->
   try
     Iter.iter2
       (fun n d ->
