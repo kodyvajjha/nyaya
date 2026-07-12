@@ -63,6 +63,37 @@ proposed with its own kernel citation and lands as its own entry here
 (narrowing it) or in `doc/changelog.md` (replacing it with the correctly
 scoped version).
 
+**2026-07-12 — arena `bad/proj-of-prop` and the coupling to a `whnf`
+incompleteness (discovered while attempting the fix):** This shortcut is
+*directly* the reason nyaya wrongly **accepts** `bad/proj-of-prop`
+(expected reject): it builds `Wrapper.mk True.intro` where
+`Wrapper.mk : False → Wrapper`, and because the binder type `False` is a
+Prop, the argument `True.intro : True` is never checked against it, so the
+subsequent `.p` projection yields a proof of `False`. The kernel-faithful
+fix is exactly what this entry's "correctly-scoped version" says and what
+`type_checker.cpp`'s `infer_app` does: infer the argument's type and require
+`is_def_eq(a_type, d_type)` for *every* argument, with no Prop special-case.
+Implemented naively (always check), it correctly rejects `proj-of-prop`
+(`True` ≢ `False`) — **but it regresses the good perf case
+`good/perf/grind-ring-5`**, which then falsely rejects at `Nat.div_eq`. The
+failing obligation there is `is_def_eq` between `Eq Nat (Nat.div x y) (ite …)`
+(the binder type) and `Eq Nat (dite (0<y) … ) (ite …)` (the argument's
+inferred type): defeq only if `Nat.div x y` unfolds to its `dite` form on
+*symbolic* `x`, `y`. nyaya deliberately guards `Nat.div`/other Nat builtins
+against delta-unfolding on symbolic arguments (to avoid non-termination — see
+`doc/changelog.md` and the memory note on that guard), so its `whnf`/`isDefEq`
+cannot discharge `Nat.div_eq` at all. `grind-ring-5` was therefore passing
+*only because* this unsound Prop-skip hid that incompleteness.
+
+So removing this unsoundness is blocked behind a real `whnf`/`isDefEq`
+completeness improvement: reduce a guarded Nat builtin like `Nat.div` by
+exactly one definitional (equation-lemma) step when needed, without
+reintroducing the non-termination the guard exists to prevent. That is
+architectural, adjacent to a known hazard, and out of scope for a localized
+loop fix — the autoloop reverted the naive change (no regression left) and
+deferred `proj-of-prop` behind this item rather than either shipping an
+unsound accept or a good-case regression.
+
 ---
 
 ## 2. Exported recursor reduction rules are trusted, not reconstructed
