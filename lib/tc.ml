@@ -1171,6 +1171,18 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     ans
   | Thm { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
+    (* A theorem's type must be a proposition. Lean's [environment.cpp]
+       [add_theorem] does exactly this before checking the proof:
+       [if (!checker.is_prop(type)) throw theorem_type_is_not_prop(...)], where
+       [is_prop(e) = whnf(infer_type(e)) == mk_Prop()]. Definitions carry no
+       such restriction. Without it nyaya accepts a [thmDecl] whose type is,
+       e.g., [Sort 0] itself (whose type is [Sort 1], not a Prop) --
+       bad/tutorial/011_nonPropThm. *)
+    (match Expr.node (whnf env (infer env info.ty)) with
+    | Expr.Sort u when Level.is_zero u -> ()
+    | _ ->
+      Logger.err "check Thm: theorem type %a is not a proposition"
+        (TypeError "theorem type is not a proposition") Expr.pp info.ty);
     let inf = (infer env value) in
     Logger.app "Inference complete";
     let ans = isDefEq env (inf) info.ty in

@@ -5,6 +5,30 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: theorem type must be a proposition; clears arena bad/011_nonPropThm
+
+**File:** `tc.ml`, `check` `Thm` case
+
+**Problem:** The arena case `bad/tutorial/011_nonPropThm` is a `thmDecl` whose
+`type` is `Sort 0` (i.e. `Prop`) — but `Prop`'s own type is `Sort 1`, so `Prop`
+is not a proposition, and a theorem's type must be one. nyaya accepted it: the
+`Thm` branch only inferred the proof's type and checked it defeq to the
+declared type (which succeeds here — the proof `∀ x : Prop, x` does have type
+`Prop`), but never checked that the *type itself* is a proposition.
+
+**Fix:** In `check`'s `Thm` branch, before checking the proof, require the
+theorem's type to be a proposition: `whnf (infer info.ty)` must be `Sort 0`,
+else raise `TypeError "theorem type is not a proposition"` (→ `Reject`).
+Definitions (`Def`) deliberately keep no such restriction.
+
+**Kernel reference:** Lean's `environment.cpp` `add_theorem` performs exactly
+this check, and only for theorems:
+`if (!checker.is_prop(type)) throw theorem_type_is_not_prop(*this, v.get_name(), type);`
+where `is_prop(e) = whnf(infer_type(e)) == mk_Prop()`
+(`type_checker.cpp`). The safe-definition path omits it.
+
+**Case unblocked:** arena `bad/tutorial/011_nonPropThm` (27 → 26 red).
+
 ## 2026-07-11: `infer` rejects (not crashes) on an unknown constant; clears arena bad/large-elim-param
 
 **File:** `tc.ml`, `infer_impl` `Const` case
