@@ -368,21 +368,40 @@ module Reduce = struct
     match Expr.node hd with
     | Expr.Const { name; _ } ->
       let mk_name s1 s2 = Name.Str (Name.Str (Name.Anon, s1), s2) in
-      let as_nat_lit e =
-        match Expr.node (whnf env e) with
+      (* Cheap, whnf-free test that an argument can never compute to a literal,
+         used to bail out of a Nat op before forcing the other argument. *)
+      let obviously_not_lit e =
+        match Expr.node e with
+        | Expr.FreeVar _ | Expr.Lam _ | Expr.Forall _ | Expr.Sort _ -> true
+        | _ -> false
+      in
+      (* Recover a concrete literal, looking through [Nat.succ] chains; returns
+         [None] on a symbolic argument rather than forcing it. *)
+      let rec as_nat_lit e =
+        if obviously_not_lit e then None
+        else
+        let e = whnf env e in
+        match Expr.node e with
         | Expr.Literal (Expr.NatLit n) -> Some n
+        | Expr.App _ -> (
+          match Expr.get_apps e with
+          | shd, [ y ] -> (
+            match Expr.node shd with
+            | Expr.Const { name = sn; _ } when sn = mk_name "Nat" "succ" -> (
+              match as_nat_lit y with
+              | Some k -> Some (Z.succ k)
+              | None -> None)
+            | _ -> None)
+          | _ -> None)
         | _ -> None
       in
       let bool_const b =
         Expr.const (mk_name "Bool" (if b then "true" else "false"))
       in
-      let unary f =
-        match args with
-        | [a] -> (match as_nat_lit a with Some n -> Some (f n) | None -> None)
-        | _ -> None
-      in
       let binary f =
         match args with
+        (* Bail before forcing if either argument obviously isn't a literal. *)
+        | [ a; b ] when obviously_not_lit a || obviously_not_lit b -> None
         | [a; b] ->
           (match as_nat_lit a, as_nat_lit b with
           | Some m, Some n -> Some (f m n)
@@ -391,7 +410,14 @@ module Reduce = struct
       in
       (match name with
       | n when n = mk_name "Nat" "succ" ->
-        unary (fun n -> Expr.natlit (Z.succ n))
+        (* Fold into a literal only when the argument is already one; [succ] is a
+           constructor, so [succ x] with symbolic [x] is already in whnf. *)
+        (match args with
+        | [ a ] -> (
+          match Expr.node a with
+          | Expr.Literal (Expr.NatLit n) -> Some (Expr.natlit (Z.succ n))
+          | _ -> None)
+        | _ -> None)
       | n when n = mk_name "Nat" "add" ->
         (match binary (fun m n -> Expr.natlit (Z.add m n)) with
         | Some _ as r -> r
@@ -617,15 +643,7 @@ module Reduce = struct
       | n when n = mk_name "Nat" "lor" ->
         binary (fun m n -> Expr.natlit (Z.logor m n))
       | n when n = mk_name "Nat" "xor" ->
-        (match binary (fun m n -> Expr.natlit (Z.logxor m n)) with
-        | Some _ as r -> r
-        | None ->
-          (* Nat.xor is delta-guarded (is_nat_builtin_name); restore just its one-step unfold to Nat.bitwise. *)
-          match args with
-          | [_; _] ->
-            let hd' = delta_at_head env hd in
-            if hd' == hd then None else Some (Expr.mk_app hd' args)
-          | _ -> None)
+        binary (fun m n -> Expr.natlit (Z.logxor m n))
       (* Bit shift operations: Nat.shiftLeft, Nat.shiftRight *)
       | n when n = mk_name "Nat" "shiftLeft" ->
         binary (fun m n -> Expr.natlit (Z.shift_left m (Z.to_int n)))
@@ -636,22 +654,6 @@ module Reduce = struct
         binary (fun m n -> bool_const (Z.testbit m (Z.to_int n)))
       | _ -> None)
     | _ -> None
-
-  (* Nat ops whose real definition is O(n)/well-founded recursion and must not be delta-unfolded on symbolic args. *)
-  let is_nat_builtin_name (name : Name.t) : bool =
-    let mk_name s = Name.Str (Name.Str (Name.Anon, "Nat"), s) in
-    name = mk_name "succ" || name = mk_name "add"
-    || name = mk_name "sub" || name = mk_name "mul"
-    || name = mk_name "pow" || name = mk_name "div"
-    || name = mk_name "mod" || name = mk_name "beq"
-    || name = mk_name "ble"
-    || name = mk_name "xor" || name = mk_name "bitwise"
-
-  let is_nat_builtin (e : Expr.t) : bool =
-    let hd, _args = Expr.get_apps e in
-    match Expr.node hd with
-    | Expr.Const { name; _ } -> is_nat_builtin_name name
-    | _ -> false
 
 end
 
@@ -725,20 +727,17 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     (* infer App: whnf(infer f) must be a Pi; check binder.type =?= infer arg, instantiate body with arg. *)
     (match whnf env (infer env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
-      (* Skip the defeq check when the parameter type is a Prop: proof irrelevance makes it pointless and it can be expensive. *)
-      let btype_is_prop =
-        match Expr.node (whnf env (infer env btype)) with
-        | Expr.Sort u -> Level.is_zero u
-        | _ -> false
-      in
-      if not btype_is_prop then begin
+      (* The argument's type must be defeq to the parameter type -- checked
+         unconditionally, matching the kernel's [infer_app]. (Proof irrelevance
+         lives in [isDefEq], not here: it never licenses skipping this check.) *)
+      begin
         let arg_type = infer env arg in
         if not (isDefEq env btype arg_type) then
           Logger.err
             "@[<v 0>[infer App] defeq failed for@,\
              \ expr = %a@,\
              \ btype = %a@,\
-             
+
              \ arg_type = %a@]"
             (Defeq_failure "infer App: btype vs arg type")
             Expr.pp expr Expr.pp btype Expr.pp arg_type
@@ -894,9 +893,6 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       Logger.debug "whnf: nat-builtin";
       whnf env r
     | None ->
-    (* Don't delta-unfold an unreduced Nat builtin: that would expose its O(n) recursive definition on huge literals. *)
-    if Reduce.is_nat_builtin expr then expr
-    else
     let hd' =
       match hd |> Expr.node with
       | Expr.Const _ -> Reduce.delta_at_head env hd
@@ -922,8 +918,6 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     (* Normalize Nat.zero to NatLit 0 so isDefEq doesn't need a Const-vs-Literal case. *)
     if name = Name.Str (Name.Str (Name.Anon, "Nat"), "zero") then
       Expr.natlit Z.zero
-    (* Don't delta-unfold Nat builtins: they may later apply to huge literals and loop. *)
-    else if Reduce.is_nat_builtin_name name then expr
     else
       let e' = Reduce.delta_at_head env expr in
       if e' == expr then expr
@@ -1073,12 +1067,40 @@ and isDefEq_impl env e1 e2 =
       if side' == side then false else isDefEq env side' other
     | _ -> false
   in
+  (* Bridge [NatLit n] against a [Nat.succ] chain: peel leading [succ]s in a flat
+     loop, counting, then match [n - count] against the base. *)
+  let try_natlit_succ lit_side other =
+    let succ_arg e =
+      match Expr.get_apps e with
+      | shd, [ y ]
+        when (match Expr.node shd with
+             | Expr.Const { name; _ } ->
+               name = Name.Str (Name.Str (Name.Anon, "Nat"), "succ")
+             | _ -> false) ->
+        Some y
+      | _ -> None
+    in
+    match Expr.node lit_side with
+    | Expr.Literal (Expr.NatLit n) -> (
+      let rec loop count cur =
+        if Z.gt count n then false (* more [succ]s than [n]: cannot be equal *)
+        else
+          match succ_arg cur with
+          | Some y -> loop (Z.succ count) (whnf env y)
+          | None -> isDefEq env (Expr.natlit (Z.sub n count)) cur
+      in
+      match succ_arg other with
+      | Some _ -> loop Z.zero other
+      | None -> false)
+    | _ -> false
+  in
   (* Shared final fallback, reached from the catch-all below and from a FreeVar/FreeVar id mismatch. *)
   let final_fallback e1' e2' =
     if try_struct_eta e1' e2' || try_struct_eta e2' e1' then true
     else if is_def_eq_unit_like e1' e2' || is_def_eq_unit_like e2' e1' then true
     else if try_lam_eta e1' e2' || try_lam_eta e2' e1' then true
     else if try_xor_one_step e1' e2' || try_xor_one_step e2' e1' then true
+    else if try_natlit_succ e1' e2' || try_natlit_succ e2' e1' then true
     else
       Logger.err
         "@[<v 0>[isDefEq] structural mismatch@,\

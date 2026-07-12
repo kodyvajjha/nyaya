@@ -5,6 +5,96 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-12: O(1) recursion-depth counter in the trace machinery
+
+**File:** `lib/parser/util.ml`, `MakeTrace`
+
+**Problem:** The depth-limit check ran on every `whnf`/`infer`/`isDefEq` entry as
+`List.length !stack` — O(depth) per call, so a reduction that recurses to depth
+`d` paid O(d²) just accounting for its own depth. On deep reductions this
+dominated: measured throughput fell as depth grew (from ~6700 to ~4600
+`whnf`/s between depths 9.5k and 21k).
+
+**Fix:** Maintain the depth as an integer counter (`incr` on `enter`, `decr` on
+`leave`), used in place of `List.length !stack` for the limit check. The frame
+`stack` is retained for debug path display only. Depth semantics are unchanged.
+Measured ~1.8× on the deep phase and removes the quadratic degradation; helps
+every deep reduction, no behavior change.
+
+---
+
+## 2026-07-12: remove the unsound App-case Prop-skip; clears arena bad/proj-of-prop, bad/nat-rec-rules (soundness-risk #1)
+
+**File:** `tc.ml`, `infer` App case, `whnf_impl`, `nat_lit_reduce`, `isDefEq`
+
+**Problem (the soundness bug):** When the expected parameter type of an
+application was a proposition, `infer`'s App case skipped the argument
+type-check `isDefEq(arg_type, btype)` entirely and instantiated directly. This
+let ill-typed terms through whenever the argument slot was a Prop, so the arena
+cases `bad/proj-of-prop` (#1) and `bad/nat-rec-rules` (#2) were **accepted**.
+Proof irrelevance is not a license to skip inference — the kernel's `infer_app`
+always checks the argument, and irrelevance lives only inside `isDefEq`
+(`is_def_eq_proof_irrel`).
+
+**Fix:** Always run `isDefEq env btype arg_type` in the App case, matching
+`infer_app`. This is the whole soundness fix; it rejects both cases.
+
+**Fallout — Nat reduction had to become kernel-faithful.** With the skip gone,
+`Nat.div`/`Nat.modCore` proofs that were previously never evaluated now have to
+reduce. This exposed that the old `is_nat_builtin` delta-guard (which froze all
+Nat builtins on symbolic args) was masking real forcing bugs:
+
+- **Removed the `is_nat_builtin` guard** at both `whnf_impl` call sites and
+  deleted the helper. The kernel special-cases Nat only on *literals*
+  (`reduce_bin_nat_op` bails unless both args are literals) and otherwise gets
+  stuck naturally via `reduce_recursor`; it never blanket-freezes symbolic
+  delta. The `Nat.xor` case in `nat_lit_reduce` — which had manually restored a
+  one-step unfold to work around the guard — is now redundant and reverts to the
+  plain `binary` form like `land`/`lor`.
+- **Fixed three forcing bugs** the guard had been hiding (nyaya was forcing
+  arguments the kernel leaves stuck, driving O(n) unary descent on large
+  literals): (1) `Nat.succ` folds into a literal only when its argument is
+  *already* a literal — `succ x` with symbolic `x` is already whnf; (2)
+  `binary`/`as_nat_lit` bail via `obviously_not_lit` before forcing an argument
+  that can never compute to a literal (e.g. `Nat.add (Nat.mul a k) a` with
+  symbolic `a`); (3) a `NatLit`-vs-`succ`-chain defeq bridge (`try_natlit_succ`),
+  needed because whnf no longer eagerly folds a `succ` chain into a literal —
+  it peels leading `succ`s in a flat loop and matches `n - count` against the
+  base.
+
+The recursor-major-premise path is unchanged: a `NatLit n` major premise is
+still exposed one step to `Nat.zero`/`Nat.succ (NatLit (n-1))` (kernel
+`nat_lit_to_constructor`), never fully unrolled.
+
+**Kernel reference:** `src/kernel/type_checker.cpp` `infer_app` (always checks
+the argument) and `reduce_bin_nat_op` (literal-only); `src/kernel/inductive.cpp`
+`nat_lit_to_constructor` (one-step literal exposure).
+
+**Cases unblocked:** arena `bad/proj-of-prop`, `bad/nat-rec-rules`.
+`init-prelude`, `098_natLitEq` and the rest of the good corpus stay green.
+
+**Known regression — `good/perf/grind-ring-5`.** This valid file was green only
+because the Prop-skip skipped the very obligations it should have checked. With
+the skip gone it now trips the `whnf` depth limit on a deep reduction and
+**false-rejects** (exit 1); the reduction reaches depth 20000+ and keeps
+climbing (measured ~524k `whnf` calls in 63s, nowhere near done). This is a
+reduction *completeness/throughput* gap, not a soundness regression: the change
+trades a former false-*accept* (the unsound Prop-skip) for a surfaced
+false-*reject*, so soundness strictly improves.
+
+Root-caused for follow-up: `isDefEq` (after a narrow same-head shortcut) falls
+back to fully `whnf`-ing both sides, where the kernel runs
+`lazy_delta_reduction` — compare heads, congruence on equal-arity same-head
+applications, and otherwise unfold only the side with greater definitional
+height by one step. That keeps the kernel shallow on exactly these terms. The
+definitional-height hints are already exported and parsed into `Def.red_hint`
+but currently ignored (`tc.ml` `Def` case, `TODO`). Implementing lazy-delta
+(plus a delta-free `whnf_core`) is the tracked fix; it is a focused rewrite of
+the `isDefEq`/`whnf` core, held as its own follow-up rather than blocking this
+soundness fix. Distinct from `app-lam`'s pure timeout.
+
+---
+
 ## 2026-07-12: strict positivity for non-nested inductives; clears arena bad/051, 054, 111
 
 **File:** `tc.ml`, `check_ctor`
