@@ -142,6 +142,60 @@ Any two terms of a non-recursive, single-constructor, zero-field structure
 type are declared defeq once their types agree — no independent
 verification that this is sound beyond "the kernel does it."
 
+## 13. `Level.( <= )`, normalize-both-sides-at-entry (in `lib/level.ml`, not `tc.ml`)
+`( <= ) l1 l2 = leq (simplify l1) (simplify l2) 0` — normalizing both
+operands *before* the core `leq` recursion, rather than inside it — is copied
+from `src/kernel/level.cpp`, fetched and confirmed against the live source
+this session:
+
+```cpp
+bool is_geq(level const & l1, level const & l2) {
+    return is_geq_core(normalize(l1), normalize(l2));
+}
+bool is_equivalent(level const & lhs, level const & rhs) {
+    return lhs == rhs || normalize(lhs) == normalize(rhs);
+}
+```
+
+nyaya's `leq` is the analog of `is_geq_core`, and it likewise assumes its
+inputs are normalized: it has no case for an `IMax` whose second argument is a
+concrete non-parameter level (`Zero`/`Succ`), because a normalized level never
+contains one (`imax _ 0 → 0`, `imax 1 r → r`, `imax a (succ b) → max a (succ b)`).
+`simplify` is nyaya's `normalize`. Not independently re-derived from *why* it
+is sound to compare levels only after normalization — taken from the fact that
+the kernel does exactly this at exactly this boundary. Before this change the
+entry point passed raw operands to `leq`, so any unnormalized `IMax(_, Zero|Succ)`
+reaching the top of the comparison fell through to a `Failure "leq"` crash
+(arena `good/tutorial/012_levelComp1`–`014`).
+
+## 14. `infer_impl`, `Const` unknown-constant → `TypeError`
+Looking a `Const`'s name up in the environment and treating its *absence* as a
+type error that rejects the declaration is copied from the kernel's
+`type_checker::infer_constant`, which fetches `env().get(const_name(e))`, and
+`environment::get`, which throws on a missing name (both fetched and confirmed
+against the live `src/kernel/type_checker.cpp` / `src/kernel/environment.cpp`
+this session):
+
+```cpp
+expr type_checker::infer_constant(expr const & e, bool infer_only) {
+    constant_info info = env().get(const_name(e));   // throws if absent
+    ...
+}
+// environment::get:
+object * o = lean_environment_find(to_obj_arg(), n.to_obj_arg());
+if (is_scalar(o))
+    throw unknown_constant_exception(*this, n);
+```
+
+nyaya's `infer` `Const` case now does the same: `Hashtbl.find_opt`, and on
+`None` raises `TypeError "infer Const: unknown constant"`, which the arena
+verdict maps to `Reject`. Previously it used a bare `Hashtbl.find`, so a
+missing constant escaped as OCaml's `Not_found` and became a checker-error exit
+code instead of a reject (arena `bad/large-elim-param`, which references an
+undeclared `MyBool.rec`). Not independently re-derived: the choice that "a
+reference to a nonexistent constant is a type error, not undefined behaviour"
+is taken from the kernel throwing here.
+
 ---
 
 ## Not kernel-derived (for contrast)
