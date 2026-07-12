@@ -171,6 +171,9 @@ exactly this:
 - `054_indNegReducible` — a negative occurrence nested inside a head-normal form
   that *could* reduce it away (`constType aType I → I`); the kernel treats it as
   negative anyway, without reducing past hnf.
+- `111_reflOccLeft` — a recursive occurrence to the left of an arrow inside a
+  constructor field (`Nat → (I → Nat)`), i.e. the same negative-occurrence
+  defect via a function-typed field.
 
 **Why it was NOT ported with the rest:** the kernel's `check_positivity` runs
 *after* `add_inductive_fn` un-nests nested inductives into fresh auxiliary
@@ -188,4 +191,5 @@ itself (`check_positivity` in `src/kernel/inductive.cpp`: whnf to hnf; if a
 else it must be a valid recursive application).
 
 **Status:** unresolved; open architectural item, detected (`bad/tutorial/051`,
-`054` red). Narrowed from the original 047–058 cluster to positivity only.
+`054`, `111` red). Narrowed from the original 047–058 cluster to positivity
+only.
