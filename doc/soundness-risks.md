@@ -126,6 +126,42 @@ fuel-recursive `Nat.div`/`Nat.modCore` reduction (helper reduction + the
 `init-prelude` and `grind-ring-5`, not a single equation-lemma step. Reverted
 again; `proj-of-prop` stays deferred behind this item.
 
+**2026-07-12 (third attempt — the *guard*, not just the Prop-skip, is the
+masker; kernel-faithful direction confirmed):** Citations settle the design.
+The official kernel special-cases Nat reduction *only for literals*
+(`reduce_bin_nat_op` bails with `none_expr()` unless both args are
+`is_nat_lit_ext`), and for symbolic args just runs general `whnf`, whose
+`reduce_recursor` returns `none` (stuck) when the major premise is not a
+constructor. So the faithful fix is **not** to add a fuel-aware guard + a `dite`
+congruence rule (both are un-kernel-like workarounds) — it is to **remove the
+`is_nat_builtin` delta-guard entirely** (keep only the literal fast path
+`nat_lit_reduce`, = `reduce_nat`) and let general reduction get stuck on its own,
+exactly as the kernel does.
+
+Ran that experiment (Prop-skip removed **and** guard disabled at both call sites
+in `whnf_impl`). Result on the full corpus — `4 red`, better than the clean
+baseline's `5`:
+- `bad/proj-of-prop` → now correctly **rejects** (the #1 fix).
+- `bad/nat-rec-rules` → now correctly **rejects** too (its #2 obligation was also
+  Prop-typed and masked by the same skip).
+- `good/init-prelude` → **accepts** in ~22s. The memory note's feared "O(n)
+  blowup on huge literals" from removing the guard **did not materialise** — no
+  file in the corpus OOMs or slows meaningfully; `nat_lit_reduce` already covers
+  the literal cases the guard was protecting.
+- `good/perf/grind-ring-5` → the **sole** regression, and it is no longer an OOM:
+  it trips the `whnf` depth limit (`NYAYA_WHNF_MAX_DEPTH=2000`) at
+  `Nat.casesOn` depth 2001. Raising the limit to 100000 did *not* let it finish
+  in >3 min, so a symbolic Nat reduction is going unboundedly deep (or enormously
+  large) where the real kernel stays shallow — i.e. a genuine `whnf` stuck-ness
+  gap that the guard was masking, now isolated to this one perf case.
+
+Net: removing guard + Prop-skip is the correct, citation-backed direction and
+clears two soundness bugs at once, with no huge-literal fallout. The remaining
+work is a single reduction-completeness fix (make that symbolic Nat recursion
+get stuck like the kernel's `reduce_recursor`, or compute it natively), verified
+against `grind-ring-5`. Reverted to clean pending that fix — the tree cannot
+carry a valid-file regression even though the net red count improves.
+
 ---
 
 ## 2. Exported recursor reduction rules are trusted, not reconstructed
