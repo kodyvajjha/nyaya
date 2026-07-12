@@ -1163,26 +1163,26 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
     assert (num_params = Decl.get_inductive_num_params inductive);
     (* Peel the inductive's arity to recover the shared parameter free variables
        and its resultant universe level. *)
-    let m_params = ref [] in
+    let param_fvars = ref [] in
     let rec peel_ind k ty =
       if k <= 0 then ty
       else
         match Expr.node (whnf env ty) with
         | Expr.Forall { name; btype; binfo; body } ->
           let fv = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
-          if List.length !m_params < num_params then
-            m_params := !m_params @ [ fv ];
+          if List.length !param_fvars < num_params then
+            param_fvars := !param_fvars @ [ fv ];
           peel_ind (k - 1)
             (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body ())
         | _ -> ty
     in
     let ind_result = peel_ind (num_params + num_idx) ind_info.ty in
-    let m_result_level =
+    let result_level =
       match Expr.node (whnf env ind_result) with
       | Expr.Sort l -> l
       | _ -> Level.Zero
     in
-    let params_arr = Array.of_list !m_params in
+    let params_arr = Array.of_list !param_fvars in
     let param_type i =
       match Expr.node params_arr.(i) with
       | Expr.FreeVar { expr; _ } -> expr
@@ -1223,7 +1223,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
       && List.length args = num_params + num_idx
       &&
       let params_args, index_args = CCList.take_drop num_params args in
-      (try List.for_all2 (fun a p -> a == p) params_args !m_params
+      (try List.for_all2 (fun a p -> a == p) params_args !param_fvars
        with Invalid_argument _ -> false)
       && not (List.exists has_ind_occ index_args)
     in
@@ -1246,7 +1246,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
           else begin
             (* field sort <= inductive level, or the inductive is a Prop. *)
             let s = infer_sort_of env dom in
-            if not (Level.(s <= m_result_level) || Level.is_zero m_result_level)
+            if not (Level.(s <= result_level) || Level.is_zero result_level)
             then
               Logger.err
                 "check_ctor: field %d of %a has a universe too big for the \
