@@ -98,8 +98,8 @@ end) : LOGGER = struct
     CCFormat.with_color_ksf "red"
       ~f:(fun msg ->
         Logs.err (fun m ->
-            m "@[<v 0>%s@,Exception: %s@]" msg
-              (Printexc.to_string exn) ~header:Data.header);
+            m "@[<v 0>%s@,Exception: %s@]" msg (Printexc.to_string exn)
+              ~header:Data.header);
         raise exn)
       fmt
 
@@ -160,6 +160,9 @@ module MakeTrace (Data : TRACE_DATA) = struct
      does not cost O(depth) (which makes deep reductions O(depth^2)). *)
   let depth = ref 0
 
+  (* Peak depth reached since the last [reset]; a diagnostic yardstick. *)
+  let max_depth_seen = ref 0
+
   let next_id = ref 0
 
   let elide_ok =
@@ -195,6 +198,7 @@ module MakeTrace (Data : TRACE_DATA) = struct
     incr next_id;
     stack := frame :: !stack;
     incr depth;
+    if !depth > !max_depth_seen then max_depth_seen := !depth;
     if !depth > max_depth then (
       let msg =
         Printf.sprintf "[%s#%d] depth %d exceeds max %d, input=%s" Data.kind id
@@ -212,7 +216,7 @@ module MakeTrace (Data : TRACE_DATA) = struct
        before Logs' own (correctly lazy) level check ever runs. On a
        heavily-shared hash-consed DAG this can single-handedly OOM. See
        project_nyaya_oom_investigation memory / Vector.pmap_attach. *)
-    if not elide_ok && Logs.level () = Some Logs.Debug then
+    if (not elide_ok) && Logs.level () = Some Logs.Debug then
       Logger.debug "[%s#%d d=%d p=%s] -> %s" Data.kind id !depth
         (current_path ()) (Data.input_summary input);
     frame
@@ -221,7 +225,7 @@ module MakeTrace (Data : TRACE_DATA) = struct
     let module Logger = (val Data.env_logger env) in
     stack := CCList.tl !stack;
     decr depth;
-    if not elide_ok && Logs.level () = Some Logs.Debug then
+    if (not elide_ok) && Logs.level () = Some Logs.Debug then
       Logger.debug "[%s#%d d=%d p=%s] <- ok %s" Data.kind frame.id
         (current_depth ()) (current_path ())
         (Data.output_summary output)
@@ -238,8 +242,17 @@ module MakeTrace (Data : TRACE_DATA) = struct
           (current_depth ()) (current_path ()) (Printexc.to_string exn)
           (Data.input_summary frame.input)
 
+  (* Diagnostic accessors (see NYAYA_STATS). [calls] is the number of [enter]s
+     since the last [reset] (i.e. non-memoized invocations for this decl);
+     [peak_depth] the deepest recursion reached. *)
+  let calls () = !next_id
+
+  let peak_depth () = !max_depth_seen
+
   let reset () =
     stack := [];
+    depth := 0;
+    max_depth_seen := 0;
     next_id := 0
 end
 
@@ -264,4 +277,136 @@ end = struct
     let id = !counter in
     incr counter;
     id
+end
+
+(** Per-run performance diagnostics for the checker, opt-in via [NYAYA_STATS=1].
+
+    Records one row per checked declaration (reduction work, recursion depth,
+    CPU time) and prints a totals line plus the heaviest declarations. The
+    deterministic counters are the primary yardstick — reproducible across runs
+    and machines, so a diff of two runs is signal, not noise — with CPU time as
+    the real-cost cross-check.
+
+    This module only aggregates and reports. The caller feeds each declaration's
+    counters to {!end_decl}, keeping it decoupled from the checker's traces and
+    memo tables. *)
+module Stats = struct
+  (** Whether stats collection is enabled ([NYAYA_STATS=1]). When [false],
+      {!begin_decl}, {!end_decl} and {!report} are no-ops and callers pay
+      nothing beyond the guards. *)
+  let on =
+    match Sys.getenv_opt "NYAYA_STATS" with
+    | Some ("1" | "true" | "TRUE") -> true
+    | _ -> false
+
+  type decl_row = {
+    name: string;
+        (** Fully-qualified declaration name. Identity only, not a metric. *)
+    whnf_misses: int;
+        (** Non-memoized [whnf] invocations, i.e. weak-head reduction steps
+            actually performed. The headline work metric. Lower is better. *)
+    infer_misses: int;
+        (** Non-memoized [infer] invocations, i.e. type-inference steps actually
+            performed. Lower is better. *)
+    defeq_calls: int;
+        (** [isDefEq] invocations, i.e. definitional-equality checks attempted.
+            Lower is better. *)
+    delta: int;
+        (** Successful one-step delta unfolds (a definition replaced by its
+            body). The direct target of lazy-delta. Lower is better. *)
+    peak_whnf: int;
+        (** Deepest [whnf] recursion reached. Reduction the kernel keeps shallow
+            shows up small here; runaway reduction spikes it (and can trip the
+            depth limit). Lower is better. *)
+    peak_infer: int;  (** Deepest [infer] recursion reached. Lower is better. *)
+    peak_defeq: int;
+        (** Deepest [isDefEq] recursion reached. Lower is better. *)
+    whnf_hit: int;
+        (** [whnf] memo hits, i.e. reductions the cache avoided. Read as a ratio
+            against [whnf_misses] (the printed hit-rate): a higher share means
+            more sharing was exploited. {b Higher is better}. *)
+    cpu_ms: float;
+        (** CPU milliseconds spent checking this declaration. The real-cost
+            cross-check on the deterministic counters above. Lower is better. *)
+  }
+  (** One row of metrics for a single checked declaration. Every count is for
+      that declaration alone (the checker resets its traces/memos between
+      declarations). Unless noted, {b lower is better}: these are work a smarter
+      algorithm (e.g. lazy-delta) should shrink. *)
+
+  let rows : decl_row list ref = ref []
+
+  (* CPU seconds at the start of the declaration currently being timed. *)
+  let decl_t0 = ref 0.0
+
+  (** Start timing the declaration about to be checked. Call after the caller
+      has reset its per-declaration traces/counters. *)
+  let begin_decl () = if on then decl_t0 := Sys.time ()
+
+  (** Record the just-checked declaration's counters (call before the next
+      per-declaration reset). The caller passes the per-declaration counts it
+      collected; [cpu_ms] is derived from {!begin_decl}. *)
+  let end_decl ~name ~whnf_misses ~infer_misses ~defeq_calls ~delta ~peak_whnf
+      ~peak_infer ~peak_defeq ~whnf_hit () =
+    if on then
+      rows :=
+        {
+          name;
+          whnf_misses;
+          infer_misses;
+          defeq_calls;
+          delta;
+          peak_whnf;
+          peak_infer;
+          peak_defeq;
+          whnf_hit;
+          cpu_ms = (Sys.time () -. !decl_t0) *. 1000.;
+        }
+        :: !rows
+
+  (** Print the totals line and the [top] heaviest declarations (by
+      [whnf_misses]) to stderr. No-op when stats are disabled. *)
+  let report ?(top = 15) () =
+    if on then (
+      let rs = !rows in
+      let n = List.length rs in
+      let sum f = List.fold_left (fun a r -> a + f r) 0 rs in
+      let sumf f = List.fold_left (fun a r -> a +. f r) 0. rs in
+      let tot_whnf = sum (fun r -> r.whnf_misses) in
+      let tot_infer = sum (fun r -> r.infer_misses) in
+      let tot_defeq = sum (fun r -> r.defeq_calls) in
+      let tot_delta = sum (fun r -> r.delta) in
+      let tot_hit = sum (fun r -> r.whnf_hit) in
+      let tot_ms = sumf (fun r -> r.cpu_ms) in
+      let max_peak = List.fold_left (fun a r -> max a r.peak_whnf) 0 rs in
+      let hit_rate =
+        let d = tot_whnf + tot_hit in
+        if d = 0 then
+          0.0
+        else
+          100. *. float_of_int tot_hit /. float_of_int d
+      in
+      Printf.eprintf
+        "\n\
+         [STATS] %d decls | whnf-miss=%d infer-miss=%d defeq=%d delta=%d | \
+         whnf-memo-hit=%.1f%% | peak-whnf-depth=%d | cpu=%.0fms\n"
+        n tot_whnf tot_infer tot_defeq tot_delta hit_rate max_peak tot_ms;
+      let by_whnf =
+        List.sort (fun a b -> compare b.whnf_misses a.whnf_misses) rs
+      in
+      Printf.eprintf "[STATS] top %d declarations by whnf-miss:\n" (min top n);
+      Printf.eprintf "        %-52s %10s %8s %8s %8s %9s\n" "declaration"
+        "whnf-miss" "delta" "defeq" "peak-w" "cpu-ms";
+      List.iteri
+        (fun i r ->
+          if i < top then
+            Printf.eprintf "        %-52s %10d %8d %8d %8d %9.1f\n"
+              (if String.length r.name <= 52 then
+                 r.name
+               else
+                 String.sub r.name 0 49 ^ "...")
+              r.whnf_misses r.delta r.defeq_calls r.peak_whnf r.cpu_ms)
+        by_whnf;
+      flush stderr
+    )
 end
