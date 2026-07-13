@@ -5,8 +5,10 @@ let () =
   (* Path to a new-format (ndjson) export file: taken from the command line if
      given, otherwise a default sample under test/good. *)
   let file =
-    if Array.length Sys.argv > 1 then Sys.argv.(1)
-    else "test/good/tutorial/001_basicDef.ndjson"
+    if Array.length Sys.argv > 1 then
+      Sys.argv.(1)
+    else
+      "test/good/tutorial/001_basicDef.ndjson"
   in
   (* Pick a parser by file format: [.ndjson] is the new JSON export format
      (arena / tutorial cases); anything else (e.g. [test/init.export], the
@@ -14,8 +16,10 @@ let () =
      the original menhir/sedlex parser. Both produce an [Ast.t], so the rest of
      the pipeline is identical. *)
   let parse_file (path : string) : Ast.t =
-    if Filename.check_suffix path ".ndjson" then Ndjson.parse_from_file path
-    else Main.parse_from_file path
+    if Filename.check_suffix path ".ndjson" then
+      Ndjson.parse_from_file path
+    else
+      Main.parse_from_file path
   in
   match Sys.getenv_opt "NYAYA_ARENA" with
   | Some ("1" | "true" | "TRUE") ->

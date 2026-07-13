@@ -38,9 +38,12 @@ let rec ndjson_files dir =
   Sys.readdir dir |> Array.to_list |> List.sort String.compare
   |> List.concat_map (fun f ->
          let p = Filename.concat dir f in
-         if Sys.is_directory p then ndjson_files p
-         else if Filename.check_suffix p ".ndjson" then [ p ]
-         else [])
+         if Sys.is_directory p then
+           ndjson_files p
+         else if Filename.check_suffix p ".ndjson" then
+           [ p ]
+         else
+           [])
 
 (** Test name relative to the repository's [test/] directory. *)
 let ndjson_test_name path =
@@ -80,14 +83,16 @@ let run_arena file : [ `Exit of int | `Timeout ] =
       if Unix.gettimeofday () > deadline then (
         (try Unix.kill pid Sys.sigkill with _ -> ());
         ignore (Unix.waitpid [] pid);
-        `Timeout)
-      else (
+        `Timeout
+      ) else (
         Unix.sleepf 0.02;
-        wait ())
-    else
+        wait ()
+      )
+    else (
       match status with
       | Unix.WEXITED c -> `Exit c
       | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> `Exit 3
+    )
   in
   wait ()
 

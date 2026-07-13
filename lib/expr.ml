@@ -285,10 +285,10 @@ module Pp = struct
         binfo = Default && (Name.is_anon name || Name.is_hyg_name name)
       in
       let rec split_arrows = function
-        | (b :: rest) when is_arrow_binder b ->
+        | b :: rest when is_arrow_binder b ->
           let arrows, remaining = split_arrows rest in
-          (b :: arrows, remaining)
-        | rest -> ([], rest)
+          b :: arrows, remaining
+        | rest -> [], rest
       in
       let arrows, explicit = split_arrows binders in
       let pp_arrow fpf (_name, btype, _binfo) =

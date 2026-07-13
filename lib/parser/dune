@@ -1,7 +1,9 @@
 (library
  (name nyaya_parser)
- (preprocess (pps ppx_deriving.show sedlex.ppx))
+ (preprocess
+  (pps ppx_deriving.show sedlex.ppx))
  (libraries containers zarith sedlex menhirLib logs unix yojson))
+
 (menhir
  (modules parser)
  (explain true)

@@ -259,8 +259,9 @@ let table
     Hashtbl.iter
       (fun nid _ ->
         if Hashtbl.mem seen nid then (
-          if not (List.mem nid !dup_nids) then dup_nids := nid :: !dup_nids)
-        else Hashtbl.add seen nid ())
+          if not (List.mem nid !dup_nids) then dup_nids := nid :: !dup_nids
+        ) else
+          Hashtbl.add seen nid ())
       decl_table;
     CCList.filter_map (fun nid -> CCHashtbl.get name_table nid) !dup_nids
   in

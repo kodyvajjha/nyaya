@@ -61,19 +61,24 @@ let mint k j = to_int (member k j)
 (** Member [k] of [j] as an [int list] (e.g. [levelParams], [us], [all]). *)
 let mints k j = List.map to_int (to_list (member k j))
 
-let b2i b = if b then 1 else 0
+let b2i b =
+  if b then
+    1
+  else
+    0
 
 (* ------------------------------------------------------------------ *)
 (* Primitives                                                          *)
 (* ------------------------------------------------------------------ *)
 
 (* [{"in": self, "str": {"pre": p, "str": s}}]
-   [{"in": self, "num": {"pre": p, "i": n}}]  *)
+   [{"in": self, "num": {"pre": p, "i": n}}] *)
 let name_of_json (j : J.t) : Ast.Name.t =
   let nid1 = mint "in" j in
   if has "str" j then (
     let s = member "str" j in
-    Ast.Name.NSName { nid1; nid2 = mint "pre" s; str = to_string (member "str" s) }
+    Ast.Name.NSName
+      { nid1; nid2 = mint "pre" s; str = to_string (member "str" s) }
   ) else if has "num" j then (
     let n = member "num" j in
     Ast.Name.NIName { nid1; nid2 = mint "pre" n; nat = mint "i" n }
@@ -83,7 +88,7 @@ let name_of_json (j : J.t) : Ast.Name.t =
 (* [{"il": self, "succ": a}]
    [{"il": self, "max": [a, b]}]
    [{"il": self, "imax": [a, b]}]
-   [{"il": self, "param": nid}]  *)
+   [{"il": self, "param": nid}] *)
 let level_of_json (j : J.t) : Ast.Level.t =
   let uid1 = mint "il" j in
   if has "succ" j then
@@ -267,7 +272,7 @@ let recursor_items (r : J.t) : Ast.Item.t list =
                  value = mint "rhs" rule;
                }
            in
-           (item, rid))
+           item, rid)
          rules)
   in
   let l =
@@ -302,7 +307,11 @@ let simple_decl_items (j : J.t) : Ast.Item.t list =
     let d = member "axiom" j in
     one
       (Ast.Decl.Axiom
-         { name = mint "name" d; expr = mint "type" d; uparams = mints "levelParams" d })
+         {
+           name = mint "name" d;
+           expr = mint "type" d;
+           uparams = mints "levelParams" d;
+         })
   ) else if has "def" j then (
     let d = member "def" j in
     one
@@ -338,7 +347,11 @@ let simple_decl_items (j : J.t) : Ast.Item.t list =
     let d = member "quot" j in
     one
       (Ast.Decl.Quotient
-         { name = mint "name" d; expr = mint "type" d; uparams = mints "levelParams" d })
+         {
+           name = mint "name" d;
+           expr = mint "type" d;
+           uparams = mints "levelParams" d;
+         })
   ) else if has "inductive" j then
     inductive_items j
   else
@@ -357,18 +370,23 @@ type parsed_line =
 let version_of_meta (j : J.t) : int list =
   match member "format" (member "meta" j) with
   | `Null -> []
-  | fmt -> (
-    match member "version" fmt with
-    | `String v -> (
-      try List.map int_of_string (String.split_on_char '.' v) with _ -> [])
+  | fmt ->
+    (match member "version" fmt with
+    | `String v ->
+      (try List.map int_of_string (String.split_on_char '.' v) with _ -> [])
     | _ -> [])
 
 let parse_line (j : J.t) : parsed_line =
-  if has "meta" j then Meta (version_of_meta j)
-  else if has "in" j then Items [ Ast.Item.EName (name_of_json j) ]
-  else if has "il" j then Items [ Ast.Item.ELevel (level_of_json j) ]
-  else if has "ie" j then Items [ Ast.Item.EExpr (expr_of_json j) ]
-  else Items (simple_decl_items j)
+  if has "meta" j then
+    Meta (version_of_meta j)
+  else if has "in" j then
+    Items [ Ast.Item.EName (name_of_json j) ]
+  else if has "il" j then
+    Items [ Ast.Item.ELevel (level_of_json j) ]
+  else if has "ie" j then
+    Items [ Ast.Item.EExpr (expr_of_json j) ]
+  else
+    Items (simple_decl_items j)
 
 let parse_from_file (filename : string) : Ast.t =
   NdjsonLogger.info "Opening ndjson file %s for parsing..." filename;
@@ -389,11 +407,13 @@ let parse_from_file (filename : string) : Ast.t =
                try J.from_string trimmed
                with Yojson.Json_error msg ->
                  failwith
-                   (Printf.sprintf "%s:%d: invalid JSON: %s" filename !lineno msg)
+                   (Printf.sprintf "%s:%d: invalid JSON: %s" filename !lineno
+                      msg)
              in
              match parse_line j with
              | Meta v -> version := v
-             | Items its -> items := List.rev_append its !items)
+             | Items its -> items := List.rev_append its !items
+           )
          done
        with End_of_file -> ());
       NdjsonLogger.info "Finished parsing %s (%d items)." filename
