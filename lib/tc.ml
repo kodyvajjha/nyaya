@@ -216,6 +216,28 @@ module Reduce = struct
     in
     Expr.mk_app string_mk [ char_list ]
 
+  let proj_field_at_head (env : Env.t) (proj_expr : Expr.t) whnf =
+    match Expr.node proj_expr with
+    | Expr.Proj { name; nat; expr = inner } ->
+      let inner' = whnf env inner in
+      let inner' =
+        match Expr.node inner' with
+        | Expr.Literal (Expr.StrLit s) -> string_lit_to_ctor s
+        | _ -> inner'
+      in
+      let hd, args = Expr.get_apps inner' in
+      (match Expr.node hd with
+      | Expr.Const { name = cname; _ } ->
+        let ind_decl = Hashtbl.find env.tbl name in
+        let ctor_names = Decl.get_inductive_ctors ind_decl in
+        if List.mem cname ctor_names then
+          let num_params = Decl.get_inductive_num_params ind_decl in
+          CCList.get_at_idx (nat + num_params) args
+        else
+          None
+      | _ -> None)
+    | _ -> None
+
   (* One-step iota reduction at the head of [e]: a recursor applied to a constructor-headed major premise. *)
   let iota_at_head (env : Env.t) (e : Expr.t) whnf infer isDefEq : Expr.t =
     let module Logger = (val env.logger) in
@@ -456,12 +478,12 @@ module Reduce = struct
       in
       (match name with
       | n when n = mk_name "Nat" "succ" ->
-        (* Fold into a literal only when the argument is already one; [succ] is a
-           constructor, so [succ x] with symbolic [x] is already in whnf. *)
+        (* Fold into a literal when the argument reduces to one; [succ x] with
+           symbolic [x] is still stuck through [as_nat_lit]'s cheap bail-out. *)
         (match args with
         | [ a ] ->
-          (match Expr.node a with
-          | Expr.Literal (Expr.NatLit n) -> Some (Expr.natlit (Z.succ n))
+          (match as_nat_lit a with
+          | Some n -> Some (Expr.natlit (Z.succ n))
           | _ -> None)
         | _ -> None)
       | n when n = mk_name "Nat" "add" ->
@@ -970,6 +992,10 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let hd' =
         match hd |> Expr.node with
         | Expr.Const _ -> Reduce.delta_at_head env hd
+        | Expr.Proj _ -> (
+          match Reduce.proj_field_at_head env hd whnf with
+          | Some field -> field
+          | None -> whnf env hd)
         | _ -> whnf env hd
       in
       let e1 = Expr.mk_app hd' args in

@@ -5,6 +5,119 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-13: diagnose `UInt16.toUInt32_toUInt64` init regression after `988bfa7`
+
+**File:** `lib/tc.ml`, `nat_lit_reduce`, projection head reduction,
+`isDefEq`/lazy-delta follow-up notes.
+
+**Context:** After `988bfa7` removed the old Nat builtin delta guard and the
+unsound App-case Prop-skip, isolated checking of
+`UInt16.toUInt32_toUInt64` from `test/parser/init.export` started failing
+with a WHNF depth-limit while trying to normalize the first real equality in
+the proof:
+
+```text
+Eq Nat (UInt32.toNat (UInt64.toUInt32 (UInt16.toUInt64 n)))
+       (UInt32.toNat (UInt16.toUInt32 n))
+=?=
+Eq Nat (HMod.hMod Nat Nat Nat (instHMod Nat Nat.instMod)
+          (UInt16.toNat n) UInt32.size)
+       (UInt16.toNat n)
+```
+
+The auto-debug log stops near that comparison because the current
+`same_head_args_shortcut` suppresses nested logs. Lower WHNF depth caps and
+temporary probes showed three distinct layers:
+
+1. **`Nat.succ` was too syntactic.** The `988bfa7` changelog said
+   `Nat.succ` should fold only when its argument is already a literal. That is
+   narrower than the kernel/book rule: `Nat.succ n` folds when `n` can be
+   reduced to a Nat literal. The implementation now routes `Nat.succ` through
+   `as_nat_lit`, preserving the cheap bail-out for obviously symbolic inputs
+   but allowing reducible literal arguments such as `OfNat.ofNat Nat 32 ...`.
+   This supersedes the earlier changelog wording.
+
+2. **Projection in application-head position was over-normalizing function
+   fields.** The wrapper path itself was not the bug. `HPow.hPow` projects a
+   field from `instHPow`, then through `Pow.pow`, `instPowNat`, and
+   `NatPow.pow` to the `Nat.pow` field of `instNatPowNat`. The old standalone
+   projection reducer returned `whnf env field`. When that field was the
+   function `Nat.pow`, it unfolded bare `Nat.pow` to its recursive lambda before
+   the pending exponent argument was reattached, so the native Nat literal
+   reducer never saw the shape `Nat.pow 2 32`.
+
+   The fix is intentionally not a typeclass-wrapper special case: when an
+   application head is a projection, `whnf_impl` now reduces the projection to
+   the raw field and rebuilds `field args`, allowing the ordinary Nat literal
+   path to fire. After this change the following probes all WHNF to
+   `4294967296`:
+
+   ```text
+   Nat.pow 2 32
+   NatPow.pow Nat instNatPowNat 2 32
+   Pow.pow Nat Nat (instPowNat Nat instNatPowNat) 2 32
+   HPow.hPow Nat Nat Nat (instHPow Nat Nat (instPowNat Nat instNatPowNat)) 2 32
+   UInt32.size
+   ```
+
+3. **The declaration still fails later on a large symbolic subtraction.** With
+   the two fixes above, the isolated command
+
+   ```sh
+   env NYAYA_ONLY_DECL=UInt16.toUInt32_toUInt64 \
+     dune exec bin/main.exe test/parser/init.export
+   ```
+
+   gets past the earlier `Nat.pow`/wrapper blowup, then fails with:
+
+   ```text
+   Depth_limit("[w#3211] depth 2001 exceeds max 2000,
+     input=Nat.sub (Nat.succ n##43) 4294966801")
+   ```
+
+   This is the existing `Nat.sub` partial-iota rule doing exactly what the
+   exported Lean definition says for a symbolic minuend and positive
+   subtrahend:
+
+   ```lean
+   Nat.sub a 0        --> a
+   Nat.sub a (succ b) --> Nat.pred (Nat.sub a b)
+   ```
+
+   It peels the concrete subtrahend one predecessor at a time, which is
+   hopeless for `2^32`-scale literals when the minuend is still symbolic.
+
+**Important non-fix:** Do not "fix" this by adding the tempting paired
+decrement shortcut
+
+```text
+Nat.sub (Nat.succ n) (Nat.succ m) --> Nat.sub n m
+```
+
+as a general reduction rule. Lean 4.16 rejects `rfl` for
+`Nat.sub (Nat.succ n) (Nat.succ m) = Nat.sub n m`, and also rejects `rfl` for
+`Nat.sub 0 (Nat.succ m) = 0`; these are theorem-level facts, not definitional
+reductions for arbitrary symbolic `m`. The earlier changelog entry around
+`50af38e` already records why the faithful `Nat.sub a (succ b) -->
+Nat.pred (Nat.sub a b)` rule replaced an unsound paired-decrement shortcut.
+
+**Follow-up for lazy-delta work:** The remaining `UInt16.toUInt32_toUInt64`
+failure is a reduction-completeness/throughput problem in `isDefEq`, not an
+obvious Nat builtin rule. Current `isDefEq` tries a narrow same-head argument
+shortcut and then falls back to fully `whnf`-ing both sides. On this declaration
+that full WHNF path forces the UInt/BitVec/Fin encoding far enough to expose
+the giant symbolic `Nat.sub`. The planned lazy-delta rewrite should keep this
+comparison shallow: implement a delta-free `whnf_core`, compare equal-arity
+same-head applications by congruence, and otherwise unfold only the side with
+greater definitional height using the exported `Def.red_hint` heights. Re-test
+this declaration specifically after lazy-delta lands.
+
+**Verification in this state:** `dune build` passes. The wrapper probes above
+reduce correctly. `UInt16.toUInt32_toUInt64` still false-rejects at the later
+large `Nat.sub` depth-limit, which is the tracked lazy-delta target.
+
+---
+
 ## 2026-07-12: O(1) recursion-depth counter in the trace machinery
 
 **File:** `lib/parser/util.ml`, `MakeTrace`
