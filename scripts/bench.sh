@@ -19,6 +19,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Make Ctrl+C stop the whole run. In a non-interactive bash loop, a child killed
+# by SIGINT otherwise just returns control and the loop marches to the next
+# target; trapping INT/TERM (plus the per-target rc check below) exits cleanly.
+trap 'printf "\n[bench] interrupted -- stopping.\n" >&2; exit 130' INT TERM
+
 BIN=_build/default/bin/main.exe
 TIMEOUT=180
 WITH_INIT=0
@@ -71,6 +76,13 @@ for t in "${targets[@]}"; do
     env NYAYA_STATS=1 NYAYA_SWEEP_ALL=1 timeout "$TIMEOUT" "$BIN" "$file" >"$log" 2>&1
     rc=$?
     [ "$rc" = 124 ] && verdict=TIMEOUT || verdict=swept
+  fi
+
+  # Stop the whole run if the child was interrupted (SIGINT=130) or killed
+  # (SIGTERM=143) -- these only come from signals, never from a checker verdict.
+  if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then
+    printf "\n[bench] interrupted -- stopping.\n" >&2
+    exit 130
   fi
 
   # Parse the single [STATS] summary line: "... whnf-miss=N ... delta=N ... peak-whnf-depth=N ... cpu=Nms"
