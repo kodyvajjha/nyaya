@@ -1336,6 +1336,7 @@ and isDefEq_impl env e1 e2 =
             Expr.Const { name = n2; uparams = vs } )
           when args1 <> [] && n1 = n2
                && List.length args1 = List.length args2
+               && List.length us = List.length vs
                && CCList.fold_left2
                     (fun acc u v -> acc && Level.(u === v))
                     true us vs ->
@@ -1459,9 +1460,10 @@ and isDefEq_impl env e1 e2 =
                         match Expr.node dt.head, Expr.node ds.head with
                         | ( Expr.Const { uparams = us; _ },
                             Expr.Const { uparams = vs; _ } ) ->
-                          CCList.fold_left2
-                            (fun acc u v -> acc && Level.(u === v))
-                            true us vs
+                          List.length us = List.length vs
+                          && CCList.fold_left2
+                               (fun acc u v -> acc && Level.(u === v))
+                               true us vs
                         | _ -> false
                       in
                       let congruent =
@@ -1720,6 +1722,7 @@ and isDefEq_impl env e1 e2 =
                     Expr.Const { name = n2; uparams = vs } ) ->
                   if
                     n1 = n2
+                    && List.length us = List.length vs
                     && CCList.fold_left2
                          (fun acc u v -> acc && Level.(u === v))
                          true us vs
