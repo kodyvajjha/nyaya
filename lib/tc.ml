@@ -516,7 +516,14 @@ module Reduce = struct
         (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
         | Some _ as r -> r
         | None ->
-          (* Partial iota for Nat.sub: recurses only on the subtrahend, matching Nat.sub's own equations. *)
+          (* Partial iota for Nat.sub: recurses only on the subtrahend, matching
+             Nat.sub's own equations. The literal-subtrahend case is bounded to
+             <= 64, like add/mul/pow's partial iota -- for a large literal
+             subtrahend with a symbolic minuend this would otherwise peel one
+             predecessor at a time (e.g. ~4.3e9 times for a 2^32-scale mask
+             literal). Beyond the bound, decline: whnf's Nat.sub delta guard
+             keeps the term stuck instead of forcing the same blowup via
+             Nat.sub's own definition. *)
           let is_zero e =
             match Expr.node (whnf env e) with
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
@@ -531,7 +538,8 @@ module Reduce = struct
               Some x
             | _ ->
               (match Expr.node e' with
-              | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
+              | Expr.Literal (Expr.NatLit k)
+                when Z.gt k Z.zero && Z.leq k (Z.of_int 64) ->
                 Some (Expr.natlit (Z.pred k))
               | _ -> None)
           in
@@ -991,6 +999,15 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     | None ->
       let hd' =
         match hd |> Expr.node with
+        | Expr.Const { name; _ }
+          when name = Name.Str (Name.Str (Name.Anon, "Nat"), "sub") ->
+          (* nat_lit_reduce just declined for this Nat.sub application (a
+             large/symbolic subtrahend past its bound); delta-unfolding
+             Nat.sub's own brecOn definition here would force the identical
+             blowup via a different path, so stay stuck instead. Scoped to
+             Nat.sub only -- guarding mod/div/modCore too breaks
+             Nat.modCore_lt, which needs modCore delta-unfolded. *)
+          hd
         | Expr.Const _ -> Reduce.delta_at_head env hd
         | Expr.Proj _ -> (
           match Reduce.proj_field_at_head env hd whnf with

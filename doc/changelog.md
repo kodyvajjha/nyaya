@@ -5,6 +5,51 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-15: bound the Nat.sub partial-iota peel, fixing the `UInt16.toUInt32_toUInt64` regression
+
+**File:** `lib/tc.ml`, `Reduce.nat_lit_reduce` (`Nat.sub` case) and `whnf_impl` (App
+case, head reduction).
+
+**Problem:** The 2026-07-13 diagnosis (see that entry below) identified two
+walls in `UInt16.toUInt32_toUInt64`. The first (a projection-head Nat.pow
+normalization bug) was fixed in `3a30636`. The second was left open: `Nat.sub`'s
+partial-iota rule (`Nat.sub a (succ b) --> Nat.pred (Nat.sub a b)`) recurses on
+the subtrahend with **no bound**, unlike the sibling `Nat.add`/`Nat.mul`/`Nat.pow`
+partial-iota rules, which all cap the symbolic-second-arg peel at `n <= 64`. On a
+symbolic minuend and a `2^32`-scale literal subtrahend (`4294966801`), this peels
+one predecessor at a time toward zero -- billions of steps, tripping the 2000-deep
+`whnf` depth limit long before making real progress.
+
+**Fix:** Two changes, both scoped to `Nat.sub` only:
+1. `nat_lit_reduce`'s `Nat.sub` case now only treats a literal subtrahend as a
+   successor (`NatLit k -> pred (NatLit (k-1))`) when `k <= 64`, matching
+   add/mul/pow's existing convention. Above the bound, it declines (returns
+   `None`) rather than peeling.
+2. Once `nat_lit_reduce` declines for a `Nat.sub` application, `whnf_impl`'s App
+   case no longer delta-unfolds `Nat.sub`'s own definition (`brecOn`/`Nat.below`)
+   to try to make progress another way -- that unfold hits the identical blowup
+   via a different path. The term is left stuck instead. This guard is
+   deliberately narrow: guarding `mod`/`div`/`modCore` the same way breaks
+   `Nat.modCore_lt`, which genuinely needs `modCore` delta-unfolded for some
+   symbolic arguments (per the 2026-07-13 note on soundness-risk #1's
+   follow-up work, where this exact guard shape was worked out but never
+   landed on master before this).
+
+**Declaration unblocked:** `UInt16.toUInt32_toUInt64` (isolated
+`NYAYA_ONLY_DECL` check now passes). Full `dune build @runtest` suite unchanged
+at 4 known failures (`perf/app-lam`, `perf/grind-ring-5`, `bad/130`, `bad/131`
+-- see `doc/soundness-risks.md` #2 and the lazy-delta follow-up tracked
+elsewhere), no new regressions.
+
+**Kernel reference:** `type_checker.cpp` `reduce_nat`/`reduce_bin_nat_op` only
+special-case Nat literals when both arguments are already literal; a symbolic
+minuend with a huge literal subtrahend is not a case the real kernel forces via
+unbounded predecessor peeling either. Bounding the peel and declining beyond it
+keeps nyaya's behavior narrow (never *more* permissive), matching the
+soundness-preserving direction the guard removal in `988bfa7` established.
+
+---
+
 ## 2026-07-13: diagnose `UInt16.toUInt32_toUInt64` init regression after `988bfa7`
 
 **File:** `lib/tc.ml`, `nat_lit_reduce`, projection head reduction,
