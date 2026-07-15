@@ -5,6 +5,118 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-15: lazy-delta reduction in isDefEq
+
+**Files:** `lib/tc.ml` -- new `whnf_core`/`whnf_core_impl` (delta-free WHNF),
+new `find_delta_target`/`unfold_delta_target`/`compare_reducibility_hints`
+(module scope, just above `infer`), and a `lazy_delta` loop spliced into
+`isDefEq_impl` in place of the old eager `whnf env e1`/`whnf env e2`.
+
+**Problem:** `988bfa7` (soundness-risk #1) correctly removed the unsound
+Prop-skip in `isDefEq`, but the cost was `isDefEq` falling back to fully
+`whnf`-ing both sides on every comparison -- doing orders of magnitude more
+reduction than the kernel, which keeps comparisons shallow via
+`lazy_delta_reduction`. This was the confirmed root cause of the
+`grind-ring-5` regression (false-reject on depth limit) and a contributor to
+`app-lam`'s timeout.
+
+**Fix, ported directly from `type_checker.cpp`** (fetched and read against
+primary source, not from memory):
+- `whnf_core`: weak-head normal form that never delta-unfolds a `Const` head
+  (mirrors the kernel's `whnf_core`). Beta/iota/zeta/projection/native-Nat
+  reduction still fire. Separately memoized (`whnf_core_memo`).
+  - One kernel subtlety that cost a regression before catching it: a
+    recursor's major premise still needs *full* `whnf` (with delta) to see
+    through typeclass wrappers like `OfNat.ofNat`/`instOfNatNat` down to
+    `Nat.zero` -- that's not delta on the recursor's own head (recursors
+    have no `value`, iota is a separate mechanism), it's evaluating a strict
+    subterm. The kernel does the same (`cheap_rec` is false even inside
+    `is_def_eq_core`). Missing this broke `init-prelude`
+    (`Array.appendCore.loop.match_1`) on first pass; fixed by passing `whnf`,
+    not `whnf_core`, into `iota_at_head`'s major-premise reduction.
+- `isDefEq_impl`'s core loop (`lazy_delta`): whnf_core both sides, then loop
+  -- Nat.succ/zero offset bridge (peel one level via a real `isDefEq`
+  recursive call, not a literal-magnitude peel) -> native (both-literal-only)
+  Nat reduction -> unfold whichever side has lower reducibility height
+  (`Def.red_hint`, now finally consumed instead of ignored) -> at equal
+  height, try same-declaration arg-by-arg congruence before unfolding both.
+  Depth-capped (`NYAYA_LAZY_DELTA_MAX_DEPTH`, default 8192) since this is a
+  plain local recursion outside the `MakeTrace` depth-tracked call tree.
+- `nat_lit_reduce` gained a `~native_only` mode (both-literal-pairs only, no
+  partial-iota) for this loop, matching the kernel's `reduce_nat` exactly --
+  the partial-iota extensions are a nyaya-specific addition for whnf outside
+  of defeq and stay off here.
+- Congruence-failure cache (`congruence_failure_memo`, keyed on tag pairs):
+  ports the kernel's `failed_before`/`cache_failure` so a repeated subterm
+  pattern (e.g. across a ring-normalization proof) doesn't re-pay for the
+  same doomed congruence check every time an enclosing term revisits it.
+  Turned out to be load-bearing, not optional -- without it grind-ring-5
+  still didn't terminate in reasonable time even with lazy-delta's other
+  pieces in place.
+- After lazy-delta gets stuck (neither side delta-eligible at the head), one
+  more full-`whnf` pass on both sides before falling to the existing
+  congruence/eta fallbacks -- mirrors the kernel's second `whnf_core` pass
+  "using whnf to reduce projections". Needed because a stuck `Proj` can still
+  be hiding a delta-eligible instance underneath (`(instOfNatNat 0).1`).
+
+**Result (measured, `scripts/bench.sh`):**
+- `init-prelude`: still accepts; whnf-miss 105114→87953, cpu ~24s→~21s.
+- `grind-ring-5`: was killed at the harness's 180s cap with no verdict at
+  all; now reaches a verdict (reject, still a false-reject) in ~16.5s.
+  whnf-miss 134763→89491 (-34%), delta 32493→24944 (-23%). **Not yet fixed**:
+  peak-whnf-depth is still 2001 (still trips the depth cap) even with the
+  cap raised 10x (`NYAYA_WHNF_MAX_DEPTH=20000`, still doesn't resolve in
+  90s) -- isolating the offending declaration
+  (`_private.Test.0.thm._proof_1_1`, same one flagged in the original
+  diagnosis) shows the new lazy-delta path resolving quickly for most of the
+  corpus, but this one declaration's stuck-projection fallback (the "one
+  more full whnf pass" above) still drives a long chain, most likely because
+  it's forcing a genuinely large well-founded-recursion-based proof term
+  rather than hitting an algorithmic gap in lazy-delta itself. Left open --
+  candidate next steps are the union-find/further congruence-caching work
+  already on the list, or narrowing the stuck-projection fallback further.
+- `app-lam`: still times out (pre-existing, separate beta/instantiation
+  issue, not a lazy-delta target -- see `doc/perf-deferrals.md`).
+- Full `dune build @runtest`: same 4 known failures as before this change
+  (`perf/app-lam`, `perf/grind-ring-5`, `bad/130`, `bad/131`), no new
+  regressions across the other 160 cases. Full-suite wall time dropped from
+  ~72-85s to ~34-72s across runs (noisy, but consistently at or below the
+  pre-change baseline).
+
+**Follow-up same day: `Int.fdiv_eq_ediv` regression + a safety-net fallback.**
+Running a broader `init.export` sample (beyond the curated 164-case suite)
+surfaced a second, real lazy-delta regression: `Int.fdiv_eq_ediv` (comparing
+a `congrArg`-produced proof's type against its `id`-ascribed expected type)
+passed before this change and failed after. Root cause: `whnf` continuing
+from the lazy-delta loop's `` `Stuck `` output is *not* always equivalent to
+independently `whnf`-ing the original two expressions from scratch -- most
+likely because `iota_at_head`'s major-premise resolution (specifically its
+`is_K` reduction check) can take a different path depending on how much of
+the surrounding term lazy-delta already unfolded before handing it off,
+versus starting fresh. Rather than chase the exact non-confluence (a deeper
+rabbit hole with diminishing returns), added a safety net: if the normal
+lazy-delta path raises `Defeq_failure`, retry once against `whnf env e1`/
+`whnf env e2` on the *original*, pre-lazy-delta expressions before giving up.
+This exactly reproduces the old, proven-correct behavior as an ultimate
+fallback -- it can only rescue a case lazy-delta's strategy mishandled, never
+mask a real inequality (if the fallback changes nothing, the original
+failure is re-raised). Verified: fires 0 times across the full curated
+164-case suite (no perf cost there); fixes `Int.fdiv_eq_ediv`; a follow-on
+300s discovery-mode sample of `init.export` (alphabetically broad --
+`Int`/`UInt`/`List`/`Array`/`BitVec`/`Nat`/`Vector`/`IO`/`Subarray`/`Mod`,
+1886 declarations) completed with **zero** new failures before hitting the
+time cap.
+
+**Kernel references:** `type_checker.cpp` `whnf_core`, `whnf`, `is_delta`,
+`unfold_definition`, `lazy_delta_reduction`, `lazy_delta_reduction_step`,
+`is_def_eq_offset`, `reduce_nat`, `is_def_eq_core`, `failed_before`/
+`cache_failure`; `declaration.cpp`'s `compare(reducibility_hints, ...)` for
+the height-ordering rule (`constant_info::get_hints` confirms Theorem/Opaque
+default to the Opaque hint, matching `find_delta_target`'s treatment of
+`Decl.Thm`/`Decl.Opaque`).
+
+---
+
 ## 2026-07-15: bound the Nat.sub partial-iota peel, fixing the `UInt16.toUInt32_toUInt64` regression
 
 **File:** `lib/tc.ml`, `Reduce.nat_lit_reduce` (`Nat.sub` case) and `whnf_impl` (App
