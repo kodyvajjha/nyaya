@@ -5,6 +5,67 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-17: three DAG-walk perf fixes -- generalized beta, `abstract_fvar`/`subst_levels` short-circuits
+
+**Files:** `lib/expr.ml` (`instantiate_many`, `has_free_vars`, `abstract_fvar`,
+`subst_levels`), `lib/tc.ml` (`Reduce.beta`).
+
+Three independent fixes to the same class of problem: a function
+unconditionally re-walking a whole (potentially large, heavily hash-cons-
+shared) subterm on every call, in a hot path, when a cheap check could skip
+the walk entirely. Found while looking for "easy win" perf TODOs already
+flagged in the code, prompted by a slow `init.export` discovery run.
+
+1. **Generalized beta** (`Reduce.beta`, per Kody's request -- checked
+   whether nyaya already batches a telescope of applied args into one
+   substitution pass; it didn't). The old `beta` called `Expr.instantiate`
+   once per applied argument, each call re-walking the *entire* remaining
+   lambda body -- for `n` args applied to `n` nested lambdas, O(n *
+   size(body)) instead of O(size(body)). Added `Expr.instantiate_many`:
+   peels as many leading `Lam`s as there are available args in one pass
+   (cheap -- walks the Lam/body spine, not the bodies' sizes), then
+   substitutes the whole telescope into the innermost body in a single
+   traversal. Verified against the old sequential behavior on full,
+   partial, and over-application cases (physically identical hash-cons
+   output, not just structurally equal) via a throwaway scratch harness
+   (not committed). Bonus: found that the old per-argument `instantiate`
+   mishandles a bound variable escaping *past* the whole telescope (an
+   index beyond the single binder each call assumes) -- substitutes it
+   with the wrong argument instead of shifting it down. Confirmed this
+   never fires on the real corpus (nyaya always converts an enclosing
+   binder to a `FreeVar` via `instantiate` before recursing into its body,
+   so no subterm reaching `beta` should have such an escaping index), but
+   `instantiate_many` handles it correctly regardless, as a side effect of
+   being written as one clean generalized substitution rather than a fold.
+2. **`Expr.abstract_fvar`** (own TODO: "will need to be optimized later by
+   checking if the expr has any free variables") -- called once per `Lam`
+   in `infer_impl` on the inferred body type, unconditionally walking it
+   even when the target free var doesn't appear at all. Added a memoized
+   `has_free_vars` (same memoize-by-hash-cons-tag pattern as
+   `num_loose_bvars`, since a DAG-as-tree re-walk here is the same shape of
+   blowup `num_loose_bvars` was memoized to fix, see
+   [[project_nyaya_oom_investigation]]) and short-circuit on it.
+3. **`Expr.subst_levels`** -- called on every delta unfold
+   (`Reduce.delta_at_head`) and several `infer`/iota sites, with zero
+   short-circuit even when substituting against a non-universe-polymorphic
+   declaration (`ks = []`, the common case -- most `Init` definitions have
+   no universe params at all). Added a `match ks with [] -> expr | _ ->
+   ...` guard; `Level.subst`'s own `Param` case already falls through to
+   the input unchanged when `ks=[]`, so this is exactly a no-op being
+   skipped, not a behavior change.
+
+**Result:** full `dune build @runtest` unchanged (same 4 known failures, no
+regressions). `scripts/bench.sh`: `init-prelude` cpu ~20.8s -> ~18.5s
+(~11%), deterministic counters (whnf-miss/delta/defeq) unchanged confirming
+no behavior change; `grind-ring-5` within noise (unchanged). `app-lam`
+still times out -- unaffected, its blowup is a separate, already-deferred
+issue (`doc/perf-deferrals.md`), not a repeated-single-arg-beta pattern.
+These are real but modest constant-factor wins, not a fix for the
+union-find `isDefEq` TODO (`lib/tc.ml` ~line 1312) or `app-lam`'s
+timeout, which remain the larger open perf items.
+
+---
+
 ## 2026-07-17: short-circuit literal-vs-literal in the Nat.succ offset bridge, clearing `Int16.ofBitVec_intMax`
 
 **File:** `lib/tc.ml`, `isDefEq_impl`'s `nat_offset_bridge` (used by the

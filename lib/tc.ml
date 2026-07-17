@@ -165,14 +165,27 @@ module Reduce = struct
   open Expr
 
   let beta e =
-    let rec aux f args =
+    (* Generalized beta: peel as many leading [Lam]s off [f] as there are
+       available [args] in one pass (cheap -- walks the Lam/body spine, not
+       the bodies' own sizes), then substitute all of them into the
+       innermost remaining body in a single traversal via
+       [Expr.instantiate_many], instead of the old one-[instantiate]-per-
+       argument loop (each of which re-walked the whole, only-shrinking-by-
+       one-binder body). *)
+    let rec count_peelable f args k =
       match node f, args with
-      | Lam { body; _ }, v :: vs ->
-        aux (instantiate ~free_var:v ~expr:body ()) vs
-      | _, _ -> mk_app f args
+      | Lam { body; _ }, _ :: vs -> count_peelable body vs (k + 1)
+      | _, _ -> f, k
     in
     let f, args = get_apps e in
-    aux f args
+    let inner, k = count_peelable f args 0 in
+    if k = 0 then
+      e
+    else (
+      let consumed = CCList.take k args in
+      let remaining = CCList.drop k args in
+      mk_app (instantiate_many ~free_vars:consumed ~expr:inner ()) remaining
+    )
 
   let delta_at_head (env : Env.t) f =
     (* One-step delta reduction of the head. *)
@@ -1399,27 +1412,28 @@ and isDefEq_impl env e1 e2 =
           | Expr.Literal (Expr.NatLit n), Expr.Literal (Expr.NatLit m) ->
             Some (Z.equal n m)
           | _ ->
-          let as_nat_succ e =
-            match Expr.node e with
-            | Expr.Literal (Expr.NatLit n) when Z.gt n Z.zero ->
-              Some (Expr.natlit (Z.pred n))
-            | _ ->
-              (match Expr.get_apps e with
-              | shd, [ x ] ->
-                (match Expr.node shd with
-                | Expr.Const { name; _ }
-                  when name = Name.Str (Name.Str (Name.Anon, "Nat"), "succ") ->
-                  Some x
+            let as_nat_succ e =
+              match Expr.node e with
+              | Expr.Literal (Expr.NatLit n) when Z.gt n Z.zero ->
+                Some (Expr.natlit (Z.pred n))
+              | _ ->
+                (match Expr.get_apps e with
+                | shd, [ x ] ->
+                  (match Expr.node shd with
+                  | Expr.Const { name; _ }
+                    when name = Name.Str (Name.Str (Name.Anon, "Nat"), "succ")
+                    ->
+                    Some x
+                  | _ -> None)
                 | _ -> None)
-              | _ -> None)
-          in
-          if is_nat_zero t_n && is_nat_zero s_n then
-            Some true
-          else (
-            match as_nat_succ t_n, as_nat_succ s_n with
-            | Some p, Some q -> Some (isDefEq env p q)
-            | _ -> None
-          )
+            in
+            if is_nat_zero t_n && is_nat_zero s_n then
+              Some true
+            else (
+              match as_nat_succ t_n, as_nat_succ s_n with
+              | Some p, Some q -> Some (isDefEq env p q)
+              | _ -> None
+            )
         in
         let rec lazy_delta depth t_n s_n =
           if depth > max_lazy_delta_depth then
@@ -2160,6 +2174,7 @@ let check_env_verdict (env : Env.t) : verdict =
            Hashtbl.reset congruence_failure_memo;
            Hashtbl.reset infer_memo;
            Hashtbl.reset Expr.num_loose_bvars_memo;
+           Hashtbl.reset Expr.has_free_vars_memo;
            let name = CCFormat.to_string Name.pp n in
            stats_begin_decl ();
            Fun.protect
@@ -2240,6 +2255,7 @@ let typecheck (env : Env.t) =
         Hashtbl.reset congruence_failure_memo;
         Hashtbl.reset infer_memo;
         Hashtbl.reset Expr.num_loose_bvars_memo;
+        Hashtbl.reset Expr.has_free_vars_memo;
         let record_failure () =
           failures := decl_name_str :: !failures;
           (* Stream failures as they happen, so a killed sweep still leaves a partial record. *)
@@ -2279,6 +2295,7 @@ let typecheck (env : Env.t) =
         Hashtbl.reset congruence_failure_memo;
         Hashtbl.reset infer_memo;
         Hashtbl.reset Expr.num_loose_bvars_memo;
+        Hashtbl.reset Expr.has_free_vars_memo;
         let info = Decl.get_decl_info d in
         (* Check well-posedness. *)
         let is_well_posed = well_posed env info in
@@ -2332,6 +2349,7 @@ let typecheck (env : Env.t) =
            Hashtbl.reset congruence_failure_memo;
            Hashtbl.reset infer_memo;
            Hashtbl.reset Expr.num_loose_bvars_memo;
+           Hashtbl.reset Expr.has_free_vars_memo;
            (try ignore (check env d) with _ -> ());
            Format.pp_print_flush debug_ppf ();
            close_out oc;

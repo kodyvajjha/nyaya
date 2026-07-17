@@ -332,20 +332,6 @@ let pp fpf e = Pp.pp Pp.Prec.Bot fpf e
 
 let to_string e = Fmt.to_string pp e
 
-let rec has_free_vars (expr : t) =
-  match node expr with
-  | BoundVar _ -> false
-  | FreeVar _ -> true
-  | Const _ -> false
-  | Sort _ -> false
-  | App (f, x) -> has_free_vars f || has_free_vars x
-  | Lam { btype; body; _ } -> has_free_vars btype || has_free_vars body
-  | Forall { btype; body; _ } -> has_free_vars btype || has_free_vars body
-  | Let { btype; value; body; _ } ->
-    has_free_vars btype || has_free_vars value || has_free_vars body
-  | Proj { expr; _ } -> has_free_vars expr
-  | Literal _ -> false
-
 let is_free_var expr =
   match expr with
   | FreeVar _ -> true
@@ -388,6 +374,35 @@ let rec num_loose_bvars expr =
     in
     Hashtbl.replace num_loose_bvars_memo (tag expr) n;
     n
+
+(* Memoized by hash-cons tag, same rationale as [num_loose_bvars_memo]:
+   whether an expr contains *any* [FreeVar] at all is a pure structural
+   property, independent of which fvarId [abstract_fvar] is looking for.
+   [abstract_fvar] previously walked its whole argument unconditionally on
+   every call (its own TODO above flagged this); on a heavily-shared DAG --
+   e.g. a large inferred body type re-walked once per enclosing [Lam] in
+   [infer_impl] -- that is the same shape of DAG-as-tree blowup
+   [num_loose_bvars] was memoized to fix. Reset per declaration alongside
+   the other memo tables. *)
+let has_free_vars_memo : (int, bool) Hashtbl.t = Hashtbl.create 8192
+
+let rec has_free_vars expr =
+  match Hashtbl.find_opt has_free_vars_memo (tag expr) with
+  | Some b -> b
+  | None ->
+    let b =
+      match node expr with
+      | Sort _ | Const _ | Literal _ | BoundVar _ -> false
+      | FreeVar _ -> true
+      | App (f, a) -> has_free_vars f || has_free_vars a
+      | Lam { btype; body; _ } | Forall { btype; body; _ } ->
+        has_free_vars btype || has_free_vars body
+      | Let { btype; value; body; _ } ->
+        has_free_vars btype || has_free_vars value || has_free_vars body
+      | Proj { expr; _ } -> has_free_vars expr
+    in
+    Hashtbl.replace has_free_vars_memo (tag expr) b;
+    b
 
 (** Substitute the [free_var] at the [expr] (has to be a bound variable). *)
 let instantiate
@@ -440,9 +455,61 @@ let instantiate
   in
   instantiate_aux free_var expr 0
 
+(** Simultaneously substitute a whole telescope of bound variables in one
+    traversal ("generalized beta"): [free_vars] in application order (the
+    first element fills the outermost binder, matching [get_apps]'s [args]
+    order), against [expr] being the body left after stripping that many
+    binders. Equivalent to folding [instantiate] once per element of
+    [free_vars] (each re-walking the whole, only-shrinking-by-one-binder
+    remaining term), but in a single pass over [expr] -- for [n] arguments
+    applied to [n] nested lambdas, that's O(size expr) instead of O(n * size
+    expr). Used by {!Tc.Reduce.beta} to avoid re-walking a large lambda body
+    once per applied argument. *)
+let instantiate_many
+    ?(logger =
+      (module Util.MakeLogger (struct
+        let header = "Expr"
+      end) : Util.LOGGER)) ~(free_vars : t list) ~(expr : t) () =
+  let _logger = logger in
+  match free_vars with
+  | [] -> expr
+  | _ ->
+    let k = List.length free_vars in
+    (* subs.(j) is the value for [BoundVar (offset + j)]: the innermost
+       stripped binder is [BoundVar 0], which corresponds to the *last*
+       applied argument, so reverse [free_vars] into subs order. *)
+    let subs = Array.of_list (List.rev free_vars) in
+    let rec aux (expr : t) (offset : int) =
+      if num_loose_bvars expr <= offset then
+        expr
+      else (
+        match node expr with
+        | BoundVar i ->
+          if i < offset then
+            expr
+          else if i - offset < k then
+            subs.(i - offset)
+          else
+            (* Escaping past the whole telescope: shift down by [k], since
+               [k] binders are being removed at once. *)
+            bv (i - k)
+        | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
+        | App (f, a) -> app (aux f offset) (aux a offset)
+        | Lam { name; btype; binfo; body } ->
+          lambda name (aux btype offset) binfo (aux body (offset + 1))
+        | Forall { name; btype; binfo; body } ->
+          pi name (aux btype offset) binfo (aux body (offset + 1))
+        | Let { name; btype; value; body } ->
+          letin name (aux btype offset) (aux value offset)
+            (aux body (offset + 1))
+        | Proj { name; nat; expr } -> proj name nat (aux expr offset)
+      )
+    in
+    aux expr 0
+
 (** Abstract a specific free var (by [target_id]) at depth [k], producing a body
-   suitable to be wrapped by a binder inserted at that same depth [k]. TODO: This will need to be optimized later by checking if the expr has any free variables. *)
-let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
+   suitable to be wrapped by a binder inserted at that same depth [k]. *)
+let rec abstract_fvar_aux ~(target_id : int) ~(k : int) (e : t) =
   match node e with
   | BoundVar i ->
     (* we are inserting a binder at depth k; bump existing indices >= k *)
@@ -457,43 +524,61 @@ let rec abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
       e
   | Const _ | Sort _ | Literal _ -> e
   | App (f, a) ->
-    app (abstract_fvar ~target_id ~k f) (abstract_fvar ~target_id ~k a)
+    app (abstract_fvar_aux ~target_id ~k f) (abstract_fvar_aux ~target_id ~k a)
   | Lam { name; btype; binfo; body } ->
     lambda name
-      (abstract_fvar ~target_id ~k btype)
+      (abstract_fvar_aux ~target_id ~k btype)
       binfo
-      (abstract_fvar ~target_id ~k:(k + 1) body)
+      (abstract_fvar_aux ~target_id ~k:(k + 1) body)
   | Forall { name; btype; binfo; body } ->
     pi name
-      (abstract_fvar ~target_id ~k btype)
+      (abstract_fvar_aux ~target_id ~k btype)
       binfo
-      (abstract_fvar ~target_id ~k:(k + 1) body)
+      (abstract_fvar_aux ~target_id ~k:(k + 1) body)
   | Let { name; btype; value; body } ->
     letin name
-      (abstract_fvar ~target_id ~k btype)
-      (abstract_fvar ~target_id ~k value)
-      (abstract_fvar ~target_id ~k:(k + 1) body)
+      (abstract_fvar_aux ~target_id ~k btype)
+      (abstract_fvar_aux ~target_id ~k value)
+      (abstract_fvar_aux ~target_id ~k:(k + 1) body)
   | Proj { name; nat; expr = e1 } ->
-    proj name nat (abstract_fvar ~target_id ~k e1)
+    proj name nat (abstract_fvar_aux ~target_id ~k e1)
 
+let abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
+  if has_free_vars e then
+    abstract_fvar_aux ~target_id ~k e
+  else
+    e
+
+(* [ks = []] (substituting against a non-universe-polymorphic declaration --
+   the common case, since most Init definitions have no universe params at
+   all) is a no-op for every case below: [Level.subst]'s [Param] case looks
+   [level] up in [ks]/[vs] and falls through to [level] unchanged when [ks]
+   is empty, and every other case just rebuilds an equal tree around that.
+   Skip the rebuild (a full hashcons walk of [expr], often a whole
+   definition body) entirely rather than reconstructing an identical tree
+   node by node -- this runs on every delta unfold (`Reduce.delta_at_head`),
+   the hottest path in the checker. *)
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
-  match node expr with
-  | BoundVar _ | Literal _ -> expr
-  | Sort l -> sort (Level.subst_simp ~level:l ~ks ~vs)
-  | FreeVar { name; expr; info; fvarId } ->
-    fvar name (subst_levels expr ks vs) info fvarId
-  | Const { name; uparams } ->
-    let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
-    const name ~ups:uparams'
-  | App (f, a) -> app (subst_levels f ks vs) (subst_levels a ks vs)
-  | Lam { name; btype; binfo; body } ->
-    lambda name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
-  | Forall { name; btype; binfo; body } ->
-    pi name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
-  | Let { name; btype; value; body } ->
-    letin name (subst_levels btype ks vs) (subst_levels value ks vs)
-      (subst_levels body ks vs)
-  | Proj { name; nat; expr } -> proj name nat (subst_levels expr ks vs)
+  match ks with
+  | [] -> expr
+  | _ ->
+    (match node expr with
+    | BoundVar _ | Literal _ -> expr
+    | Sort l -> sort (Level.subst_simp ~level:l ~ks ~vs)
+    | FreeVar { name; expr; info; fvarId } ->
+      fvar name (subst_levels expr ks vs) info fvarId
+    | Const { name; uparams } ->
+      let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
+      const name ~ups:uparams'
+    | App (f, a) -> app (subst_levels f ks vs) (subst_levels a ks vs)
+    | Lam { name; btype; binfo; body } ->
+      lambda name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
+    | Forall { name; btype; binfo; body } ->
+      pi name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
+    | Let { name; btype; value; body } ->
+      letin name (subst_levels btype ks vs) (subst_levels value ks vs)
+        (subst_levels body ks vs)
+    | Proj { name; nat; expr } -> proj name nat (subst_levels expr ks vs))
 
 open Nyaya_parser
 
