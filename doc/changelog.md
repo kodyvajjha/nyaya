@@ -5,6 +5,53 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-17: union-find cache for positive `isDefEq` verdicts, ported from nanoda_lib
+
+**Files:** `lib/tc.ml` -- new `Uf` module, wired into `isDefEq`/`isDefEq_impl`.
+
+**Problem:** nyaya already cached *negative* `isDefEq` results
+(`congruence_failure_memo`, ported from `type_checker.cpp`'s
+`failed_before`/`cache_failure`), but had no equivalent for *positive*
+results -- every `isDefEq` call re-derived a verdict from scratch even if
+the exact same pair (or an equivalent pair, transitively) had already been
+proven equal earlier in the same declaration's check. Flagged as a TODO in
+the code (`lib/tc.ml` ~1325) since the lazy-delta work landed. 
+
+
+**Result:** `Uf` module (`lib/tc.ml`, next to `congruence_failure_memo`) --
+an int-tag-keyed union-find (`Hashtbl` of `{mutable parent; mutable
+rank}`, since expr hash-cons tags are already unique ints; simpler than
+nanoda's generic `IndexMap`-backed version, no separate index-assignment
+needed). `isDefEq_impl` checks `Uf.check_eq (tag e1) (tag e2)` right after
+the physical-equality check, before any reduction; `isDefEq` calls
+`Uf.union (tag e1) (tag e2)` whenever the result is `true`, so every
+successful comparison at every recursion depth feeds the cache, not just
+the top-level check. Reset per declaration alongside the other memo
+tables, for memory-boundedness (same rationale as
+`num_loose_bvars_memo`/`has_free_vars_memo`), not correctness -- a stale
+positive-equality fact from an earlier declaration would still be true,
+just unbounded in memory if never reset.
+
+**Result:** full `dune build @runtest` unchanged (same 4 known failures,
+no regressions; `grind-ring-5` and `bad/130`/`131` unchanged verdicts,
+`grind-ring-5` still hits the depth cap at the same peak-whnf-depth of
+2001). Deterministic work counters (the primary yardstick per
+`scripts/bench.sh`'s own docs, cpu-ms being the noisier cross-check) drop
+meaningfully: `grind-ring-5` delta -16%, defeq -17%; `init-prelude` delta
+-26%, defeq -3.5%; the motivating case,
+`List.mergeSort_of_sorted._proof_1_8` (a well-founded-recursion
+decreasing-measure proof, see the discussion below), delta -17%, defeq
+-21%. cpu-ms was too noisy on this shared machine to get a clean
+before/after percentage (grind-ring-5 alone swung 15.5s-19.6s across
+identical back-to-back runs), but is directionally consistent with the
+counter drops. Biggest expected win is for proofs with heavy internal
+repetition -- exactly `grind-ring-5`'s documented "repeated subterm
+pattern across a ring-normalization proof" shape, and well-founded-
+recursion side lemmas that re-derive the same decreasing-measure
+subcomparison across many hypothesis positions.
+
+---
+
 ## 2026-07-17: three DAG-walk perf fixes -- generalized beta, `abstract_fvar`/`subst_levels` short-circuits
 
 **Files:** `lib/expr.ml` (`instantiate_many`, `has_free_vars`, `abstract_fvar`,

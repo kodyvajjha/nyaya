@@ -896,6 +896,67 @@ let failed_congruence_before (t : Expr.t) (s : Expr.t) : bool =
 let cache_congruence_failure (t : Expr.t) (s : Expr.t) : unit =
   Hashtbl.replace congruence_failure_memo (congruence_failure_key t s) ()
 
+(** A per-declaration union-find over expr hash-cons tags, caching *positive*
+    [isDefEq] verdicts -- the complement of [congruence_failure_memo] above,
+    which only remembers failures. Modeled directly on nanoda_lib's
+    [UnionFind]/[TcCache.eq_cache] (`union_find.rs`, `tc.rs`): every successful
+    [isDefEq env e1 e2] unions [tag e1] and [tag e2] (see [isDefEq] below), and
+    every call first checks whether the two tags are already in the same
+    class -- via path compression, transitively, so if [e1] was separately
+    proven equal to some [e3] which was proven equal to [e2], this catches
+    [e1 =?= e2] for free without re-deriving it through congruence/delta/eta
+    again. This is a different, complementary gap from the failure cache:
+    that one only avoids repeating one doomed same-head congruence attempt;
+    this one avoids repeating an entire successful derivation (by whatever
+    rule) for a pair -- or an equivalent pair -- that recurs elsewhere in the
+    same proof term (e.g. a repeated sub-hypothesis across a well-founded-
+    recursion decreasing-measure proof). Reset per-declaration alongside the
+    other memo tables. *)
+module Uf = struct
+  type node = {
+    mutable parent: int;
+    mutable rank: int;
+  }
+
+  let table : (int, node) Hashtbl.t = Hashtbl.create 4096
+
+  let reset () = Hashtbl.reset table
+
+  let node_of tag =
+    match Hashtbl.find_opt table tag with
+    | Some n -> n
+    | None ->
+      let n = { parent = tag; rank = 0 } in
+      Hashtbl.replace table tag n;
+      n
+
+  let rec find tag =
+    let n = node_of tag in
+    if n.parent = tag then
+      tag
+    else (
+      let root = find n.parent in
+      n.parent <- root;
+      root
+    )
+
+  let union a b =
+    let ra = find a and rb = find b in
+    if ra <> rb then (
+      let na = node_of ra and nb = node_of rb in
+      if na.rank < nb.rank then
+        na.parent <- rb
+      else if na.rank > nb.rank then
+        nb.parent <- ra
+      else (
+        nb.parent <- ra;
+        na.rank <- na.rank + 1
+      )
+    )
+
+  let check_eq a b = find a = find b
+end
+
 (** Match Lean's reducibility-hint priority
     (`src/kernel/declaration.cpp`'s [compare]): negative unfolds [h1]'s side,
     positive unfolds [h2]'s side, zero unfolds both. Equal-height Regular
@@ -1322,12 +1383,13 @@ and whnf_core_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     | _ -> Expr.proj name nat inner')
   | _ -> expr
 
-(* TODO: optimize def eq checking with union-find; audit for other wasteful whnfs before def eq check. *)
+(* TODO: audit for other wasteful whnfs before def eq check. *)
 and isDefEq env e1 e2 =
   let frame = DefEqTrace.enter env (e1, e2) in
   match isDefEq_impl env e1 e2 with
   | ans ->
     DefEqTrace.leave_success env frame ans;
+    if ans then Uf.union (Expr.tag e1) (Expr.tag e2);
     ans
   | exception exn ->
     let backtrace = Printexc.get_raw_backtrace () in
@@ -1337,6 +1399,8 @@ and isDefEq env e1 e2 =
 and isDefEq_impl env e1 e2 =
   let module Logger = (val env.logger) in
   if e1 == e2 then
+    true
+  else if Uf.check_eq (Expr.tag e1) (Expr.tag e2) then
     true
   else (
     (* Proof irrelevance, before whnf and before the same-head-args shortcut below (else that shortcut deep-unfolds proof data first). *)
@@ -2172,6 +2236,7 @@ let check_env_verdict (env : Env.t) : verdict =
            Hashtbl.reset whnf_memo;
            Hashtbl.reset whnf_core_memo;
            Hashtbl.reset congruence_failure_memo;
+           Uf.reset ();
            Hashtbl.reset infer_memo;
            Hashtbl.reset Expr.num_loose_bvars_memo;
            Hashtbl.reset Expr.has_free_vars_memo;
@@ -2253,6 +2318,7 @@ let typecheck (env : Env.t) =
         Hashtbl.reset whnf_memo;
         Hashtbl.reset whnf_core_memo;
         Hashtbl.reset congruence_failure_memo;
+        Uf.reset ();
         Hashtbl.reset infer_memo;
         Hashtbl.reset Expr.num_loose_bvars_memo;
         Hashtbl.reset Expr.has_free_vars_memo;
@@ -2293,6 +2359,7 @@ let typecheck (env : Env.t) =
         Hashtbl.reset whnf_memo;
         Hashtbl.reset whnf_core_memo;
         Hashtbl.reset congruence_failure_memo;
+        Uf.reset ();
         Hashtbl.reset infer_memo;
         Hashtbl.reset Expr.num_loose_bvars_memo;
         Hashtbl.reset Expr.has_free_vars_memo;
@@ -2347,6 +2414,7 @@ let typecheck (env : Env.t) =
            Hashtbl.reset whnf_memo;
            Hashtbl.reset whnf_core_memo;
            Hashtbl.reset congruence_failure_memo;
+           Uf.reset ();
            Hashtbl.reset infer_memo;
            Hashtbl.reset Expr.num_loose_bvars_memo;
            Hashtbl.reset Expr.has_free_vars_memo;
