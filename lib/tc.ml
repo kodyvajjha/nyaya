@@ -1382,6 +1382,23 @@ and isDefEq_impl env e1 e2 =
             | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
             | _ -> false
           in
+          (* Two concrete literals: compare the big-int values directly.
+             Without this, [as_nat_succ] below (needed to bridge a literal
+             against a symbolic [Nat.succ] chain) would peel one unit off
+             *both* sides per step via a genuine recursive [isDefEq] call --
+             each peel is cheap, but it's one more [DefEqTrace]-counted
+             stack frame, so for two large literals (e.g. two Nat.emod
+             results 2^16 apart, as in [Int16.ofBitVec_intMax]) the tens of
+             thousands of peels needed blow the depth cap long before
+             reaching a verdict, even though the total work is trivial.
+             Same root shape as the [Nat.sub]-on-a-2^32-literal fix
+             (`135fd76`), but there the fix was also a real time-complexity
+             win; here it's purely about not exhausting the recursion-depth
+             budget on a lot of individually-cheap steps. *)
+          match Expr.node t_n, Expr.node s_n with
+          | Expr.Literal (Expr.NatLit n), Expr.Literal (Expr.NatLit m) ->
+            Some (Z.equal n m)
+          | _ ->
           let as_nat_succ e =
             match Expr.node e with
             | Expr.Literal (Expr.NatLit n) when Z.gt n Z.zero ->

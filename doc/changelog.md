@@ -5,6 +5,44 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-17: short-circuit literal-vs-literal in the Nat.succ offset bridge, clearing `Int16.ofBitVec_intMax`
+
+**File:** `lib/tc.ml`, `isDefEq_impl`'s `nat_offset_bridge` (used by the
+lazy-delta loop, `431694c`).
+
+**Problem:** A later discovery sweep (after the `String.append_empty` fix
+above) hit a new wall: `Int16.ofBitVec_intMax` failed with
+`Depth_limit("[d#2079] depth 2001 exceeds max 2000, input=96311 =?=
+30775")` -- the `DefEqTrace` recursion-depth cap (default 2000, separate
+from lazy-delta's own 8192 untraced-loop cap), not a hang. `96311 - 30775 =
+65536 = 2^16`, i.e. an `Int16`/`BitVec 16` modular-arithmetic byproduct.
+
+Root cause: `nat_offset_bridge`'s `as_nat_succ` treats *any* positive
+`NatLit n` as `Nat.succ (n-1)` -- correct when bridging a literal against a
+genuinely symbolic `Nat.succ` chain, but when *both* sides are concrete
+literals this makes `nat_offset_bridge` peel one unit off both per step via
+a real recursive `isDefEq` call (not lazy-delta's local loop), each one a
+new `DefEqTrace` frame. For `96311` vs `30775` that's up to 30775 nested,
+non-tail calls -- individually cheap, but enough stack frames to blow the
+depth cap long before finishing. Confirmed not a hang: raising
+`NYAYA_DEFEQ_MAX_DEPTH` to 200000 lets it complete and the declaration
+type-checks correctly, taking about the same wall time either way (~30s of
+actual work past parsing) -- the fix isn't a speedup, it's avoiding
+exhausting the depth budget on a lot of individually-cheap steps. Same root
+shape as the `Nat.sub`-on-a-2^32-literal fix (`135fd76`), but that one was
+also a real complexity win; this one wasn't.
+
+**Fix:** before the zero/succ dance, check if both sides are `Literal
+(NatLit _)` and short-circuit with a direct `Z.equal` comparison (O(1),
+zero recursive calls).
+
+**Declaration unblocked:** `Int16.ofBitVec_intMax`.
+
+**Result:** full `dune build @runtest` still exactly 4 known failures, no
+regressions.
+
+---
+
 ## 2026-07-17: fix missing universe param on synthesized `List.nil`/`List.cons`, clearing `String.append_empty`
 
 **File:** `lib/tc.ml`, `Reduce.string_lit_to_ctor`.
