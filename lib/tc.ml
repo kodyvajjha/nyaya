@@ -20,6 +20,26 @@ module Logger = Nyaya_parser.Util.MakeLogger (struct
   let header = "Checker"
 end)
 
+(** Inference mode, mirroring the kernel's [infer_type_core]'s [infer_only]
+    flag (`type_checker.cpp`) and nanoda_lib's [InferFlag] (`tc.rs`).
+
+    [Check] re-verifies as it goes: every [App] argument's type is defeq-
+    checked against the binder type, every [Let]/[Lam] binder type is
+    checked to be a sort, etc. This is what a declaration's own type and
+    value get, exactly once, at the top of [check]/[well_posed].
+
+    [InferOnly] trusts that its input is already well-typed and only
+    *computes* the type -- no defeq checks, no sort checks. Everything
+    inference does in service of reduction or definitional equality (proof
+    irrelevance, iota's K-check, struct-eta, unit-like defeq, projection
+    typing) runs on terms the checker itself produced by reducing already-
+    checked terms, so re-verifying them is pure overhead -- previously the
+    dominant work multiplier, since every [isDefEq] inferred both sides in
+    Check mode and every App node inside re-ran defeq on its argument. *)
+type infer_flag =
+  | Check
+  | InferOnly
+
 let truncate ?(max_len = 400) s =
   if String.length s <= max_len then
     s
@@ -36,7 +56,16 @@ let whnf_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
     delta-eligible [Const] head stuck; whnf unfolds it). *)
 let whnf_core_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
 
-let infer_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+(** Memo tables for {!infer}, one per {!infer_flag}, following nanoda_lib's
+    [infer_cache_check]/[infer_cache_no_check] split: a [Check] result is
+    strictly stronger than an [InferOnly] one (same computed type, more
+    verification), so [Check] hits satisfy both modes and its table is
+    consulted first for every query; an [InferOnly] result must never
+    satisfy a [Check] query, so the no-check table is only consulted in
+    [InferOnly] mode. *)
+let infer_memo_check : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+
+let infer_memo_no_check : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
 
 (** Whether diagnostic counters are collected ([NYAYA_STATS=1]). When off, the
     only cost is a handful of [if stats_on then incr] guards on hot paths. See
@@ -957,6 +986,22 @@ module Uf = struct
   let check_eq a b = find a = find b
 end
 
+(** Reset every per-declaration trace and memo table, so one declaration's
+    caches don't bleed into the next. (WhnfCoreTrace is deliberately not
+    reset, matching the previous inline reset blocks this consolidates.) *)
+let reset_decl_caches () =
+  InferTrace.reset ();
+  WhnfTrace.reset ();
+  DefEqTrace.reset ();
+  Hashtbl.reset whnf_memo;
+  Hashtbl.reset whnf_core_memo;
+  Hashtbl.reset congruence_failure_memo;
+  Uf.reset ();
+  Hashtbl.reset infer_memo_check;
+  Hashtbl.reset infer_memo_no_check;
+  Hashtbl.reset Expr.num_loose_bvars_memo;
+  Hashtbl.reset Expr.has_free_vars_memo
+
 (** Match Lean's reducibility-hint priority
     (`src/kernel/declaration.cpp`'s [compare]): negative unfolds [h1]'s side,
     positive unfolds [h2]'s side, zero unfolds both. Equal-height Regular
@@ -971,52 +1016,70 @@ let compare_reducibility_hints (h1 : Decl.hint) (h2 : Decl.hint) : int =
   | Decl.Abbrev, _ -> -1
   | _, Decl.Abbrev -> 1
 
-(** Infer the type of the given [expr].*)
-let rec infer (env : Env.t) (expr : Expr.t) : Expr.t =
-  match Hashtbl.find_opt infer_memo (Expr.tag expr) with
+(** Infer the type of the given [expr]. See {!infer_flag} for what [flag]
+    controls; declaration-level entry points pass [Check], everything in
+    service of reduction/defeq passes [InferOnly]. *)
+let rec infer (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
+  match Hashtbl.find_opt infer_memo_check (Expr.tag expr) with
   | Some ty ->
     if stats_on then incr infer_memo_hits;
     ty
   | None ->
-    let frame = InferTrace.enter env expr in
-    (match infer_impl env expr with
-    | ty ->
-      InferTrace.leave_success env frame ty;
-      Hashtbl.replace infer_memo (Expr.tag expr) ty;
+    let no_check_hit =
+      match flag with
+      | InferOnly -> Hashtbl.find_opt infer_memo_no_check (Expr.tag expr)
+      | Check -> None
+    in
+    (match no_check_hit with
+    | Some ty ->
+      if stats_on then incr infer_memo_hits;
       ty
-    | exception exn ->
-      let backtrace = Printexc.get_raw_backtrace () in
-      InferTrace.leave_failure env frame exn;
-      Printexc.raise_with_backtrace exn backtrace)
+    | None ->
+      let frame = InferTrace.enter env expr in
+      (match infer_impl flag env expr with
+      | ty ->
+        InferTrace.leave_success env frame ty;
+        (match flag with
+        | Check -> Hashtbl.replace infer_memo_check (Expr.tag expr) ty
+        | InferOnly -> Hashtbl.replace infer_memo_no_check (Expr.tag expr) ty);
+        ty
+      | exception exn ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        InferTrace.leave_failure env frame exn;
+        Printexc.raise_with_backtrace exn backtrace))
 
-and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
+and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
   match Expr.node expr with
   | Expr.Sort u -> Expr.sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } -> expr
   | Expr.Lam { name; btype; binfo; body } ->
     (* infer Lam: Pi binder (abstract (infer (instantiate body binderFvar)) binderFvar). *)
-    (match whnf env (infer env btype) |> Expr.node with
-    | Expr.Sort _ ->
-      let binder_free_var =
-        Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
-      in
-      let body_type =
-        infer env
-          (Expr.instantiate ~logger:env.logger ~free_var:binder_free_var
-             ~expr:body ())
-      in
-      let target_id = Expr.get_fvar_id binder_free_var in
-      Expr.pi name btype binfo (Expr.abstract_fvar ~target_id ~k:0 body_type)
-    | _ ->
-      Logger.err "infer Lam: binder type is not a sort: %a"
-        (TypeError "infer Lam: binder type not a sort") Expr.pp expr)
+    (* The binder-type-is-a-sort check is [Check]-only, like the kernel's
+       [infer_lambda] (which only [ensure_sort]s under [!infer_only]). *)
+    if flag = Check then (
+      match whnf env (infer flag env btype) |> Expr.node with
+      | Expr.Sort _ -> ()
+      | _ ->
+        Logger.err "infer Lam: binder type is not a sort: %a"
+          (TypeError "infer Lam: binder type not a sort") Expr.pp expr
+    );
+    let binder_free_var =
+      Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
+    in
+    let body_type =
+      infer flag env
+        (Expr.instantiate ~logger:env.logger ~free_var:binder_free_var
+           ~expr:body ())
+    in
+    let target_id = Expr.get_fvar_id binder_free_var in
+    Expr.pi name btype binfo (Expr.abstract_fvar ~target_id ~k:0 body_type)
   | Expr.Forall { name; btype; binfo; body } ->
     (* infer Forall: imax(sortOf binder, sortOf (instantiate body (fvar binder))). *)
-    let l = infer_sort_of env btype in
+    let l = infer_sort_of flag env btype in
     let free_var = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
     let r =
-      infer_sort_of env
+      infer_sort_of flag env
         (Expr.instantiate ~logger:env.logger ~free_var ~expr:body ())
     in
     Expr.sort (Level.IMax (l, r) |> Level.simplify)
@@ -1038,41 +1101,61 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | Expr.App (f, arg) ->
     (* infer App: whnf(infer f) must be a Pi; check binder.type =?= infer arg, instantiate body with arg. *)
-    (match whnf env (infer env f) |> Expr.node with
+    (match whnf env (infer flag env f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
-      (* The argument's type must be defeq to the parameter type -- checked
-         unconditionally, matching the kernel's [infer_app]. (Proof irrelevance
-         lives in [isDefEq], not here: it never licenses skipping this check.) *)
-      (let arg_type = infer env arg in
-       if not (isDefEq env btype arg_type) then
-         Logger.err
-           "@[<v 0>[infer App] defeq failed for@,\
-           \ expr = %a@,\
-           \ btype = %a@,\n\
-           \              arg_type = %a@]"
-           (Defeq_failure "infer App: btype vs arg type") Expr.pp expr Expr.pp
-           btype Expr.pp arg_type);
+      (* The argument's type must be defeq to the parameter type -- in
+         [Check] mode only, matching the kernel's [infer_app] under
+         [infer_only]. (Proof irrelevance lives in [isDefEq], not here: it
+         never licenses skipping this check in Check mode.) *)
+      if flag = Check then (
+        let arg_type = infer flag env arg in
+        if not (isDefEq env btype arg_type) then
+          if Logs.level () = Some Logs.Debug then
+            Logger.err
+              "@[<v 0>[infer App] defeq failed for@,\
+              \ expr = %a@,\
+              \ btype = %a@,\n\
+              \              arg_type = %a@]"
+              (Defeq_failure "infer App: btype vs arg type") Expr.pp expr
+              Expr.pp btype Expr.pp arg_type
+          else
+            (* Formatting the message pretty-prints three full terms; this
+               failure is routinely caught and recovered from (speculative
+               congruence, the lazy-delta fallback), so only pay for the
+               diagnostics when Debug logging is actually on. *)
+            raise (Defeq_failure "infer App: btype vs arg type")
+      );
       Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body ()
     | e ->
       Logger.err "infer App: expected forall, got @[%a@]"
         (TypeError "infer App: whnf of fn type not a forall") Expr.pp expr)
   | Let { name; btype; value; body } ->
     (* infer Let: check binder.type is a sort and infer(val) =?= binder.type, then infer (instantiate body val). *)
-    (match infer env btype |> Expr.node with
-    | Sort _ ->
-      if not (isDefEq env btype (infer env value)) then
-        Logger.err
-          "@[<v 0>[infer Let] defeq failed for@, btype = %a@, value_type = %a@]"
-          (Defeq_failure "infer Let: btype vs value type") Expr.pp btype Expr.pp
-          (infer env value);
-      infer env
-        (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
-    | _ ->
-      Logger.err "infer Let: binder type is not a sort: %a"
-        (TypeError "infer Let: binder type not a sort") Expr.pp expr)
+    (* Both checks are [Check]-only, like the kernel's [infer_let]. *)
+    if flag = Check then (
+      match infer flag env btype |> Expr.node with
+      | Sort _ ->
+        if not (isDefEq env btype (infer flag env value)) then
+          if Logs.level () = Some Logs.Debug then
+            Logger.err
+              "@[<v 0>[infer Let] defeq failed for@,\
+              \ btype = %a@,\
+              \ value_type = %a@]"
+              (Defeq_failure "infer Let: btype vs value type") Expr.pp btype
+              Expr.pp (infer flag env value)
+          else
+            (* Same rationale as the infer App failure above: don't
+               pretty-print full terms for a routinely-caught failure. *)
+            raise (Defeq_failure "infer Let: btype vs value type")
+      | _ ->
+        Logger.err "infer Let: binder type is not a sort: %a"
+          (TypeError "infer Let: binder type not a sort") Expr.pp expr
+    );
+    infer flag env
+      (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
   | Proj { name; nat; expr } ->
     (* infer Proj: instantiate the sole constructor's type with the struct's params, then with each prior projection, up to nat. *)
-    let struct_type = infer env expr |> whnf env in
+    let struct_type = infer flag env expr |> whnf env in
     let const, ty_args = Expr.get_apps struct_type in
     (match const |> Expr.node with
     | Const { name; uparams } ->
@@ -1113,7 +1196,7 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
          when an earlier depended-upon field is data. Non-Prop structures are
          unrestricted. *)
       let is_prop t =
-        match Expr.node (whnf env (infer env t)) with
+        match Expr.node (whnf env (infer InferOnly env t)) with
         | Expr.Sort u -> Level.is_zero u
         | _ -> false
       in
@@ -1170,13 +1253,13 @@ and infer_impl (env : Env.t) (expr : Expr.t) : Expr.t =
        @[<hv 2> %a@]@]@]" (TypeError "infer: unexpected bound variable") Expr.pp
       expr
 
-and infer_sort_of env (expr : Expr.t) =
+and infer_sort_of flag env (expr : Expr.t) =
   let module Logger = (val env.logger) in
-  match whnf env (infer env expr) |> Expr.node with
+  match whnf env (infer flag env expr) |> Expr.node with
   | Sort lvl -> lvl
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort"
-      (TypeError "infer_sort_of: not a sort") Expr.pp (infer env expr)
+      (TypeError "infer_sort_of: not a sort") Expr.pp (infer flag env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   match Hashtbl.find_opt whnf_memo (Expr.tag expr) with
@@ -1229,7 +1312,9 @@ and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
       let e2 = Reduce.beta e1 in
 
       (* Now attempt iota at head *)
-      let e3 = Reduce.iota_at_head env e2 whnf infer isDefEq |> Reduce.beta in
+      let e3 =
+        Reduce.iota_at_head env e2 whnf (infer InferOnly) isDefEq |> Reduce.beta
+      in
       if e3 == expr then
         e3
       else (
@@ -1338,7 +1423,9 @@ and whnf_core_impl (env : Env.t) (expr : Expr.t) : Expr.t =
          evaluating a strict subterm. The kernel does the same: `whnf_core`'s
          cheap_rec is false even inside `is_def_eq_core`/lazy-delta, only
          cheap_proj is true there. So [whnf], not [whnf_core], here. *)
-      let e3 = Reduce.iota_at_head env e2 whnf infer isDefEq |> Reduce.beta in
+      let e3 =
+        Reduce.iota_at_head env e2 whnf (infer InferOnly) isDefEq |> Reduce.beta
+      in
       if e3 == expr then
         e3
       else (
@@ -1403,521 +1490,604 @@ and isDefEq_impl env e1 e2 =
   else if Uf.check_eq (Expr.tag e1) (Expr.tag e2) then
     true
   else (
-    (* Proof irrelevance, before whnf and before the same-head-args shortcut below (else that shortcut deep-unfolds proof data first). *)
-    let is_prop ty =
-      match Expr.node (whnf env (infer env ty)) with
-      | Expr.Sort u -> Level.is_zero u
-      | _ -> false
+    (* Cheap structural verdicts needing no inference and no reduction --
+       the kernel's [quick_is_def_eq] (`type_checker.cpp`): two Sorts
+       compare levels; two manifest binders of the same kind compare
+       domain plus instantiated bodies. Both are definitive either way.
+       Running these before anything else means Sort-vs-Sort and
+       binder-vs-binder comparisons -- the bulk of recursive defeq
+       traffic -- never pay for inference or whnf at all. *)
+    let quick_check l r : bool option =
+      match Expr.node l, Expr.node r with
+      | Expr.Sort u1, Expr.Sort u2 ->
+        let ans = Level.(u1 === u2) in
+        if not ans then
+          Logger.debug "defeq: Sort level mismatch: %a vs %a" Level.pp u1
+            Level.pp u2;
+        Some ans
+      | ( Expr.Forall { name = n; btype = s; body = a; binfo },
+          Expr.Forall { btype = t; body = b; _ } )
+      | ( Expr.Lam { name = n; btype = s; body = a; binfo },
+          Expr.Lam { btype = t; body = b; _ } ) ->
+        Some
+          (isDefEq env s t
+          &&
+          let free_var = Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ()) in
+          isDefEq env
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:a ())
+            (Expr.instantiate ~logger:env.logger ~free_var ~expr:b ()))
+      | _ -> None
     in
-    let s = infer env e1 in
-    let t = infer env e2 in
-    if is_prop s && is_prop t && isDefEq env s t then
-      true
-    else (
-      (* Same-head-args shortcut, before whnf: if both sides are the same Const applied to equal-arity args, compare args first. *)
-      let same_head_args_shortcut () =
-        let h1, args1 = Expr.get_apps e1 in
-        let h2, args2 = Expr.get_apps e2 in
-        match Expr.node h1, Expr.node h2 with
-        | ( Expr.Const { name = n1; uparams = us },
-            Expr.Const { name = n2; uparams = vs } )
-          when args1 <> [] && n1 = n2
-               && List.length args1 = List.length args2
-               && List.length us = List.length vs
-               && CCList.fold_left2
-                    (fun acc u v -> acc && Level.(u === v))
-                    true us vs ->
-          (* Speculative: suppress logging and treat a failed/raising comparison as "shortcut doesn't apply", not a real failure. *)
-          let prev_level = Logs.level () in
-          Logs.set_level None;
-          Fun.protect
-            ~finally:(fun () -> Logs.set_level prev_level)
-            (fun () ->
-              try List.for_all2 (isDefEq env) args1 args2
-              with Defeq_failure _ -> false)
-        | _ -> false
+    match quick_check e1 e2 with
+    | Some ans -> ans
+    | None ->
+      let e1_core = whnf_core env e1 in
+      let e2_core = whnf_core env e2 in
+      (* If whnf_core made progress on either side, retry the O(1) and
+         quick verdicts on the cores before anything expensive. *)
+      let quick_again =
+        if e1_core != e1 || e2_core != e2 then
+          if e1_core == e2_core then
+            Some true
+          else if Uf.check_eq (Expr.tag e1_core) (Expr.tag e2_core) then
+            Some true
+          else
+            quick_check e1_core e2_core
+        else
+          None
       in
-      if same_head_args_shortcut () then
-        true
-      else (
-        let e1_core = whnf_core env e1 in
-        let e2_core = whnf_core env e2 in
-        (* Lazy-delta reduction (mirrors `type_checker.cpp`'s
-           lazy_delta_reduction): compare via whnf_core -- never delta -- and
-           only delta-unfold one side at a time, the one with lower
-           reducibility height (Def.red_hint), re-checking after every step.
-           This is what keeps a comparison like `grind-ring-5`'s deep proof
-           term or `UInt16.toUInt32_toUInt64`'s Nat.sub-on-a-2^32-mask
-           shallow: most real comparisons resolve by congruence or a
-           one-level Nat.succ offset long before either side is fully
-           reduced, which is exactly what eagerly whnf-ing both sides (the
-           old behavior below, now only the fallback once neither side is
-           delta-eligible) defeats. *)
-        let nat_offset_bridge t_n s_n =
-          let is_nat_zero e =
-            match Expr.node e with
-            | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+      (match quick_again with
+      | Some ans -> ans
+      | None ->
+        (* Proof irrelevance -- after the quick checks and whnf_core,
+           matching the kernel's [is_def_eq_core] order (and nanoda_lib's
+           [def_eq]), not before them as nyaya used to: running it first
+           meant *every* defeq call inferred both sides up front. Left-
+           short-circuiting: the right side's type is never inferred unless
+           the left side is actually a proof. [InferOnly] throughout --
+           these are terms the checker already produced/checked, so
+           re-verifying them (the old behavior, with checking inference)
+           only multiplied work. *)
+        let is_prop ty =
+          match Expr.node (whnf env (infer InferOnly env ty)) with
+          | Expr.Sort u -> Level.is_zero u
+          | _ -> false
+        in
+        let proof_irrelevant () =
+          let t1 = infer InferOnly env e1_core in
+          is_prop t1
+          &&
+          let t2 = infer InferOnly env e2_core in
+          is_prop t2 && isDefEq env t1 t2
+        in
+        if proof_irrelevant () then
+          true
+        else (
+          (* Same-head-args shortcut (on the cores; whnf_core never
+             delta-unfolds, so a same-Const head survives it): if both
+             sides are the same Const applied to equal-arity args, compare
+             args first. Placed after proof irrelevance so proof arguments
+             are not deep-compared before irrelevance has had its chance. *)
+          let same_head_args_shortcut () =
+            let h1, args1 = Expr.get_apps e1_core in
+            let h2, args2 = Expr.get_apps e2_core in
+            match Expr.node h1, Expr.node h2 with
+            | ( Expr.Const { name = n1; uparams = us },
+                Expr.Const { name = n2; uparams = vs } )
+              when args1 <> [] && n1 = n2
+                   && List.length args1 = List.length args2
+                   && List.length us = List.length vs
+                   && CCList.fold_left2
+                        (fun acc u v -> acc && Level.(u === v))
+                        true us vs ->
+              (* Speculative: suppress logging and treat a failed/raising comparison as "shortcut doesn't apply", not a real failure. *)
+              let prev_level = Logs.level () in
+              Logs.set_level None;
+              Fun.protect
+                ~finally:(fun () -> Logs.set_level prev_level)
+                (fun () ->
+                  try List.for_all2 (isDefEq env) args1 args2
+                  with Defeq_failure _ -> false)
             | _ -> false
           in
-          (* Two concrete literals: compare the big-int values directly.
-             Without this, [as_nat_succ] below (needed to bridge a literal
-             against a symbolic [Nat.succ] chain) would peel one unit off
-             *both* sides per step via a genuine recursive [isDefEq] call --
-             each peel is cheap, but it's one more [DefEqTrace]-counted
-             stack frame, so for two large literals (e.g. two Nat.emod
-             results 2^16 apart, as in [Int16.ofBitVec_intMax]) the tens of
-             thousands of peels needed blow the depth cap long before
-             reaching a verdict, even though the total work is trivial.
-             Same root shape as the [Nat.sub]-on-a-2^32-literal fix
-             (`135fd76`), but there the fix was also a real time-complexity
-             win; here it's purely about not exhausting the recursion-depth
-             budget on a lot of individually-cheap steps. *)
-          match Expr.node t_n, Expr.node s_n with
-          | Expr.Literal (Expr.NatLit n), Expr.Literal (Expr.NatLit m) ->
-            Some (Z.equal n m)
-          | _ ->
-            let as_nat_succ e =
-              match Expr.node e with
-              | Expr.Literal (Expr.NatLit n) when Z.gt n Z.zero ->
-                Some (Expr.natlit (Z.pred n))
-              | _ ->
-                (match Expr.get_apps e with
-                | shd, [ x ] ->
-                  (match Expr.node shd with
-                  | Expr.Const { name; _ }
-                    when name = Name.Str (Name.Str (Name.Anon, "Nat"), "succ")
-                    ->
-                    Some x
-                  | _ -> None)
-                | _ -> None)
-            in
-            if is_nat_zero t_n && is_nat_zero s_n then
-              Some true
-            else (
-              match as_nat_succ t_n, as_nat_succ s_n with
-              | Some p, Some q -> Some (isDefEq env p q)
-              | _ -> None
-            )
-        in
-        let rec lazy_delta depth t_n s_n =
-          if depth > max_lazy_delta_depth then
-            raise
-              (Nyaya_parser.Util.Depth_limit
-                 (Printf.sprintf "[lazy-delta] depth %d exceeds max %d" depth
-                    max_lazy_delta_depth))
-          else if t_n == s_n then
-            `Equal
+          if same_head_args_shortcut () then
+            true
           else (
-            match nat_offset_bridge t_n s_n with
-            | Some b ->
-              if b then
+            (* Lazy-delta reduction (mirrors `type_checker.cpp`'s
+               lazy_delta_reduction): compare via whnf_core -- never delta -- and
+               only delta-unfold one side at a time, the one with lower
+               reducibility height (Def.red_hint), re-checking after every step.
+               This is what keeps a comparison like `grind-ring-5`'s deep proof
+               term or `UInt16.toUInt32_toUInt64`'s Nat.sub-on-a-2^32-mask
+               shallow: most real comparisons resolve by congruence or a
+               one-level Nat.succ offset long before either side is fully
+               reduced, which is exactly what eagerly whnf-ing both sides (the
+               old behavior below, now only the fallback once neither side is
+               delta-eligible) defeats. *)
+            let nat_offset_bridge t_n s_n =
+              let is_nat_zero e =
+                match Expr.node e with
+                | Expr.Literal (Expr.NatLit n) -> Z.equal n Z.zero
+                | _ -> false
+              in
+              (* Two concrete literals: compare the big-int values directly.
+                 Without this, [as_nat_succ] below (needed to bridge a literal
+                 against a symbolic [Nat.succ] chain) would peel one unit off
+                 *both* sides per step via a genuine recursive [isDefEq] call --
+                 each peel is cheap, but it's one more [DefEqTrace]-counted
+                 stack frame, so for two large literals (e.g. two Nat.emod
+                 results 2^16 apart, as in [Int16.ofBitVec_intMax]) the tens of
+                 thousands of peels needed blow the depth cap long before
+                 reaching a verdict, even though the total work is trivial.
+                 Same root shape as the [Nat.sub]-on-a-2^32-literal fix
+                 (`135fd76`), but there the fix was also a real time-complexity
+                 win; here it's purely about not exhausting the recursion-depth
+                 budget on a lot of individually-cheap steps. *)
+              match Expr.node t_n, Expr.node s_n with
+              | Expr.Literal (Expr.NatLit n), Expr.Literal (Expr.NatLit m) ->
+                Some (Z.equal n m)
+              | _ ->
+                let as_nat_succ e =
+                  match Expr.node e with
+                  | Expr.Literal (Expr.NatLit n) when Z.gt n Z.zero ->
+                    Some (Expr.natlit (Z.pred n))
+                  | _ ->
+                    (match Expr.get_apps e with
+                    | shd, [ x ] ->
+                      (match Expr.node shd with
+                      | Expr.Const { name; _ }
+                        when name
+                             = Name.Str (Name.Str (Name.Anon, "Nat"), "succ") ->
+                        Some x
+                      | _ -> None)
+                    | _ -> None)
+                in
+                if is_nat_zero t_n && is_nat_zero s_n then
+                  Some true
+                else (
+                  match as_nat_succ t_n, as_nat_succ s_n with
+                  | Some p, Some q -> Some (isDefEq env p q)
+                  | _ -> None
+                )
+            in
+            let rec lazy_delta depth t_n s_n =
+              if depth > max_lazy_delta_depth then
+                raise
+                  (Nyaya_parser.Util.Depth_limit
+                     (Printf.sprintf "[lazy-delta] depth %d exceeds max %d"
+                        depth max_lazy_delta_depth))
+              else if t_n == s_n then
                 `Equal
-              else
-                `NotEqual
-            | None ->
-              (match
-                 Reduce.nat_lit_reduce ~native_only:true env t_n whnf_core
-               with
-              | Some t_v ->
-                if isDefEq env t_v s_n then
-                  `Equal
-                else
-                  `NotEqual
-              | None ->
-                (match
-                   Reduce.nat_lit_reduce ~native_only:true env s_n whnf_core
-                 with
-                | Some s_v ->
-                  if isDefEq env t_n s_v then
+              else (
+                match nat_offset_bridge t_n s_n with
+                | Some b ->
+                  if b then
                     `Equal
                   else
                     `NotEqual
                 | None ->
                   (match
-                     find_delta_target env t_n, find_delta_target env s_n
+                     Reduce.nat_lit_reduce ~native_only:true env t_n whnf_core
                    with
-                  | None, None -> `Stuck (t_n, s_n)
-                  | Some dt, None ->
-                    lazy_delta (depth + 1)
-                      (whnf_core env (unfold_delta_target env dt))
-                      s_n
-                  | None, Some ds ->
-                    lazy_delta (depth + 1) t_n
-                      (whnf_core env (unfold_delta_target env ds))
-                  | Some dt, Some ds ->
-                    let c = compare_reducibility_hints dt.hint ds.hint in
-                    if c < 0 then
-                      lazy_delta (depth + 1)
-                        (whnf_core env (unfold_delta_target env dt))
-                        s_n
-                    else if c > 0 then
-                      lazy_delta (depth + 1) t_n
-                        (whnf_core env (unfold_delta_target env ds))
-                    else (
-                      (* Equal delta priority: same declaration, same arity,
-                         same universe instantiation, Regular hint -- try
-                         arg-by-arg congruence before paying for a delta step
-                         on both sides (`type_checker.cpp`'s
-                         lazy_delta_reduction_step, the [c == 0] branch). *)
-                      let same_head =
-                        dt.name = ds.name
-                        &&
-                        match Expr.node dt.head, Expr.node ds.head with
-                        | ( Expr.Const { uparams = us; _ },
-                            Expr.Const { uparams = vs; _ } ) ->
-                          List.length us = List.length vs
-                          && CCList.fold_left2
-                               (fun acc u v -> acc && Level.(u === v))
-                               true us vs
-                        | _ -> false
-                      in
-                      let congruent =
-                        same_head
-                        && List.length dt.args = List.length ds.args
-                        && (match dt.hint with
-                           | Decl.Reg _ -> true
-                           | _ -> false)
-                        && (not (failed_congruence_before t_n s_n))
-                        &&
-                        let prev = Logs.level () in
-                        Logs.set_level None;
-                        let ok =
-                          Fun.protect
-                            ~finally:(fun () -> Logs.set_level prev)
-                            (fun () ->
-                              try List.for_all2 (isDefEq env) dt.args ds.args
-                              with Defeq_failure _ -> false)
-                        in
-                        if not ok then cache_congruence_failure t_n s_n;
-                        ok
-                      in
-                      if congruent then
+                  | Some t_v ->
+                    if isDefEq env t_v s_n then
+                      `Equal
+                    else
+                      `NotEqual
+                  | None ->
+                    (match
+                       Reduce.nat_lit_reduce ~native_only:true env s_n whnf_core
+                     with
+                    | Some s_v ->
+                      if isDefEq env t_n s_v then
                         `Equal
                       else
+                        `NotEqual
+                    | None ->
+                      (match
+                         find_delta_target env t_n, find_delta_target env s_n
+                       with
+                      | None, None -> `Stuck (t_n, s_n)
+                      | Some dt, None ->
                         lazy_delta (depth + 1)
                           (whnf_core env (unfold_delta_target env dt))
+                          s_n
+                      | None, Some ds ->
+                        lazy_delta (depth + 1) t_n
                           (whnf_core env (unfold_delta_target env ds))
-                    ))))
-          )
-        in
-        match lazy_delta 0 e1_core e2_core with
-        | `Equal -> true
-        | `NotEqual -> false
-        | `Stuck (e1_lazy, e2_lazy) ->
-          (* Both sides are confirmed non-delta-eligible at the head (the
-             lazy-delta loop above only stops here once [find_delta_target]
-             says so for both) -- but a Proj-headed side may still be stuck
-             behind a delta-eligible instance, e.g. [(instOfNatNat 0).1]:
-             whnf_core deliberately never unfolds [instOfNatNat] to reach the
-             constructor the projection needs. The kernel's [is_def_eq_core]
-             gives projections exactly one more chance here with full [whnf]
-             (`type_checker.cpp`, the "invoke whnf_core again, but now using
-             whnf to reduce projections" pass) before falling to
-             congruence/eta. Since the head is already known non-delta, this
-             can only do more work on a projection's structure -- bounded by
-             instance-resolution depth, not an arbitrary computation -- so it
-             doesn't reintroduce the eager-full-whnf blowup lazy-delta exists
-             to avoid. *)
-          let e1' = whnf env e1_lazy in
-          let e2' = whnf env e2_lazy in
-          if e1' != e1_lazy || e2' != e2_lazy then
-            isDefEq env e1' e2'
-          else if e1' == e2' then
-            true
-          else (
-            try
-              (* Structure eta: y is constructor-headed for a structure type T; compare Proj(i, x) against each of y's fields. *)
-              let try_struct_eta x y =
-                let hd, y_args = Expr.get_apps y in
-                match Expr.node hd with
-                | Expr.Const { name = ctor_name; _ } ->
-                  (match Hashtbl.find_opt env.tbl ctor_name with
-                  | Some
-                      (Decl.Ctor { inductive_name; num_params; num_fields; _ })
-                    ->
-                    (match Hashtbl.find_opt env.tbl inductive_name with
-                    | Some
-                        (Decl.Inductive
-                          { ctor_names; num_idx; is_recursive; _ })
-                      when List.length ctor_names = 1
-                           && num_idx = 0 && (not is_recursive)
-                           && List.length y_args = num_params + num_fields ->
-                      if not (isDefEq env (infer env x) (infer env y)) then
-                        false
-                      else (
-                        Logger.debug "defeq: struct-eta for %a" Name.pp
-                          inductive_name;
-                        let rec check i =
-                          if i >= num_fields then
-                            true
+                      | Some dt, Some ds ->
+                        let c = compare_reducibility_hints dt.hint ds.hint in
+                        if c < 0 then
+                          lazy_delta (depth + 1)
+                            (whnf_core env (unfold_delta_target env dt))
+                            s_n
+                        else if c > 0 then
+                          lazy_delta (depth + 1) t_n
+                            (whnf_core env (unfold_delta_target env ds))
+                        else (
+                          (* Equal delta priority: same declaration, same arity,
+                             same universe instantiation, Regular hint -- try
+                             arg-by-arg congruence before paying for a delta step
+                             on both sides (`type_checker.cpp`'s
+                             lazy_delta_reduction_step, the [c == 0] branch). *)
+                          let same_head =
+                            dt.name = ds.name
+                            &&
+                            match Expr.node dt.head, Expr.node ds.head with
+                            | ( Expr.Const { uparams = us; _ },
+                                Expr.Const { uparams = vs; _ } ) ->
+                              List.length us = List.length vs
+                              && CCList.fold_left2
+                                   (fun acc u v -> acc && Level.(u === v))
+                                   true us vs
+                            | _ -> false
+                          in
+                          let congruent =
+                            same_head
+                            && List.length dt.args = List.length ds.args
+                            && (match dt.hint with
+                               | Decl.Reg _ -> true
+                               | _ -> false)
+                            && (not (failed_congruence_before t_n s_n))
+                            &&
+                            let prev = Logs.level () in
+                            Logs.set_level None;
+                            let ok =
+                              Fun.protect
+                                ~finally:(fun () -> Logs.set_level prev)
+                                (fun () ->
+                                  try
+                                    List.for_all2 (isDefEq env) dt.args ds.args
+                                  with Defeq_failure _ -> false)
+                            in
+                            if not ok then cache_congruence_failure t_n s_n;
+                            ok
+                          in
+                          if congruent then
+                            `Equal
                           else
-                            isDefEq env
-                              (Expr.proj inductive_name i x)
-                              (CCList.nth y_args (num_params + i))
-                            && check (i + 1)
-                        in
-                        check 0
+                            lazy_delta (depth + 1)
+                              (whnf_core env (unfold_delta_target env dt))
+                              (whnf_core env (unfold_delta_target env ds))
+                        ))))
+              )
+            in
+            match lazy_delta 0 e1_core e2_core with
+            | `Equal -> true
+            | `NotEqual -> false
+            | `Stuck (e1_lazy, e2_lazy) ->
+              (* Both sides are confirmed non-delta-eligible at the head (the
+                 lazy-delta loop above only stops here once [find_delta_target]
+                 says so for both) -- but a Proj-headed side may still be stuck
+                 behind a delta-eligible instance, e.g. [(instOfNatNat 0).1]:
+                 whnf_core deliberately never unfolds [instOfNatNat] to reach the
+                 constructor the projection needs. The kernel's [is_def_eq_core]
+                 gives projections exactly one more chance here with full [whnf]
+                 (`type_checker.cpp`, the "invoke whnf_core again, but now using
+                 whnf to reduce projections" pass) before falling to
+                 congruence/eta. Since the head is already known non-delta, this
+                 can only do more work on a projection's structure -- bounded by
+                 instance-resolution depth, not an arbitrary computation -- so it
+                 doesn't reintroduce the eager-full-whnf blowup lazy-delta exists
+                 to avoid. *)
+              let e1' = whnf env e1_lazy in
+              let e2' = whnf env e2_lazy in
+              if e1' != e1_lazy || e2' != e2_lazy then
+                isDefEq env e1' e2'
+              else if e1' == e2' then
+                true
+              else (
+                try
+                  (* Structure eta: y is constructor-headed for a structure type T; compare Proj(i, x) against each of y's fields. *)
+                  let try_struct_eta x y =
+                    let hd, y_args = Expr.get_apps y in
+                    match Expr.node hd with
+                    | Expr.Const { name = ctor_name; _ } ->
+                      (match Hashtbl.find_opt env.tbl ctor_name with
+                      | Some
+                          (Decl.Ctor
+                            { inductive_name; num_params; num_fields; _ }) ->
+                        (match Hashtbl.find_opt env.tbl inductive_name with
+                        | Some
+                            (Decl.Inductive
+                              { ctor_names; num_idx; is_recursive; _ })
+                          when List.length ctor_names = 1
+                               && num_idx = 0 && (not is_recursive)
+                               && List.length y_args = num_params + num_fields
+                          ->
+                          if
+                            not
+                              (isDefEq env (infer InferOnly env x)
+                                 (infer InferOnly env y))
+                          then
+                            false
+                          else (
+                            Logger.debug "defeq: struct-eta for %a" Name.pp
+                              inductive_name;
+                            let rec check i =
+                              if i >= num_fields then
+                                true
+                              else
+                                isDefEq env
+                                  (Expr.proj inductive_name i x)
+                                  (CCList.nth y_args (num_params + i))
+                                && check (i + 1)
+                            in
+                            check 0
+                          )
+                        | _ -> false)
+                      | _ -> false)
+                    | _ -> false
+                  in
+                  (* Unit-like defeq: any two terms of a non-recursive, single-ctor, zero-field structure type are defeq once their types agree. *)
+                  let is_def_eq_unit_like x y =
+                    let x_type = whnf env (infer InferOnly env x) in
+                    let hd, _ = Expr.get_apps x_type in
+                    match Expr.node hd with
+                    | Expr.Const { name = ind_name; _ } ->
+                      (match Hashtbl.find_opt env.tbl ind_name with
+                      | Some
+                          (Decl.Inductive
+                            {
+                              ctor_names = [ ctor_name ];
+                              num_idx = 0;
+                              is_recursive = false;
+                              _;
+                            }) ->
+                        (match Hashtbl.find_opt env.tbl ctor_name with
+                        | Some (Decl.Ctor { num_fields = 0; _ }) ->
+                          isDefEq env x_type (infer InferOnly env y)
+                        | _ -> false)
+                      | _ -> false)
+                    | _ -> false
+                  in
+                  (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
+                  let try_lam_eta lam other =
+                    match Expr.node lam with
+                    | Expr.Lam { name; btype; body; binfo } ->
+                      let fv =
+                        Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
+                      in
+                      isDefEq env
+                        (Expr.instantiate ~logger:env.logger ~free_var:fv
+                           ~expr:body ())
+                        (Expr.app other fv)
+                    | _ -> false
+                  in
+                  (* Nat.xor is delta-guarded; as a last resort try one manual delta step of it. *)
+                  let try_xor_one_step other side =
+                    match Expr.node side with
+                    | Expr.Const { name; _ }
+                      when name = Name.Str (Name.Str (Name.Anon, "Nat"), "xor")
+                      ->
+                      let side' = Reduce.delta_at_head env side in
+                      if side' == side then
+                        false
+                      else
+                        isDefEq env side' other
+                    | _ -> false
+                  in
+                  (* Bridge [NatLit n] against a [Nat.succ] chain: peel leading [succ]s in a flat
+                     loop, counting, then match [n - count] against the base. *)
+                  let try_natlit_succ lit_side other =
+                    let succ_arg e =
+                      match Expr.get_apps e with
+                      | shd, [ y ]
+                        when match Expr.node shd with
+                             | Expr.Const { name; _ } ->
+                               name
+                               = Name.Str (Name.Str (Name.Anon, "Nat"), "succ")
+                             | _ -> false ->
+                        Some y
+                      | _ -> None
+                    in
+                    match Expr.node lit_side with
+                    | Expr.Literal (Expr.NatLit n) ->
+                      let rec loop count cur =
+                        if Z.gt count n then
+                          false
+                        (* more [succ]s than [n]: cannot be equal *)
+                        else (
+                          match succ_arg cur with
+                          | Some y -> loop (Z.succ count) (whnf env y)
+                          | None ->
+                            isDefEq env (Expr.natlit (Z.sub n count)) cur
+                        )
+                      in
+                      (match succ_arg other with
+                      | Some _ -> loop Z.zero other
+                      | None -> false)
+                    | _ -> false
+                  in
+                  (* Shared final fallback, reached from the catch-all below and from a FreeVar/FreeVar id mismatch. *)
+                  let final_fallback e1' e2' =
+                    if try_struct_eta e1' e2' || try_struct_eta e2' e1' then
+                      true
+                    else if
+                      is_def_eq_unit_like e1' e2' || is_def_eq_unit_like e2' e1'
+                    then
+                      true
+                    else if try_lam_eta e1' e2' || try_lam_eta e2' e1' then
+                      true
+                    else if try_xor_one_step e1' e2' || try_xor_one_step e2' e1'
+                    then
+                      true
+                    else if try_natlit_succ e1' e2' || try_natlit_succ e2' e1'
+                    then
+                      true
+                    else if Logs.level () = Some Logs.Debug then
+                      Logger.err
+                        "@[<v 0>[isDefEq] structural mismatch@,\
+                        \ lhs = %a@,\
+                        \ rhs = %a@]"
+                        (Defeq_failure "isDefEq: structural mismatch") Expr.pp
+                        e1 Expr.pp e2
+                    else
+                      (* This failure is speculative more often than not (caught
+                         by congruence attempts, the safety-net retry, callers'
+                         recovery); formatting it pretty-prints both full terms,
+                         so only pay for that when Debug logging is on. *)
+                      raise (Defeq_failure "isDefEq: structural mismatch")
+                  in
+                  let result =
+                    match Expr.node e1', Expr.node e2' with
+                    | Expr.Sort u1, Expr.Sort u2 ->
+                      if Level.(u1 === u2) then
+                        true
+                      else (
+                        Logger.debug "defeq: Sort level mismatch: %a vs %a"
+                          Level.pp u1 Level.pp u2;
+                        false
                       )
-                    | _ -> false)
-                  | _ -> false)
-                | _ -> false
-              in
-              (* Unit-like defeq: any two terms of a non-recursive, single-ctor, zero-field structure type are defeq once their types agree. *)
-              let is_def_eq_unit_like x y =
-                let x_type = whnf env (infer env x) in
-                let hd, _ = Expr.get_apps x_type in
-                match Expr.node hd with
-                | Expr.Const { name = ind_name; _ } ->
-                  (match Hashtbl.find_opt env.tbl ind_name with
-                  | Some
-                      (Decl.Inductive
-                        {
-                          ctor_names = [ ctor_name ];
-                          num_idx = 0;
-                          is_recursive = false;
-                          _;
-                        }) ->
-                    (match Hashtbl.find_opt env.tbl ctor_name with
-                    | Some (Decl.Ctor { num_fields = 0; _ }) ->
-                      isDefEq env x_type (infer env y)
-                    | _ -> false)
-                  | _ -> false)
-                | _ -> false
-              in
-              (* Lambda eta: fun x => body  =?=  e   iff   body =?= e x *)
-              let try_lam_eta lam other =
-                match Expr.node lam with
-                | Expr.Lam { name; btype; body; binfo } ->
-                  let fv =
-                    Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
-                  in
-                  isDefEq env
-                    (Expr.instantiate ~logger:env.logger ~free_var:fv ~expr:body
-                       ())
-                    (Expr.app other fv)
-                | _ -> false
-              in
-              (* Nat.xor is delta-guarded; as a last resort try one manual delta step of it. *)
-              let try_xor_one_step other side =
-                match Expr.node side with
-                | Expr.Const { name; _ }
-                  when name = Name.Str (Name.Str (Name.Anon, "Nat"), "xor") ->
-                  let side' = Reduce.delta_at_head env side in
-                  if side' == side then
-                    false
-                  else
-                    isDefEq env side' other
-                | _ -> false
-              in
-              (* Bridge [NatLit n] against a [Nat.succ] chain: peel leading [succ]s in a flat
-                 loop, counting, then match [n - count] against the base. *)
-              let try_natlit_succ lit_side other =
-                let succ_arg e =
-                  match Expr.get_apps e with
-                  | shd, [ y ]
-                    when match Expr.node shd with
-                         | Expr.Const { name; _ } ->
-                           name = Name.Str (Name.Str (Name.Anon, "Nat"), "succ")
-                         | _ -> false ->
-                    Some y
-                  | _ -> None
-                in
-                match Expr.node lit_side with
-                | Expr.Literal (Expr.NatLit n) ->
-                  let rec loop count cur =
-                    if Z.gt count n then
-                      false
-                    (* more [succ]s than [n]: cannot be equal *)
-                    else (
-                      match succ_arg cur with
-                      | Some y -> loop (Z.succ count) (whnf env y)
-                      | None -> isDefEq env (Expr.natlit (Z.sub n count)) cur
-                    )
-                  in
-                  (match succ_arg other with
-                  | Some _ -> loop Z.zero other
-                  | None -> false)
-                | _ -> false
-              in
-              (* Shared final fallback, reached from the catch-all below and from a FreeVar/FreeVar id mismatch. *)
-              let final_fallback e1' e2' =
-                if try_struct_eta e1' e2' || try_struct_eta e2' e1' then
-                  true
-                else if
-                  is_def_eq_unit_like e1' e2' || is_def_eq_unit_like e2' e1'
-                then
-                  true
-                else if try_lam_eta e1' e2' || try_lam_eta e2' e1' then
-                  true
-                else if try_xor_one_step e1' e2' || try_xor_one_step e2' e1'
-                then
-                  true
-                else if try_natlit_succ e1' e2' || try_natlit_succ e2' e1' then
-                  true
-                else
-                  Logger.err
-                    "@[<v 0>[isDefEq] structural mismatch@,\
-                    \ lhs = %a@,\
-                    \ rhs = %a@]" (Defeq_failure "isDefEq: structural mismatch")
-                    Expr.pp e1 Expr.pp e2
-              in
-              let result =
-                match Expr.node e1', Expr.node e2' with
-                | Expr.Sort u1, Expr.Sort u2 ->
-                  if Level.(u1 === u2) then
-                    true
-                  else (
-                    Logger.debug "defeq: Sort level mismatch: %a vs %a" Level.pp
-                      u1 Level.pp u2;
-                    false
-                  )
-                | ( Expr.FreeVar { fvarId = f1; _ },
-                    Expr.FreeVar { fvarId = f2; _ } ) ->
-                  if f1 = f2 then
-                    true
-                  else (
-                    Logger.debug
-                      "defeq: FreeVar id mismatch, trying final fallback";
-                    final_fallback e1' e2'
-                  )
-                | ( Expr.Forall { name = n; btype = s; body = a; binfo },
-                    Expr.Forall { btype = t; body = b; _ } ) ->
-                  if isDefEq env s t then (
-                    let free_var =
-                      Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
-                    in
-                    let r =
-                      isDefEq env
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a
-                           ())
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b
-                           ())
-                    in
-                    if not r then Logger.debug "defeq: Forall body mismatch";
-                    r
-                  ) else (
-                    Logger.debug "defeq: Forall btype mismatch";
-                    false
-                  )
-                | Expr.App (f, a), Expr.App (g, b) ->
-                  (* Try per-argument congruence first (suppressing a nested raise); only then fall back to struct-eta on the whole terms. *)
-                  let try_cong () =
-                    let prev = Logs.level () in
-                    Logs.set_level None;
-                    Fun.protect
-                      ~finally:(fun () -> Logs.set_level prev)
-                      (fun () ->
-                        try
+                    | ( Expr.FreeVar { fvarId = f1; _ },
+                        Expr.FreeVar { fvarId = f2; _ } ) ->
+                      if f1 = f2 then
+                        true
+                      else (
+                        Logger.debug
+                          "defeq: FreeVar id mismatch, trying final fallback";
+                        final_fallback e1' e2'
+                      )
+                    | ( Expr.Forall { name = n; btype = s; body = a; binfo },
+                        Expr.Forall { btype = t; body = b; _ } ) ->
+                      if isDefEq env s t then (
+                        let free_var =
+                          Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
+                        in
+                        let r =
                           isDefEq env
-                            (Reduce.delta_at_head env f)
-                            (Reduce.delta_at_head env g)
-                          && isDefEq env a b
-                        with Defeq_failure _ -> false)
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:a ())
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:b ())
+                        in
+                        if not r then Logger.debug "defeq: Forall body mismatch";
+                        r
+                      ) else (
+                        Logger.debug "defeq: Forall btype mismatch";
+                        false
+                      )
+                    | Expr.App (f, a), Expr.App (g, b) ->
+                      (* Try per-argument congruence first (suppressing a nested raise); only then fall back to struct-eta on the whole terms. *)
+                      let try_cong () =
+                        let prev = Logs.level () in
+                        Logs.set_level None;
+                        Fun.protect
+                          ~finally:(fun () -> Logs.set_level prev)
+                          (fun () ->
+                            try
+                              isDefEq env
+                                (Reduce.delta_at_head env f)
+                                (Reduce.delta_at_head env g)
+                              && isDefEq env a b
+                            with Defeq_failure _ -> false)
+                      in
+                      if try_cong () then
+                        true
+                      else if try_struct_eta e1' e2' || try_struct_eta e2' e1'
+                      then
+                        true
+                      else (
+                        Logger.debug
+                          "defeq: App fn/arg mismatch (and struct-eta failed)";
+                        false
+                      )
+                    | ( Expr.Const { name = n1; uparams = us },
+                        Expr.Const { name = n2; uparams = vs } ) ->
+                      if
+                        n1 = n2
+                        && List.length us = List.length vs
+                        && CCList.fold_left2
+                             (fun acc u v -> acc && Level.(u === v))
+                             true us vs
+                      then
+                        true
+                      else (
+                        Logger.debug "defeq: Const mismatch: %a vs %a" Name.pp
+                          n1 Name.pp n2;
+                        false
+                      )
+                    | ( Expr.Lam { name = n; btype = s; body = a; binfo },
+                        Expr.Lam { btype = t; body = b; _ } ) ->
+                      if isDefEq env s t then (
+                        let free_var =
+                          Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
+                        in
+                        let r =
+                          isDefEq env
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:a ())
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:b ())
+                        in
+                        if not r then Logger.debug "defeq: Lam body mismatch";
+                        r
+                      ) else (
+                        Logger.debug "defeq: Lam btype mismatch";
+                        false
+                      )
+                    | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) ->
+                      if Z.equal n1 n2 then
+                        true
+                      else (
+                        Logger.debug "defeq: NatLit mismatch: %s vs %s"
+                          (Z.to_string n1) (Z.to_string n2);
+                        false
+                      )
+                    | ( Proj { nat = n1; expr = e1; _ },
+                        Proj { nat = n2; expr = e2; _ } ) ->
+                      if n1 == n2 && isDefEq env e1 e2 then
+                        true
+                      else (
+                        Logger.debug "defeq: Proj mismatch";
+                        false
+                      )
+                    | ( Expr.Let { name = n1; btype = s1; value = v1; body = a },
+                        Expr.Let { name = n2; btype = s2; value = v2; body = b }
+                      ) ->
+                      if isDefEq env s1 s2 && isDefEq env v1 v2 then (
+                        let free_var =
+                          Expr.fvar n1 s1 Expr.Default
+                            (Nyaya_parser.Util.Uid.mk ())
+                        in
+                        let r =
+                          isDefEq env
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:a ())
+                            (Expr.instantiate ~logger:env.logger ~free_var
+                               ~expr:b ())
+                        in
+                        if not r then Logger.debug "defeq: Let body mismatch";
+                        r
+                      ) else (
+                        Logger.debug "defeq: Let btype/value mismatch";
+                        false
+                      )
+                    | _ -> final_fallback e1' e2'
                   in
-                  if try_cong () then
-                    true
-                  else if try_struct_eta e1' e2' || try_struct_eta e2' e1' then
-                    true
-                  else (
-                    Logger.debug
-                      "defeq: App fn/arg mismatch (and struct-eta failed)";
-                    false
-                  )
-                | ( Expr.Const { name = n1; uparams = us },
-                    Expr.Const { name = n2; uparams = vs } ) ->
-                  if
-                    n1 = n2
-                    && List.length us = List.length vs
-                    && CCList.fold_left2
-                         (fun acc u v -> acc && Level.(u === v))
-                         true us vs
-                  then
-                    true
-                  else (
-                    Logger.debug "defeq: Const mismatch: %a vs %a" Name.pp n1
-                      Name.pp n2;
-                    false
-                  )
-                | ( Expr.Lam { name = n; btype = s; body = a; binfo },
-                    Expr.Lam { btype = t; body = b; _ } ) ->
-                  if isDefEq env s t then (
-                    let free_var =
-                      Expr.fvar n s binfo (Nyaya_parser.Util.Uid.mk ())
-                    in
-                    let r =
-                      isDefEq env
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a
-                           ())
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b
-                           ())
-                    in
-                    if not r then Logger.debug "defeq: Lam body mismatch";
-                    r
-                  ) else (
-                    Logger.debug "defeq: Lam btype mismatch";
-                    false
-                  )
-                | Literal (Expr.NatLit n1), Literal (Expr.NatLit n2) ->
-                  if Z.equal n1 n2 then
-                    true
-                  else (
-                    Logger.debug "defeq: NatLit mismatch: %s vs %s"
-                      (Z.to_string n1) (Z.to_string n2);
-                    false
-                  )
-                | ( Proj { nat = n1; expr = e1; _ },
-                    Proj { nat = n2; expr = e2; _ } ) ->
-                  if n1 == n2 && isDefEq env e1 e2 then
-                    true
-                  else (
-                    Logger.debug "defeq: Proj mismatch";
-                    false
-                  )
-                | ( Expr.Let { name = n1; btype = s1; value = v1; body = a },
-                    Expr.Let { name = n2; btype = s2; value = v2; body = b } )
-                  ->
-                  if isDefEq env s1 s2 && isDefEq env v1 v2 then (
-                    let free_var =
-                      Expr.fvar n1 s1 Expr.Default (Nyaya_parser.Util.Uid.mk ())
-                    in
-                    let r =
-                      isDefEq env
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:a
-                           ())
-                        (Expr.instantiate ~logger:env.logger ~free_var ~expr:b
-                           ())
-                    in
-                    if not r then Logger.debug "defeq: Let body mismatch";
-                    r
-                  ) else (
-                    Logger.debug "defeq: Let btype/value mismatch";
-                    false
-                  )
-                | _ -> final_fallback e1' e2'
-              in
-              result
-            with Defeq_failure _ as exn ->
-              (* Safety net: lazy-delta's height-ordered, one-side-at-a-time
-                 unfolding is not always equivalent to unfolding each side
-                 independently to a full, unconditional whnf fixpoint --
-                 empirically (Int.fdiv_eq_ediv in init.export), continuing a
-                 recursor's major-premise resolution from a partially-lazy-
-                 unfolded term can take a different path than starting fresh
-                 from the original expr. Retry once against fully-whnf'd
-                 originals -- this exactly reproduces the proven-correct
-                 pre-lazy-delta behavior as an ultimate fallback, so it can
-                 only ever rescue a case lazy-delta's strategy mishandled,
-                 never mask a real inequality. If that ALSO doesn't change
-                 anything, re-raise the original failure. *)
-              let e1_full = whnf env e1 in
-              let e2_full = whnf env e2 in
-              if e1_full == e1' && e2_full == e2' then
-                raise exn
-              else
-                isDefEq env e1_full e2_full
+                  result
+                with Defeq_failure _ as exn ->
+                  (* Safety net: lazy-delta's height-ordered, one-side-at-a-time
+                     unfolding is not always equivalent to unfolding each side
+                     independently to a full, unconditional whnf fixpoint --
+                     empirically (Int.fdiv_eq_ediv in init.export), continuing a
+                     recursor's major-premise resolution from a partially-lazy-
+                     unfolded term can take a different path than starting fresh
+                     from the original expr. Retry once against fully-whnf'd
+                     originals -- this exactly reproduces the proven-correct
+                     pre-lazy-delta behavior as an ultimate fallback, so it can
+                     only ever rescue a case lazy-delta's strategy mishandled,
+                     never mask a real inequality. If that ALSO doesn't change
+                     anything, re-raise the original failure. *)
+                  let e1_full = whnf env e1 in
+                  let e2_full = whnf env e2 in
+                  if e1_full == e1' && e2_full == e2' then
+                    raise exn
+                  else
+                    isDefEq env e1_full e2_full
+              )
           )
-      )
-    )
+        ))
   )
 
 (* Validate a constructor: its parameters must match the inductive's, each field
@@ -2060,7 +2230,7 @@ let check_ctor (decl : Decl.t) (env : Env.t) =
             params_arr.(i)
           ) else (
             (* field sort <= inductive level, or the inductive is a Prop. *)
-            let s = infer_sort_of env dom in
+            let s = infer_sort_of Check env dom in
             if not (Level.(s <= result_level) || Level.is_zero result_level)
             then
               Logger.err
@@ -2091,7 +2261,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Def { info; value; red_hint = _red_hint } ->
     (* TODO: definitions should be unfolded according to reducibility hints. *)
     Logger.debugf Pp.pp_check (value, info.ty);
-    let inf = infer env value in
+    let inf = infer Check env value in
     Logger.app "Inference complete";
     let ans = isDefEq env inf info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
@@ -2099,12 +2269,12 @@ let check (env : Env.t) (decl : Decl.t) : bool =
   | Thm { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
     (* A theorem's type must be a proposition (unlike a definition's). *)
-    (match Expr.node (whnf env (infer env info.ty)) with
+    (match Expr.node (whnf env (infer Check env info.ty)) with
     | Expr.Sort u when Level.is_zero u -> ()
     | _ ->
       Logger.err "check Thm: theorem type %a is not a proposition"
         (TypeError "theorem type is not a proposition") Expr.pp info.ty);
-    let inf = infer env value in
+    let inf = infer Check env value in
     Logger.app "Inference complete";
     let ans = isDefEq env inf info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
@@ -2118,7 +2288,7 @@ let check (env : Env.t) (decl : Decl.t) : bool =
     true
   | Opaque { info; value } ->
     Logger.debugf Pp.pp_check (value, info.ty);
-    let inf = infer env value in
+    let inf = infer Check env value in
     Logger.app "Inference complete";
     let ans = isDefEq env inf info.ty in
     Logger.success "@[Successfully type-checked @[%a@].@]" Name.pp info.name;
@@ -2157,10 +2327,10 @@ let well_posed (env : Env.t) (info : Decl.decl_info) : bool =
   let no_free_vars = Expr.has_free_vars info.ty |> not in
   let type_is_sort =
     try
-      match infer env info.ty |> Expr.node with
+      match infer Check env info.ty |> Expr.node with
       | Expr.Sort _ -> true
       | _ ->
-        Logger.debug "info.ty : %a@." Expr.pp (infer env info.ty);
+        Logger.debug "info.ty : %a@." Expr.pp (infer Check env info.ty);
         false
     with TypeError origin ->
       Logger.err "well_posed: while inferring %a, type error: %s"
@@ -2230,16 +2400,7 @@ let check_env_verdict (env : Env.t) : verdict =
          (fun n d ->
            (* Same per-declaration memo reset the discovery sweep does, so one
               declaration's traces/caches don't bleed into the next. *)
-           InferTrace.reset ();
-           WhnfTrace.reset ();
-           DefEqTrace.reset ();
-           Hashtbl.reset whnf_memo;
-           Hashtbl.reset whnf_core_memo;
-           Hashtbl.reset congruence_failure_memo;
-           Uf.reset ();
-           Hashtbl.reset infer_memo;
-           Hashtbl.reset Expr.num_loose_bvars_memo;
-           Hashtbl.reset Expr.has_free_vars_memo;
+           reset_decl_caches ();
            let name = CCFormat.to_string Name.pp n in
            stats_begin_decl ();
            Fun.protect
@@ -2312,16 +2473,7 @@ let typecheck (env : Env.t) =
         skipped := !skipped + 1;
         Logger.info "SKIPPED (NYAYA_SKIP_PREFIX): %s" decl_name_str
       ) else if sweep_all then (
-        InferTrace.reset ();
-        WhnfTrace.reset ();
-        DefEqTrace.reset ();
-        Hashtbl.reset whnf_memo;
-        Hashtbl.reset whnf_core_memo;
-        Hashtbl.reset congruence_failure_memo;
-        Uf.reset ();
-        Hashtbl.reset infer_memo;
-        Hashtbl.reset Expr.num_loose_bvars_memo;
-        Hashtbl.reset Expr.has_free_vars_memo;
+        reset_decl_caches ();
         let record_failure () =
           failures := decl_name_str :: !failures;
           (* Stream failures as they happen, so a killed sweep still leaves a partial record. *)
@@ -2353,16 +2505,7 @@ let typecheck (env : Env.t) =
         | Some target when String.equal target decl_name_str ->
           Logs.set_level (Some Logs.Debug)
         | _ -> ());
-        InferTrace.reset ();
-        WhnfTrace.reset ();
-        DefEqTrace.reset ();
-        Hashtbl.reset whnf_memo;
-        Hashtbl.reset whnf_core_memo;
-        Hashtbl.reset congruence_failure_memo;
-        Uf.reset ();
-        Hashtbl.reset infer_memo;
-        Hashtbl.reset Expr.num_loose_bvars_memo;
-        Hashtbl.reset Expr.has_free_vars_memo;
+        reset_decl_caches ();
         let info = Decl.get_decl_info d in
         (* Check well-posedness. *)
         let is_well_posed = well_posed env info in
@@ -2408,16 +2551,7 @@ let typecheck (env : Env.t) =
            let saved_reporter = Logs.reporter () in
            Logs.set_reporter (DeclLogger.reporter debug_ppf);
            Logs.set_level (Some Logs.Debug);
-           InferTrace.reset ();
-           WhnfTrace.reset ();
-           DefEqTrace.reset ();
-           Hashtbl.reset whnf_memo;
-           Hashtbl.reset whnf_core_memo;
-           Hashtbl.reset congruence_failure_memo;
-           Uf.reset ();
-           Hashtbl.reset infer_memo;
-           Hashtbl.reset Expr.num_loose_bvars_memo;
-           Hashtbl.reset Expr.has_free_vars_memo;
+           reset_decl_caches ();
            (try ignore (check env d) with _ -> ());
            Format.pp_print_flush debug_ppf ();
            close_out oc;

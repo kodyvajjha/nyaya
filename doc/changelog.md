@@ -5,7 +5,86 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
-## 2026-07-17: union-find cache for positive `isDefEq` verdicts, ported from nanoda_lib
+## 2026-07-17: kernel-order `isDefEq`, `InferOnly` inference, lazy failure formatting
+
+**Files:** `lib/tc.ml` (`isDefEq_impl` reorder, `infer_flag`, split infer
+memos, cheap-raise failure sites, `reset_decl_caches`), `lib/parser/util.ml`
+(`MakeLogger.debug` made lazy).
+
+Three fixes from a comparative study of nyaya against external kernels (the
+top-ranked items; the study also flagged telescope-at-once binder handling,
+substitution caches, and name/level interning as follow-ups). All three are
+places where nyaya structurally diverged from:
+
+1. **`isDefEq_impl` ran proof irrelevance first, on every call, with
+   checking inference.** Every defeq call -- including Sort-vs-Sort and
+   binder-vs-binder, the bulk of recursive defeq traffic -- began by
+   inferring the types of *both* sides (plus the types of those types for
+   `is_prop`), before any structural comparison. Now reordered to the
+   kernel's `is_def_eq_core` sequence (also nanoda's `def_eq`): pointer/
+   union-find checks -> `quick_check` (Sort/Sort compares levels; manifest
+   Forall/Forall and Lam/Lam pairs compare domain + instantiated bodies,
+   definitively -- the kernel's `quick_is_def_eq`) -> `whnf_core` both
+   sides -> quick checks again on the cores -> proof irrelevance ->
+   same-head-args shortcut -> lazy delta -> the existing stuck fallback.
+   Proof irrelevance is now also left-short-circuiting: the right side's
+   type is never inferred unless the left side is actually a proof. Note
+   two Lam-proofs now compare structurally before irrelevance fires -- but
+   irrelevance still fires inside the body comparison (post-`whnf_core`,
+   the bodies are non-Lam), so the verdict is unchanged; this is exactly
+   the kernel's behavior.
+
+2. **No `InferOnly` mode.** nyaya's single `infer` always re-verified as it
+   went: every App node's argument type was defeq-checked against the
+   binder type, every Let/Lam binder re-checked -- even for terms the
+   checker itself produced by reducing already-checked terms. Combined with
+   (1) this was the primary work multiplier: every defeq spawned two
+   checked inferences, each App node inside spawned more defeqs, each of
+   those inferred both sides again. Now `infer` takes an `infer_flag`
+   (`Check`/`InferOnly`), mirroring the kernel's `infer_type_core`
+   `infer_only` flag and nanoda's `InferFlag`, with split memo tables
+   (`infer_memo_check`/`infer_memo_no_check`; a Check hit satisfies both
+   modes, a no-check hit never satisfies a Check query). `Check` is used
+   once per declaration (`check`, `well_posed`, `check_ctor`); everything
+   in service of reduction/defeq (proof irrelevance, iota's K-check,
+   struct-eta, unit-like defeq, projection prop-checks) is `InferOnly`.
+
+3. **Failure paths eagerly pretty-printed full terms.** `MakeLogger`'s
+   `ksprintf`-based `debug`/`err` render the message string -- including
+   `%a Expr.pp` walks over entire terms -- *before* Logs' own lazy level
+   check can suppress it. So at the default `Info` level, every iota
+   reduction in whnf formatted its full result (`"iota: %a"`), and every
+   speculative defeq failure (`same_head_args_shortcut`, lazy-delta
+   congruence, `try_cong` -- paths that *expect* to fail and catch
+   `Defeq_failure`) formatted both complete terms before raising.
+   `MakeLogger.debug` is now gated on `Logs.level () = Some Logs.Debug`
+   (consuming its arguments via `ikfprintf` otherwise, so the printers are
+   never invoked -- the same trap `MakeTrace`'s DEBUG-GATE comment already
+   documented for trace summaries), and the three hot `Defeq_failure`
+   sites (`isDefEq` structural mismatch, infer App btype-vs-arg, infer Let
+   btype-vs-value) raise a bare exception unless Debug logging is on.
+
+Also consolidated the four identical per-declaration memo/trace reset
+blocks into one `reset_decl_caches` (now covering both infer memos).
+
+**Result:** full `dune build @runtest` unchanged (same 4 known failures:
+`app-lam`, `grind-ring-5`, `bad/130`, `bad/131`; no regressions).
+`scripts/bench.sh` against the previous baseline (`20260717-053541`):
+
+| target | cpu-ms | whnf-miss | defeq | peak-w |
+|---|---|---|---|---|
+| init-prelude | 19926 -> 4964 (**-75%**) | 87674 -> 57720 (-34%) | 110052 -> 66373 (-40%) | 103 -> 20 |
+| grind-ring-5 | 19620 -> 8573 (**-56%**) | 87040 -> 77376 (-11%) | 114932 -> 68430 (-40%) | 2001 (unchanged) |
+
+Full `init.export` sweep re-verified after the change (see below for
+count). `grind-ring-5` still hits the lazy-delta depth cap (verdict
+unchanged); `app-lam` still times out -- both are bounded by the remaining
+comparative-study items (uncached unary substitution, one-binder-at-a-time
+telescopes), not by these three.
+
+---
+
+## 2026-07-17: union-find cache for positive `isDefEq` verdicts
 
 **Files:** `lib/tc.ml` -- new `Uf` module, wired into `isDefEq`/`isDefEq_impl`.
 
@@ -20,8 +99,7 @@ the code (`lib/tc.ml` ~1325) since the lazy-delta work landed.
 
 **Result:** `Uf` module (`lib/tc.ml`, next to `congruence_failure_memo`) --
 an int-tag-keyed union-find (`Hashtbl` of `{mutable parent; mutable
-rank}`, since expr hash-cons tags are already unique ints; simpler than
-nanoda's generic `IndexMap`-backed version, no separate index-assignment
+rank}`, since expr hash-cons tags are already unique ints; no separate index-assignment
 needed). `isDefEq_impl` checks `Uf.check_eq (tag e1) (tag e2)` right after
 the physical-equality check, before any reduction; `isDefEq` calls
 `Uf.union (tag e1) (tag e2)` whenever the result is `true`, so every
@@ -123,7 +201,7 @@ above) hit a new wall: `Int16.ofBitVec_intMax` failed with
 `Depth_limit("[d#2079] depth 2001 exceeds max 2000, input=96311 =?=
 30775")` -- the `DefEqTrace` recursion-depth cap (default 2000, separate
 from lazy-delta's own 8192 untraced-loop cap), not a hang. `96311 - 30775 =
-65536 = 2^16`, i.e. an `Int16`/`BitVec 16` modular-arithmetic byproduct.
+65536 = 2^16`,  zi.e. an `Int16`/`BitVec 16` modular-arithmetic byproduct.
 
 Root cause: `nat_offset_bridge`'s `as_nat_succ` treats *any* positive
 `NatLit n` as `Nat.succ (n-1)` -- correct when bridging a literal against a

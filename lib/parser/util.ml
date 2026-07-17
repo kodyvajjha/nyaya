@@ -104,9 +104,19 @@ end) : LOGGER = struct
       fmt
 
   let debug fmt =
-    CCFormat.ksprintf
-      ~f:(fun str -> Logs.debug (fun m -> m "%s" str ~header:Data.header))
-      fmt
+    (* Only format when Debug is actually being reported: ksprintf renders
+       the message string -- including any %a printers walking full exprs --
+       *before* Logs' own (lazy) level check can suppress it, so an
+       unguarded call pays for pretty-printing on hot paths even at the
+       default Info level. Same trap MakeTrace's DEBUG-GATE comment
+       documents; ikfprintf consumes the format arguments without invoking
+       any of the printers. *)
+    if Logs.level () = Some Logs.Debug then
+      CCFormat.ksprintf
+        ~f:(fun str -> Logs.debug (fun m -> m "%s" str ~header:Data.header))
+        fmt
+    else
+      Format.ikfprintf (fun _ -> ()) Format.err_formatter fmt
 
   let debugf pp x =
     CCFormat.set_color_default true;
