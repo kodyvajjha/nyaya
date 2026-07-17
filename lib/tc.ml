@@ -193,11 +193,21 @@ module Reduce = struct
   let string_lit_to_ctor (s : string) : Expr.t =
     let mk_name base field = Name.Str (Name.Str (Name.Anon, base), field) in
     let char_type = Expr.const (Name.Str (Name.Anon, "Char")) in
+    (* [List] is universe-polymorphic ([List.{u} : Type u -> Type u]); [Char :
+       Type 0] fixes [u] to [Level.Zero]. Omitting [~ups] here defaults to an
+       empty uparams list, an arity mismatch against every other [List.nil]/
+       [List.cons] in the kernel (which all carry one level), even though the
+       pretty-printer hides zero-valued levels and makes the two look
+       identical in traces. *)
     let list_nil =
-      Expr.mk_app (Expr.const (mk_name "List" "nil")) [ char_type ]
+      Expr.mk_app
+        (Expr.const ~ups:[ Level.Zero ] (mk_name "List" "nil"))
+        [ char_type ]
     in
     let list_cons_char =
-      Expr.mk_app (Expr.const (mk_name "List" "cons")) [ char_type ]
+      Expr.mk_app
+        (Expr.const ~ups:[ Level.Zero ] (mk_name "List" "cons"))
+        [ char_type ]
     in
     let char_of_nat = Expr.const (mk_name "Char" "ofNat") in
     let string_mk = Expr.const (mk_name "String" "mk") in

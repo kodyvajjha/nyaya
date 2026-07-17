@@ -5,6 +5,50 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-17: fix missing universe param on synthesized `List.nil`/`List.cons`, clearing `String.append_empty`
+
+**File:** `lib/tc.ml`, `Reduce.string_lit_to_ctor`.
+
+**Problem:** `String.append_empty` failed with `isDefEq` rejecting two terms
+that looked, and printed, identical: `String.data (s ++ "")` vs
+`String.data s ++ []`. Tracing through (with the shortcut/congruence paths'
+logging suppression temporarily disabled to see the silenced sub-comparisons)
+found the actual mismatch two levels down: `List.nil` vs `List.nil`, rejected
+by the Const-Const defeq case on `List.length us = List.length vs` --
+i.e. an arity mismatch on the universe-parameter list, not a name or value
+mismatch. One side came from `string_lit_to_ctor` (the kernel-extension
+helper that expands a `StrLit` into `String.mk (List.cons ... (List.nil ..))`
+for projection reduction, per *Theorem Proving in Lean 4*'s string-literal
+projection rule), which built `List.nil`/`List.cons` via `Expr.const` with no
+`~ups`, defaulting to an empty uparams list. But `List.{u} : Type u -> Type
+u` is universe-polymorphic, so every other occurrence of `List.nil`/
+`List.cons` in the kernel carries one universe argument -- a genuine arity
+mismatch (0 vs 1 params), not a level-value disagreement. This was invisible
+in every trace because `Expr.pp`'s `Const` case hides uparams entirely when
+they're empty *or* all-zero (`List.nil.{0}` and `List.nil` print
+identically), so the two occurrences looked the same right up until the
+length check itself.
+
+**Fix:** pass `~ups:[Level.Zero]` to both `Expr.const` calls (`Char : Type 0`
+fixes `u := 0`); `Char.ofNat`/`String.mk`/the bare `Char` type reference are
+correctly left at `~ups:[]` since `Char` and `String` are non-polymorphic.
+
+**Declaration unblocked:** `String.append_empty`.
+
+**Result:** full `dune build @runtest` still exactly 4 known failures
+(`perf/app-lam`, `perf/grind-ring-5`, `bad/130`, `bad/131`), no regressions.
+A follow-on 300s discovery sweep of `init.export` (from the start of the
+corpus, since this bug fires on any string-literal projection) completed
+2050 declarations cleanly before hitting the time cap -- no new failures.
+
+**Kernel reference:** *Theorem Proving in Lean 4*'s description of the
+string-literal kernel extension's projection-reduction special case (convert
+a `StringLit` to `String.mk (List Char)` form before proceeding as usual);
+`type_checker.cpp`'s `is_def_eq_core` Const-Const case (name and
+universe-list equality, arity-checked first).
+
+---
+
 ## 2026-07-15: lazy-delta reduction in isDefEq
 
 **Files:** `lib/tc.ml` -- new `whnf_core`/`whnf_core_impl` (delta-free WHNF),
