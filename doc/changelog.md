@@ -5,6 +5,79 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: `get_apps` O(k²) fix and per-call `instantiate` memoization (Vector.pmap_pmap 590x)
+
+**Files:** `lib/expr.ml` (`get_apps`, `gather_lams`, `gather_foralls`, `instantiate`).
+
+Prompted by Kody flagging that a discovery `init.lean` run was spending a very
+long time in the `Vector` namespace, particularly `Vector.pmap_pmap`. Two
+fixes, one trivial and one root-caused by direct measurement.
+
+**1. `get_apps`/`gather_lams`/`gather_foralls` were O(k²) in spine/telescope
+length.** Each built its result list by appending to the end
+(`running @ [a]`), an O(current length) operation repeated once per spine
+element -- O(k²) total for a k-long application spine or binder telescope,
+then (for `get_apps`) reversed the (already wrongly-ordered-for-the-append-
+approach) result. `get_apps` alone has 30+ call sites across `lib/tc.ml`,
+including the isDefEq same-head-args shortcut and every `infer_impl` case
+that inspects an application's head. Fixed by prepending instead
+(`a :: running`) and reversing only where the accumulation order actually
+requires it -- no need for `get_apps` at all, since prepending during an
+outside-in walk already lands args in application order. Behavior-identical
+(verified: same 164-test suite results before/after).
+
+**2. `Expr.instantiate` was unary and completely uncached, including within
+a single top-level call.** Diagnosed by isolating `Vector.pmap_pmap` with
+`NYAYA_ONLY_DECL=Vector.pmap_pmap NYAYA_SWEEP_ALL=1 NYAYA_STATS=1` (only
+`NYAYA_SWEEP_ALL`'s code path actually calls `stats_begin_decl`/collects
+per-decl `NYAYA_STATS` counters, even when `NYAYA_ONLY_DECL` already narrows
+the sweep to one declaration) plus throwaway visit-counting instrumentation
+(added, measured, fully reverted -- no trace of it left in the diff). The
+kernel-level counters were unremarkable (whnf-miss=1859, defeq=3839) against
+a 41.3s cpu time -- ruling out the deep-recursion/telescope-depth shape this
+was expected to have (the originally-suspected "`infer_impl` Lam/Forall
+recurse one binder at a time" telescope-depth gap, item 4 of the nanoda
+comparative study). The real signal:
+**3612 top-level `instantiate` calls drove 554 million recursive visits**
+(avg ~153k visits/call). Root cause: a shared subtree reachable via multiple
+paths through the (hashconsed, DAG-shaped) argument -- `pmap_pmap`'s
+well-founded-recursion proof term has heavy internal sharing -- gets
+re-walked once per path by naive tree recursion. This is the exact same
+root shape as the pre-existing `num_loose_bvars`/`has_free_vars` DAG-as-tree
+blowups (see `project_nyaya_oom_investigation`), just not yet hit in the
+substitution walk itself.
+
+Fix: memoize `instantiate_aux` **locally within each top-level `instantiate`
+call**, keyed by `(hashcons tag, offset)`. This must be a local (per-call),
+not global, cache: the result is a pure function of `(expr, offset)` *only
+because* `free_var` is fixed for the duration of one call -- across
+different calls `free_var` differs, so a global table (like
+`num_loose_bvars_memo`) would return one call's substitution result for a
+different call's `free_var`, a silent correctness bug (could manifest as a
+false-accept, not a crash). Confirmed the key is complete (no other call-
+varying state is read in any match arm) before landing.
+
+`abstract_fvar` (126k total visits) and `subst_levels` (27k total visits)
+were instrumented on the same declaration for comparison and are not worth
+memoizing -- both are orders of magnitude below `instantiate`'s pre-fix 554M,
+confirmed by measurement rather than assumed.
+
+**Result:** `Vector.pmap_pmap` in isolation: visits 554M -> 62k, cpu
+41.3s -> 70ms (**590x**). Full `dune build @runtest`: same 4 pre-existing
+failures (`app-lam`, `grind-ring-5`, `bad/130`, `bad/131`), no regressions --
+`bad/130`/`bad/131` specifically re-checked to confirm they still correctly
+*reject* (a substitution bug could plausibly flip a `bad/` case to a
+false-accept without crashing anything). `scripts/bench.sh` full perf
+corpus: `init-prelude` and `grind-ring-5` counters within noise of the
+pre-existing baseline (expected -- this fix targets DAG-sharing-heavy single
+declarations like `pmap_pmap`, not the perf-corpus files); `app-lam` still
+times out, unaffected either way (separate, already-deferred issue).
+
+**Kernel reference:** N/A -- pure performance fix, no change to which terms
+are accepted or rejected.
+
+---
+
 ## 2026-07-18: isDefEq safety-net retry compares against the true original args
 
 **Files:** `lib/tc.ml` (`isDefEq_impl`'s lazy-delta `Stuck` handling).

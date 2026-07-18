@@ -177,12 +177,17 @@ let natlit i = HExpr.hashcons (Literal (NatLit i))
 
 let strlit s = HExpr.hashcons (Literal (StrLit s))
 
-(** Collect a chain of [App(App(App(f, x_0), x_1) ... x_N)] as [f,[x_0;x_1;x_2;...;x_N]]*)
+(** Collect a chain of [App(App(App(f, x_0), x_1) ... x_N)] as [f,[x_0;x_1;x_2;...;x_N]].
+    [running] is accumulated by prepending each arg as it's peeled outside-in,
+    which lands args in application order directly -- no need to reverse. (A
+    previous version appended to the end of [running] per arg, an O(k)
+    operation repeated k times = O(k^2) for a k-long spine, then reversed;
+    this is O(k) total.) *)
 let get_apps e =
   let rec aux head running =
     match node head with
-    | App (f, a) -> aux f (running @ [ a ])
-    | _ -> head, CCList.rev running
+    | App (f, a) -> aux f (a :: running)
+    | _ -> head, running
   in
   aux e []
 
@@ -190,8 +195,8 @@ let gather_lams e =
   let rec aux running final =
     match node final with
     | Lam { name; btype; binfo; body } ->
-      aux (running @ [ name, btype, binfo ]) body
-    | _ -> running, final
+      aux ((name, btype, binfo) :: running) body
+    | _ -> CCList.rev running, final
   in
   aux [] e
 
@@ -199,8 +204,8 @@ let gather_foralls f =
   let rec aux running final =
     match node final with
     | Forall { name; btype; binfo; body } ->
-      aux (running @ [ name, btype, binfo ]) body
-    | _ -> running, final
+      aux ((name, btype, binfo) :: running) body
+    | _ -> CCList.rev running, final
   in
   aux [] f
 
@@ -411,46 +416,64 @@ let instantiate
         let header = "Expr"
       end) : Util.LOGGER)) ~(free_var : t) ~(expr : t) () =
   let _logger = logger in
+  (* Memoize within this one call, keyed by (hash-cons tag, offset): result is
+     a pure function of (expr, offset) since [free_var] is fixed for the
+     whole call. Without this, a shared subtree reachable via multiple paths
+     in the (hashconsed, DAG-shaped) argument is re-walked once per path --
+     same root cause as [num_loose_bvars_memo]/[has_free_vars_memo] above,
+     but local rather than global since the result here also depends on
+     [free_var], which differs across calls. Observed on
+     [Vector.pmap_pmap]: 3612 top-level calls drove 554M recursive visits
+     (avg ~153k/call) before this fix; 590x cpu-time reduction after. *)
+  let memo : (int * int, t) Hashtbl.t = Hashtbl.create 97 in
   let rec instantiate_aux (free_var : t) (expr : t) (offset : int) =
     if num_loose_bvars expr <= offset then
       expr
     else (
-      match node expr with
-      | BoundVar i ->
-        if offset <= i then
-          (* Logger.debugf
-             (fun fpf (e1, e2) ->
-               CCFormat.fprintf fpf
-                 "@[<v 0>@{<blue>At offset %d instantiated:@}@,\
-                  @[<hov 2>%a@] @,\
-                  in@,\
-                  @[<hov 2>%a@]@]" offset pp e1 pp e2)
-             (free_var, expr); *)
-          free_var
-        else
-          expr
-      | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
-      | App (f, a) ->
-        app
-          (instantiate_aux free_var f offset)
-          (instantiate_aux free_var a offset)
-      | Lam { name; btype; binfo; body } ->
-        lambda name
-          (instantiate_aux free_var btype offset)
-          binfo
-          (instantiate_aux free_var body (offset + 1))
-      | Forall { name; btype; binfo; body } ->
-        pi name
-          (instantiate_aux free_var btype offset)
-          binfo
-          (instantiate_aux free_var body (offset + 1))
-      | Let { name; btype; value; body } ->
-        letin name
-          (instantiate_aux free_var btype offset)
-          (instantiate_aux free_var value offset)
-          (instantiate_aux free_var body (offset + 1))
-      | Proj { name; nat; expr } ->
-        proj name nat (instantiate_aux free_var expr offset)
+      let key = tag expr, offset in
+      match Hashtbl.find_opt memo key with
+      | Some result -> result
+      | None ->
+        let result =
+          match node expr with
+          | BoundVar i ->
+            if offset <= i then
+              (* Logger.debugf
+                 (fun fpf (e1, e2) ->
+                   CCFormat.fprintf fpf
+                     "@[<v 0>@{<blue>At offset %d instantiated:@}@,\
+                      @[<hov 2>%a@] @,\
+                      in@,\
+                      @[<hov 2>%a@]@]" offset pp e1 pp e2)
+                 (free_var, expr); *)
+              free_var
+            else
+              expr
+          | FreeVar _ | Const _ | Sort _ | Literal _ -> expr
+          | App (f, a) ->
+            app
+              (instantiate_aux free_var f offset)
+              (instantiate_aux free_var a offset)
+          | Lam { name; btype; binfo; body } ->
+            lambda name
+              (instantiate_aux free_var btype offset)
+              binfo
+              (instantiate_aux free_var body (offset + 1))
+          | Forall { name; btype; binfo; body } ->
+            pi name
+              (instantiate_aux free_var btype offset)
+              binfo
+              (instantiate_aux free_var body (offset + 1))
+          | Let { name; btype; value; body } ->
+            letin name
+              (instantiate_aux free_var btype offset)
+              (instantiate_aux free_var value offset)
+              (instantiate_aux free_var body (offset + 1))
+          | Proj { name; nat; expr } ->
+            proj name nat (instantiate_aux free_var expr offset)
+        in
+        Hashtbl.add memo key result;
+        result
     )
   in
   instantiate_aux free_var expr 0
