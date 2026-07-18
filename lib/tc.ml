@@ -50,6 +50,13 @@ let expr_summary expr = CCFormat.asprintf "%a" Expr.pp expr |> truncate
 
 let whnf_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
 
+(** Never-reset cache for [whnf] on closed (no free vars) terms, backed by
+    [Expr.GrowArray] for the same O(1)-regardless-of-population reason
+    [Expr.num_loose_bvars_memo] is. See {!whnf}'s comment for the
+    measurement that justified this (92.6% cross-declaration reuse on a
+    full init.export sweep). *)
+let whnf_closed_memo : Expr.t Expr.GrowArray.t = Expr.GrowArray.create 65536
+
 (** Memo table for {!whnf_core}, the delta-free weak-head-normal-form used by
     the lazy-delta loop in [isDefEq]. Separate from [whnf_memo] since the two
     functions compute different things for the same input (whnf_core leaves a
@@ -1319,21 +1326,54 @@ and infer_sort_of flag env (expr : Expr.t) =
       (TypeError "infer_sort_of: not a sort") Expr.pp (infer flag env expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
-  match Hashtbl.find_opt whnf_memo (Expr.tag expr) with
-  | Some result ->
-    if stats_on then incr whnf_memo_hits;
-    result
-  | None ->
-    let frame = WhnfTrace.enter env expr in
-    (match whnf_impl env expr with
-    | e ->
-      WhnfTrace.leave_success env frame e;
-      Hashtbl.replace whnf_memo (Expr.tag expr) e;
-      e
-    | exception exn ->
-      let backtrace = Printexc.get_raw_backtrace () in
-      WhnfTrace.leave_failure env frame exn;
-      Printexc.raise_with_backtrace exn backtrace)
+  (* Closed terms (no free vars) go through [whnf_closed_memo] instead of the
+     per-declaration [whnf_memo]: a closed expr's whnf is a pure function of
+     (expr, env), and env is static for the whole run, so the result is
+     globally valid -- not just within the declaration that first computed
+     it. Measured directly (throwaway instrumentation, since reverted):
+     across a full init.export sweep, 92.6% of closed-term whnf-misses
+     (7.49M of 8.09M) were re-deriving a result some earlier declaration in
+     the sweep had already computed -- shared library terms like [Nat.add 2
+     3] recur constantly across unrelated declarations' proofs. Safe to
+     never reset for the same reason [Expr.num_loose_bvars_memo] is:
+     [Expr.GrowArray]-backed, so lookup cost is O(1) regardless of
+     population, avoiding the Hashtbl-population regression documented on
+     [reset_decl_caches]. Terms with free vars keep using [whnf_memo]
+     (reset per declaration): those routinely embed a declaration's own
+     fresh free variables and are not safe to treat as globally valid. *)
+  if not (Expr.has_free_vars expr) then (
+    match Expr.GrowArray.get whnf_closed_memo (Expr.tag expr) with
+    | Some result ->
+      if stats_on then incr whnf_memo_hits;
+      result
+    | None ->
+      let frame = WhnfTrace.enter env expr in
+      (match whnf_impl env expr with
+      | e ->
+        WhnfTrace.leave_success env frame e;
+        Expr.GrowArray.set whnf_closed_memo (Expr.tag expr) e;
+        e
+      | exception exn ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        WhnfTrace.leave_failure env frame exn;
+        Printexc.raise_with_backtrace exn backtrace)
+  ) else (
+    match Hashtbl.find_opt whnf_memo (Expr.tag expr) with
+    | Some result ->
+      if stats_on then incr whnf_memo_hits;
+      result
+    | None ->
+      let frame = WhnfTrace.enter env expr in
+      (match whnf_impl env expr with
+      | e ->
+        WhnfTrace.leave_success env frame e;
+        Hashtbl.replace whnf_memo (Expr.tag expr) e;
+        e
+      | exception exn ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        WhnfTrace.leave_failure env frame exn;
+        Printexc.raise_with_backtrace exn backtrace)
+  )
 
 and whnf_impl (env : Env.t) (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in

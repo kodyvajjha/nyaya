@@ -5,6 +5,52 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: closed-term `whnf` cache -- 54% fewer reductions on a full sweep
+
+**Files:** `lib/tc.ml` (`whnf_closed_memo`, `whnf`).
+
+The big one from this round of perf work. `whnf`'s existing memo table
+(`whnf_memo`) is reset per declaration -- necessarily, since it caches
+results for terms *constructed during checking* (via `instantiate`/`whnf`
+itself/etc.), most of which embed that declaration's own fresh free
+variables and would leak unboundedly if kept forever (see the previous
+commit's `Hashtbl` regression for exactly this failure mode). But that
+blanket reset throws away cross-declaration reuse for the *other* case:
+terms with no free variables at all, whose `whnf` result is a pure function
+of `(expr, env)` with `env` static for the whole run, and therefore globally
+valid, not just within the declaration that first computed it.
+
+Measured directly before building anything (throwaway instrumentation,
+added and fully reverted): on a full `init.export` sweep, 92.6% of
+closed-term `whnf`-misses (7.49M of 8.09M) were re-deriving a result some
+earlier declaration in the sweep had already computed -- unsurprising in
+retrospect, since shared library terms (`Nat.add 2 3`, small numeral
+arithmetic, etc.) recur constantly across otherwise-unrelated declarations'
+proofs.
+
+Fix: split `whnf`'s memo lookup on `Expr.has_free_vars`. Closed terms go
+through a new `whnf_closed_memo`, `Expr.GrowArray`-backed (same rationale as
+the previous commit) and never reset; terms with free vars keep using the
+existing per-declaration `whnf_memo` unchanged.
+
+**Result:** measured in isolation (on top of the previous three commits,
+holding those constant): whnf-miss 13.80M -> 6.31M (**-54%**, a genuine
+reduction in reduction work performed, not just a cheaper cost per call --
+the first change in this whole investigation to move the deterministic
+counters), delta 5.57M -> 3.07M (-45%), whnf-memo-hit-rate 42.2% -> 61.2%,
+cpu 210.6s -> ~153-166s (~24-27%, two runs, machine-variance range). Full
+sweep: 36688/36688 declarations passing, 0 failures, unchanged. `dune build
+@runtest`: same 4 known failures (`app-lam`, `grind-ring-5`, `bad/130`,
+`bad/131`), no regressions.
+
+**Cumulative, across this whole round (subst_levels cache, NameCache,
+GrowArray-backed num_loose_bvars/has_free_vars, and this commit) plus the
+prior session's `get_apps`/`instantiate` fixes:** a full `init.export`
+sweep that Kody reported taking ~5 minutes wall-clock now completes in
+~3 minutes.
+
+---
+
 ## 2026-07-18: `num_loose_bvars`/`has_free_vars` cached forever via `GrowArray`
 
 **Files:** `lib/expr.ml` (`GrowArray`, `num_loose_bvars_memo`,
