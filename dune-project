@@ -21,7 +21,19 @@
  (name nyaya)
  (synopsis "An external type-checker for Lean 4.")
  (description "")
- (depends ocaml dune containers ppx_deriving)
+ (depends
+  ocaml
+  dune
+  containers
+  iter
+  zarith
+  sedlex
+  menhir
+  hc
+  logs
+  yojson
+  ppx_deriving
+  (alcotest :with-test))
  (tags
   (topics "to describe" your project)))
 
