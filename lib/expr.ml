@@ -580,28 +580,57 @@ let abstract_fvar ~(target_id : int) ~(k : int) (e : t) =
    Skip the rebuild (a full hashcons walk of [expr], often a whole
    definition body) entirely rather than reconstructing an identical tree
    node by node -- this runs on every delta unfold (`Reduce.delta_at_head`),
-   the hottest path in the checker. *)
+   the hottest path in the checker.
+
+   Memoized globally (never reset per declaration), keyed by
+   [(hashcons tag, ks, vs)]: unlike [whnf_memo]/[infer_memo] in [Tc], every
+   call site passes an [expr] drawn from a fixed, bounded population --
+   a declaration's own value/type, a constructor's type, or a recursor
+   rule's value, all looked up from [Env.t] -- never an ephemeral term
+   constructed mid-check with a fresh free variable, so there is no
+   per-declaration-garbage growth risk to guard against by resetting (see
+   [Tc.reset_decl_caches]'s comment for that distinction). [ks]/[vs] are
+   themselves drawn from an equally bounded set (a declaration's own
+   universe params, and the finite level population parsed from the
+   export), so the whole cache is bounded by (static exprs) x (level
+   instantiations actually used), not by sweep length. This is exactly
+   nanoda_lib's [subst_cache]: repeatedly delta-unfolding the same
+   polymorphic definition (e.g. from multiple call sites across a proof, or
+   across many declarations in a sweep) now re-substitutes levels once per
+   distinct [(expr, ks, vs)] triple instead of once per unfold. *)
+let subst_levels_memo : (int * Level.t list * Level.t list, t) Hashtbl.t =
+  Hashtbl.create 4096
+
 let rec subst_levels (expr : t) (ks : Level.t list) (vs : Level.t list) =
   match ks with
   | [] -> expr
   | _ ->
-    (match node expr with
-    | BoundVar _ | Literal _ -> expr
-    | Sort l -> sort (Level.subst_simp ~level:l ~ks ~vs)
-    | FreeVar { name; expr; info; fvarId } ->
-      fvar name (subst_levels expr ks vs) info fvarId
-    | Const { name; uparams } ->
-      let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
-      const name ~ups:uparams'
-    | App (f, a) -> app (subst_levels f ks vs) (subst_levels a ks vs)
-    | Lam { name; btype; binfo; body } ->
-      lambda name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
-    | Forall { name; btype; binfo; body } ->
-      pi name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
-    | Let { name; btype; value; body } ->
-      letin name (subst_levels btype ks vs) (subst_levels value ks vs)
-        (subst_levels body ks vs)
-    | Proj { name; nat; expr } -> proj name nat (subst_levels expr ks vs))
+    let key = tag expr, ks, vs in
+    (match Hashtbl.find_opt subst_levels_memo key with
+    | Some result -> result
+    | None ->
+      let result =
+        match node expr with
+        | BoundVar _ | Literal _ -> expr
+        | Sort l -> sort (Level.subst_simp ~level:l ~ks ~vs)
+        | FreeVar { name; expr; info; fvarId } ->
+          fvar name (subst_levels expr ks vs) info fvarId
+        | Const { name; uparams } ->
+          let uparams' = Level.subst_levels ~levels:uparams ~ks ~vs in
+          const name ~ups:uparams'
+        | App (f, a) -> app (subst_levels f ks vs) (subst_levels a ks vs)
+        | Lam { name; btype; binfo; body } ->
+          lambda name (subst_levels btype ks vs) binfo
+            (subst_levels body ks vs)
+        | Forall { name; btype; binfo; body } ->
+          pi name (subst_levels btype ks vs) binfo (subst_levels body ks vs)
+        | Let { name; btype; value; body } ->
+          letin name (subst_levels btype ks vs) (subst_levels value ks vs)
+            (subst_levels body ks vs)
+        | Proj { name; nat; expr } -> proj name nat (subst_levels expr ks vs)
+      in
+      Hashtbl.add subst_levels_memo key result;
+      result)
 
 open Nyaya_parser
 

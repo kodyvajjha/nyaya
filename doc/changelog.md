@@ -5,6 +5,40 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: `Expr.subst_levels` memoized globally
+
+**Files:** `lib/expr.ml` (`subst_levels`).
+
+Continuing the perf work prompted by Kody's `Vector` namespace report (see the
+`get_apps`/`instantiate` entry below): item 4 of the nanoda_lib comparative
+study flagged `Expr.subst_levels` as uncached, called on every delta unfold
+(`Reduce.delta_at_head`, the hottest path in the checker) via
+`Expr.subst_levels v decl_uparams uparams` -- re-substituting and rebuilding
+a whole declaration body from scratch even when the exact same
+`(expr, ks, vs)` triple had already been computed (e.g. the same polymorphic
+definition delta-unfolded at the same universe instantiation from multiple
+call sites, or across multiple declarations in a sweep).
+
+Fix: memoize `subst_levels` globally (never reset per declaration), keyed by
+`(hashcons tag, ks, vs)`. Safe to keep forever, unlike the per-declaration
+caches in `Tc` (`whnf_memo`/`infer_memo`/etc.): every call site passes an
+`expr` drawn from a fixed, bounded population -- a declaration's own
+value/type, a constructor's type, or a recursor rule's value, all looked up
+from `Env.t` -- never an ephemeral term constructed mid-check with a fresh
+free variable. `ks`/`vs` are themselves bounded (a declaration's own
+universe params, and the finite level population parsed from the export).
+This is nanoda_lib's `subst_cache`.
+
+**Result:** measured in isolation on a full `init.export` sweep (holding
+everything else constant): cpu 306.8s -> 301.8s (~1.6%), deterministic work
+counters (whnf-miss/delta/defeq) unchanged, as expected for a pure caching
+change. A modest, safe win on its own -- the bigger wins from this same
+investigation are in separate commits/changelog entries. `dune build
+@runtest`: same 4 known failures (`app-lam`, `grind-ring-5`, `bad/130`,
+`bad/131`), no regressions.
+
+---
+
 ## 2026-07-18: `get_apps` O(k²) fix and per-call `instantiate` memoization (Vector.pmap_pmap 590x)
 
 **Files:** `lib/expr.ml` (`get_apps`, `gather_lams`, `gather_foralls`, `instantiate`).
