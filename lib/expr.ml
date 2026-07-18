@@ -348,6 +348,44 @@ let get_fvar_id expr =
   | _ ->
     Logger.err "Expr %a is not a free variable" (Failure "get_fvar_id") pp expr
 
+(* Backing store for [num_loose_bvars]/[has_free_vars] below: a growable
+   array indexed directly by hash-cons [tag], not a [Hashtbl]. [Hc]'s tags
+   (`hc.ml`'s [gen_tag]) are a single monotonic counter starting at 0 -- small,
+   dense integers -- so a tag is a valid array index directly, with no
+   hashing, no bucket-chain walk, and no resize/GC-scan cost that grows with
+   population the way a [Hashtbl]'s does. This matters: a first attempt at
+   caching these two properties forever used a plain [Hashtbl] kept across
+   the whole sweep instead of reset per declaration, and *regressed* a full
+   init.export sweep by ~20% -- the table grew to hold an entry for every
+   distinct intermediate term touched across all ~36k declarations, and
+   Hashtbl lookup cost on that ever-growing table exceeded the recomputation
+   it was meant to save (see `Tc.reset_decl_caches`'s git history). An array
+   doesn't have that failure mode: access cost is O(1) regardless of how many
+   entries are populated, so it is safe to never reset. *)
+module GrowArray = struct
+  type 'a t = { mutable data: 'a option array }
+
+  let create initial_size = { data = Array.make (max 1 initial_size) None }
+
+  let ensure_capacity t idx =
+    if idx >= Array.length t.data then (
+      let new_size = max (idx + 1) (2 * Array.length t.data) in
+      let new_data = Array.make new_size None in
+      Array.blit t.data 0 new_data 0 (Array.length t.data);
+      t.data <- new_data
+    )
+
+  let get t idx =
+    if idx < Array.length t.data then
+      t.data.(idx)
+    else
+      None
+
+  let set t idx v =
+    ensure_capacity t idx;
+    t.data.(idx) <- Some v
+end
+
 (* Memoized by hash-cons tag: num_loose_bvars is a pure structural property
    of the expr (independent of env/offset/typechecking state), and a given
    tag's node never changes, so a stale entry can never be wrong. Without
@@ -355,13 +393,14 @@ let get_fvar_id expr =
    step) re-walks the whole DAG as a tree on every call; on a heavily-shared
    DAG (e.g. Vector.pmap_attach's well-founded-recursion proof term) that
    re-walk is exponential in the sharing depth -- observed as billions of
-   calls with no progress, OOMing/hanging the declaration. Reset per
-   declaration in Tc.typecheck (like whnf_memo/infer_memo) purely to bound
-   memory across a long sweep, not for correctness. *)
-let num_loose_bvars_memo : (int, int) Hashtbl.t = Hashtbl.create 8192
+   calls with no progress, OOMing/hanging the declaration. Never reset
+   (unlike whnf_memo/infer_memo in `Tc.reset_decl_caches`): safe to cache
+   forever for correctness, and cheap to cache forever thanks to
+   [GrowArray]'s O(1)-regardless-of-population access (see its comment). *)
+let num_loose_bvars_memo : int GrowArray.t = GrowArray.create 65536
 
 let rec num_loose_bvars expr =
-  match Hashtbl.find_opt num_loose_bvars_memo (tag expr) with
+  match GrowArray.get num_loose_bvars_memo (tag expr) with
   | Some n -> n
   | None ->
     let n =
@@ -377,22 +416,21 @@ let rec num_loose_bvars expr =
           (num_loose_bvars body - 1)
       | Proj { expr; _ } -> num_loose_bvars expr
     in
-    Hashtbl.replace num_loose_bvars_memo (tag expr) n;
+    GrowArray.set num_loose_bvars_memo (tag expr) n;
     n
 
-(* Memoized by hash-cons tag, same rationale as [num_loose_bvars_memo]:
-   whether an expr contains *any* [FreeVar] at all is a pure structural
-   property, independent of which fvarId [abstract_fvar] is looking for.
-   [abstract_fvar] previously walked its whole argument unconditionally on
-   every call (its own TODO above flagged this); on a heavily-shared DAG --
-   e.g. a large inferred body type re-walked once per enclosing [Lam] in
-   [infer_impl] -- that is the same shape of DAG-as-tree blowup
-   [num_loose_bvars] was memoized to fix. Reset per declaration alongside
-   the other memo tables. *)
-let has_free_vars_memo : (int, bool) Hashtbl.t = Hashtbl.create 8192
+(* Memoized by hash-cons tag, same rationale and same [GrowArray] backing
+   store as [num_loose_bvars_memo]: whether an expr contains *any* [FreeVar]
+   at all is a pure structural property, independent of which fvarId
+   [abstract_fvar] is looking for. [abstract_fvar] previously walked its
+   whole argument unconditionally on every call (its own TODO above flagged
+   this); on a heavily-shared DAG -- e.g. a large inferred body type
+   re-walked once per enclosing [Lam] in [infer_impl] -- that is the same
+   shape of DAG-as-tree blowup [num_loose_bvars] was memoized to fix. *)
+let has_free_vars_memo : bool GrowArray.t = GrowArray.create 65536
 
 let rec has_free_vars expr =
-  match Hashtbl.find_opt has_free_vars_memo (tag expr) with
+  match GrowArray.get has_free_vars_memo (tag expr) with
   | Some b -> b
   | None ->
     let b =
@@ -406,7 +444,7 @@ let rec has_free_vars expr =
         has_free_vars btype || has_free_vars value || has_free_vars body
       | Proj { expr; _ } -> has_free_vars expr
     in
-    Hashtbl.replace has_free_vars_memo (tag expr) b;
+    GrowArray.set has_free_vars_memo (tag expr) b;
     b
 
 (** Substitute the [free_var] at the [expr] (has to be a bound variable). *)

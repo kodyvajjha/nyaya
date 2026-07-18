@@ -1026,7 +1026,28 @@ end
 
 (** Reset every per-declaration trace and memo table, so one declaration's
     caches don't bleed into the next. (WhnfCoreTrace is deliberately not
-    reset, matching the previous inline reset blocks this consolidates.) *)
+    reset, matching the previous inline reset blocks this consolidates.)
+
+    [Expr.num_loose_bvars_memo]/[Expr.has_free_vars_memo] are deliberately
+    NOT reset here, unlike every table below: both are pure structural
+    properties of a hashconsed node, so a stale entry can never be wrong,
+    and both are backed by [Expr.GrowArray] (an array indexed directly by
+    hash-cons tag), whose access cost is O(1) regardless of how many
+    entries are populated -- unlike a [Hashtbl], which is why every other
+    table here (keyed by tag the same way, but genuinely needing the reset
+    below: they cache results for terms *constructed during checking* via
+    [instantiate]/[whnf]/etc., most of which embed a declaration's own
+    fresh free variables and become permanent garbage once that
+    declaration's check finishes) can't just switch to the same trick --
+    their *keys* are unbounded across a sweep, not just their storage
+    mechanism. A first attempt at "cache forever" for these two used a
+    plain [Hashtbl] left unreset instead of [GrowArray] and regressed a
+    full [init.export] sweep by ~20% (cpu 272.6s vs 218.6s), because a
+    [Hashtbl]'s lookup cost grows with population -- millions of entries
+    accumulated across ~36k declarations made every lookup slower, even
+    though every individual entry was correct. [GrowArray] doesn't have
+    that failure mode, so it's the version that actually keeps this cache
+    forever cheaply. *)
 let reset_decl_caches () =
   InferTrace.reset ();
   WhnfTrace.reset ();
@@ -1036,9 +1057,7 @@ let reset_decl_caches () =
   Hashtbl.reset congruence_failure_memo;
   Uf.reset ();
   Hashtbl.reset infer_memo_check;
-  Hashtbl.reset infer_memo_no_check;
-  Hashtbl.reset Expr.num_loose_bvars_memo;
-  Hashtbl.reset Expr.has_free_vars_memo
+  Hashtbl.reset infer_memo_no_check
 
 (** Match Lean's reducibility-hint priority
     (`src/kernel/declaration.cpp`'s [compare]): negative unfolds [h1]'s side,

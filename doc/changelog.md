@@ -5,6 +5,59 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: `num_loose_bvars`/`has_free_vars` cached forever via `GrowArray`
+
+**Files:** `lib/expr.ml` (`GrowArray`, `num_loose_bvars_memo`,
+`has_free_vars_memo`), `lib/tc.ml` (`reset_decl_caches`).
+
+Item 7 of the nanoda_lib comparative study, prompted directly by Kody
+quoting the hash-consing library's own manual: "The data you will probably
+want to store inline are the hash digest, the number of loose bound
+variables in an expression, and whether or not the expression has free
+variables." Both were already memoized by hash-cons tag (see the
+`Vector.pmap_attach` OOM investigation), but reset per declaration in
+`Tc.reset_decl_caches` alongside every other memo table -- meaning a shared
+library subterm referenced across many declarations in a sweep (e.g. a
+common `Nat.add`/`List.foldr` subterm) had its structural properties
+recomputed once per declaration that happened to touch it.
+
+**First attempt (not this commit's approach -- documented as a lesson in
+both files' comments): a plain `Hashtbl` left unreset instead of cleared per
+declaration.** Both properties are pure and structural, so a stale entry can
+never be *wrong* -- but measured on a full `init.export` sweep, this
+*regressed* cpu by ~20% (272.6s vs 218.6s reset-per-declaration), with the
+deterministic work counters completely unchanged either way. Root cause:
+the table grows to hold an entry for every distinct intermediate term
+touched across all ~36k declarations (including ephemeral terms built
+mid-check that embed a declaration's own fresh free variables and are never
+looked up again) -- millions of entries, and `Hashtbl` lookup/resize/GC-scan
+cost on that ever-growing table exceeded the recomputation it was meant to
+save. This is the gap between the manual's actual recommendation ("store
+inline," i.e. an O(1) struct field with zero cost regardless of population)
+and what got built (an unbounded cache with population-dependent cost) --
+correct is not the same as cheap.
+
+**Actual fix:** `Expr.GrowArray`, a growable array indexed directly by
+hash-cons tag instead of a `Hashtbl` key. `Hc`'s tags (`hc.ml`'s `gen_tag`)
+are a single monotonic counter starting at 0 -- small, dense integers valid
+as array indices directly, with no hashing, no bucket-chain walk, and no
+cost that grows with population. This is much closer to genuine inline
+storage without forking the `Hc` library or restructuring `Expr.t`'s
+variant constructors (the fully-inline version, touching every pattern-match
+site in the codebase). `num_loose_bvars_memo`/`has_free_vars_memo` now use
+it and are never reset.
+
+**Result:** measured in isolation (subst_levels + NameCache present in both
+arms, holding those constant): cpu 218.6s (reset per declaration, no
+persistent cache) -> 210.6s (`GrowArray`, never reset), ~3.6%, deterministic
+counters unchanged. Modest on its own -- real, unlike the `Hashtbl` attempt,
+but the bigger payoff is enabling the closed-term `whnf` cache in a
+following commit, which depends on `has_free_vars` being cheap to call
+unconditionally on every `whnf` invocation. `dune build @runtest`: same 4
+known failures, no regressions.
+
+---
+
 ## 2026-07-18: `nat_lit_reduce` NameCache -- precomputed Name/Expr constants
 
 **Files:** `lib/tc.ml` (`Reduce.NameCache`, `Reduce.nat_lit_reduce`).
