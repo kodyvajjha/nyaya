@@ -5,6 +5,33 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: `nat_lit_reduce` NameCache -- precomputed Name/Expr constants
+
+**Files:** `lib/tc.ml` (`Reduce.NameCache`, `Reduce.nat_lit_reduce`).
+
+Item 5 of the nanoda_lib comparative study: `Reduce.nat_lit_reduce` runs on
+every App whnf and previously built a fresh 2-node `Name.Str` tree (via a
+per-call `let mk_name s1 s2 = Name.Str (Name.Str (Name.Anon, s1), s2)`
+closure) for *every one* of its ~20 builtin-name comparisons (`Nat.succ`,
+`Nat.add`, ..., `Nat.testBit`, plus `Bool.true`/`Bool.false`) -- for a Const
+that isn't any Nat builtin (the common case for most declarations), all ~20
+were allocated and immediately discarded on every single call. Since
+`Name.t` isn't hash-consed/interned (unlike `Expr.t`), this can't become the
+O(1) pointer-comparison `NameCache` nanoda_lib itself uses, but hoisting
+each name (and the handful of `Expr.const`-wrapped versions used to build
+results, e.g. `Nat.succ (...)`) to a module-level constant computed once
+removes the repeated allocation and hashcons-lookup volume entirely --
+comparison against a stable precomputed value is exactly as correct as
+comparison against a freshly-built equal one, just cheaper.
+
+**Result:** measured in isolation on a full `init.export` sweep (holding
+everything else constant): cpu 301.8s -> 272.6s (~9.7%), deterministic work
+counters unchanged (pure constant-factor change, as expected), still
+36688/36688 declarations passing. `dune build @runtest`: same 4 known
+failures, no regressions.
+
+---
+
 ## 2026-07-18: `Expr.subst_levels` memoized globally
 
 **Files:** `lib/expr.ml` (`subst_levels`).

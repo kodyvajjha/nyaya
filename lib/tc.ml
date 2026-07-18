@@ -529,12 +529,51 @@ module Reduce = struct
      (see [type_checker.cpp]'s [reduce_nat]/[reduce_bin_nat_op]); the
      partial-iota branches below are a nyaya-specific extension for whnf
      outside of defeq and stay off in that path. *)
+  (* Precomputed [Name.t]/[Expr.t] constants for [nat_lit_reduce] below --
+     nyaya's [Name.t] isn't hash-consed/interned (unlike [Expr.t]), so these
+     can't become O(1)-comparable pointers the way nanoda_lib's [NameCache]
+     is; but building each one exactly once here (rather than re-allocating
+     a fresh 2-node [Name.Str] tree, or a fresh [Expr.const] hashcons
+     lookup, on every single comparison inside [nat_lit_reduce], which runs
+     on every App whnf) removes real, measured allocation/lookup volume from
+     the hottest path in the checker with zero behavior change -- structural
+     comparison against a stable value is exactly as correct as comparison
+     against a freshly-built equal one. *)
+  module NameCache = struct
+    let mk s1 s2 = Name.Str (Name.Str (Name.Anon, s1), s2)
+    let nat_succ = mk "Nat" "succ"
+    let nat_pred = mk "Nat" "pred"
+    let nat_add = mk "Nat" "add"
+    let nat_sub = mk "Nat" "sub"
+    let nat_mul = mk "Nat" "mul"
+    let nat_pow = mk "Nat" "pow"
+    let nat_div = mk "Nat" "div"
+    let nat_mod = mk "Nat" "mod"
+    let nat_beq = mk "Nat" "beq"
+    let nat_ble = mk "Nat" "ble"
+    let nat_land = mk "Nat" "land"
+    let nat_lor = mk "Nat" "lor"
+    let nat_xor = mk "Nat" "xor"
+    let nat_shift_left = mk "Nat" "shiftLeft"
+    let nat_shift_right = mk "Nat" "shiftRight"
+    let nat_test_bit = mk "Nat" "testBit"
+    let bool_true = mk "Bool" "true"
+    let bool_false = mk "Bool" "false"
+    let const_nat_succ = Expr.const nat_succ
+    let const_nat_pred = Expr.const nat_pred
+    let const_nat_add = Expr.const nat_add
+    let const_nat_mul = Expr.const nat_mul
+    let const_nat_ble = Expr.const nat_ble
+    let expr_bool_true = Expr.const bool_true
+    let expr_bool_false = Expr.const bool_false
+  end
+
   let nat_lit_reduce ?(native_only = false) (env : Env.t) (e : Expr.t) whnf :
       Expr.t option =
     let hd, args = Expr.get_apps e in
     match Expr.node hd with
     | Expr.Const { name; _ } ->
-      let mk_name s1 s2 = Name.Str (Name.Str (Name.Anon, s1), s2) in
+      let open NameCache in
       (* Cheap, whnf-free test that an argument can never compute to a literal,
          used to bail out of a Nat op before forcing the other argument. *)
       let obviously_not_lit e =
@@ -555,7 +594,7 @@ module Reduce = struct
             (match Expr.get_apps e with
             | shd, [ y ] ->
               (match Expr.node shd with
-              | Expr.Const { name = sn; _ } when sn = mk_name "Nat" "succ" ->
+              | Expr.Const { name = sn; _ } when sn = nat_succ ->
                 (match as_nat_lit y with
                 | Some k -> Some (Z.succ k)
                 | None -> None)
@@ -565,12 +604,10 @@ module Reduce = struct
         )
       in
       let bool_const b =
-        Expr.const
-          (mk_name "Bool"
-             (if b then
-                "true"
-              else
-                "false"))
+        if b then
+          expr_bool_true
+        else
+          expr_bool_false
       in
       let binary f =
         match args with
@@ -583,7 +620,7 @@ module Reduce = struct
         | _ -> None
       in
       (match name with
-      | n when n = mk_name "Nat" "succ" ->
+      | n when n = nat_succ ->
         (* Fold into a literal when the argument reduces to one; [succ x] with
            symbolic [x] is still stuck through [as_nat_lit]'s cheap bail-out. *)
         (match args with
@@ -592,7 +629,7 @@ module Reduce = struct
           | Some n -> Some (Expr.natlit (Z.succ n))
           | _ -> None)
         | _ -> None)
-      | n when n = mk_name "Nat" "add" ->
+      | n when n = nat_add ->
         (match binary (fun m n -> Expr.natlit (Z.add m n)) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -606,20 +643,19 @@ module Reduce = struct
                 Some a
               else (
                 let inner = Expr.mk_app hd [ a; Expr.natlit (Z.pred n) ] in
-                Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [ inner ])
+                Some (Expr.mk_app const_nat_succ [ inner ])
               )
             | _ ->
               (* Symbolic successor: Nat.add x (Nat.succ y) -> Nat.succ (Nat.add x y). *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
-              | Expr.Const { name = sn; _ }, [ y ]
-                when sn = mk_name "Nat" "succ" ->
+              | Expr.Const { name = sn; _ }, [ y ] when sn = nat_succ ->
                 let inner = Expr.mk_app hd [ a; y ] in
-                Some (Expr.mk_app (Expr.const (mk_name "Nat" "succ")) [ inner ])
+                Some (Expr.mk_app const_nat_succ [ inner ])
               | _ -> None))
           | _ -> None))
-      | n when n = mk_name "Nat" "sub" ->
+      | n when n = nat_sub ->
         (match binary (fun m n -> Expr.natlit (Z.max (Z.sub m n) Z.zero)) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -641,9 +677,7 @@ module Reduce = struct
             let e' = whnf env e in
             let shd, sargs = Expr.get_apps e' in
             match Expr.node shd, sargs with
-            | Expr.Const { name = sn; _ }, [ x ] when sn = mk_name "Nat" "succ"
-              ->
-              Some x
+            | Expr.Const { name = sn; _ }, [ x ] when sn = nat_succ -> Some x
             | _ ->
               (match Expr.node e' with
               | Expr.Literal (Expr.NatLit k)
@@ -659,11 +693,11 @@ module Reduce = struct
               match as_succ b with
               | Some m ->
                 let inner = Expr.mk_app hd [ a; m ] in
-                Some (Expr.mk_app (Expr.const (mk_name "Nat" "pred")) [ inner ])
+                Some (Expr.mk_app const_nat_pred [ inner ])
               | None -> None
             )
           | _ -> None))
-      | n when n = mk_name "Nat" "mul" ->
+      | n when n = nat_mul ->
         (match binary (fun m n -> Expr.natlit (Z.mul m n)) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -677,22 +711,19 @@ module Reduce = struct
                 Some (Expr.natlit Z.zero)
               else (
                 let inner = Expr.mk_app hd [ a; Expr.natlit (Z.pred n) ] in
-                Some
-                  (Expr.mk_app (Expr.const (mk_name "Nat" "add")) [ inner; a ])
+                Some (Expr.mk_app const_nat_add [ inner; a ])
               )
             | _ ->
               (* Symbolic successor: Nat.mul x (Nat.succ y) -> Nat.add (Nat.mul x y) x. *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
-              | Expr.Const { name = sn; _ }, [ y ]
-                when sn = mk_name "Nat" "succ" ->
+              | Expr.Const { name = sn; _ }, [ y ] when sn = nat_succ ->
                 let inner = Expr.mk_app hd [ a; y ] in
-                Some
-                  (Expr.mk_app (Expr.const (mk_name "Nat" "add")) [ inner; a ])
+                Some (Expr.mk_app const_nat_add [ inner; a ])
               | _ -> None))
           | _ -> None))
-      | n when n = mk_name "Nat" "pow" ->
+      | n when n = nat_pow ->
         (match binary (fun m n -> Expr.natlit (Z.pow m (Z.to_int n))) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -706,22 +737,19 @@ module Reduce = struct
                 Some (Expr.natlit Z.one)
               else (
                 let inner = Expr.mk_app hd [ a; Expr.natlit (Z.pred n) ] in
-                Some
-                  (Expr.mk_app (Expr.const (mk_name "Nat" "mul")) [ inner; a ])
+                Some (Expr.mk_app const_nat_mul [ inner; a ])
               )
             | _ ->
               (* Symbolic successor: Nat.pow m (Nat.succ y) -> Nat.mul (Nat.pow m y) m. *)
               let b' = whnf env b in
               let bhd, bargs = Expr.get_apps b' in
               (match Expr.node bhd, bargs with
-              | Expr.Const { name = sn; _ }, [ y ]
-                when sn = mk_name "Nat" "succ" ->
+              | Expr.Const { name = sn; _ }, [ y ] when sn = nat_succ ->
                 let inner = Expr.mk_app hd [ a; y ] in
-                Some
-                  (Expr.mk_app (Expr.const (mk_name "Nat" "mul")) [ inner; a ])
+                Some (Expr.mk_app const_nat_mul [ inner; a ])
               | _ -> None))
           | _ -> None))
-      | n when n = mk_name "Nat" "div" ->
+      | n when n = nat_div ->
         (match
            binary (fun m n ->
                if Z.equal n Z.zero then
@@ -742,7 +770,7 @@ module Reduce = struct
           | [ a; _ ] when is_zero a -> Some (Expr.natlit Z.zero)
           | [ _; b ] when is_zero b -> Some (Expr.natlit Z.zero)
           | _ -> None))
-      | n when n = mk_name "Nat" "mod" ->
+      | n when n = nat_mod ->
         (match
            binary (fun m n ->
                (* Divisor 0 returns the dividend, not 0 (Nat.mod's own doc comment: "5 % 0 = 5"). *)
@@ -766,11 +794,9 @@ module Reduce = struct
           | [ a; b ] ->
             (match as_nat_lit a with
             | Some k when Z.gt k Z.zero ->
-              let ble_expr =
-                Expr.mk_app (Expr.const (mk_name "Nat" "ble")) [ b; a ]
-              in
+              let ble_expr = Expr.mk_app const_nat_ble [ b; a ] in
               (match Expr.node (whnf env ble_expr) with
-              | Expr.Const { name = bn; _ } when bn = mk_name "Bool" "false" ->
+              | Expr.Const { name = bn; _ } when bn = bool_false ->
                 Some (Expr.natlit k)
               | _ -> None)
             | _ ->
@@ -778,8 +804,7 @@ module Reduce = struct
               let a' = whnf env a in
               let ahd, aargs = Expr.get_apps a' in
               (match Expr.node ahd, aargs with
-              | Expr.Const { name = sn; _ }, [ _ ]
-                when sn = mk_name "Nat" "succ" ->
+              | Expr.Const { name = sn; _ }, [ _ ] when sn = nat_succ ->
                 let unfolded = delta_at_head env hd in
                 if unfolded != hd then
                   Some (Expr.mk_app unfolded args)
@@ -787,7 +812,7 @@ module Reduce = struct
                   None
               | _ -> None))
           | _ -> None))
-      | n when n = mk_name "Nat" "beq" ->
+      | n when n = nat_beq ->
         (match binary (fun m n -> bool_const (Z.equal m n)) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -802,9 +827,7 @@ module Reduce = struct
             let e' = whnf env e in
             let shd, sargs = Expr.get_apps e' in
             match Expr.node shd, sargs with
-            | Expr.Const { name = sn; _ }, [ x ] when sn = mk_name "Nat" "succ"
-              ->
-              Some x
+            | Expr.Const { name = sn; _ }, [ x ] when sn = nat_succ -> Some x
             | _ ->
               (match Expr.node e' with
               | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
@@ -819,7 +842,7 @@ module Reduce = struct
             | _, Some _ when is_zero a -> Some (bool_const false)
             | _ -> None)
           | _ -> None))
-      | n when n = mk_name "Nat" "ble" ->
+      | n when n = nat_ble ->
         (match binary (fun m n -> bool_const (Z.leq m n)) with
         | Some _ as r -> r
         | None when native_only -> None
@@ -833,9 +856,7 @@ module Reduce = struct
           let as_succ e =
             let shd, sargs = Expr.get_apps (whnf env e) in
             match Expr.node shd, sargs with
-            | Expr.Const { name = sn; _ }, [ x ] when sn = mk_name "Nat" "succ"
-              ->
-              Some x
+            | Expr.Const { name = sn; _ }, [ x ] when sn = nat_succ -> Some x
             | _ ->
               (match Expr.node (whnf env e) with
               | Expr.Literal (Expr.NatLit k) when Z.gt k Z.zero ->
@@ -857,19 +878,16 @@ module Reduce = struct
             )
           | _ -> None))
       (* Bitwise operations: Nat.land, Nat.lor, Nat.xor *)
-      | n when n = mk_name "Nat" "land" ->
-        binary (fun m n -> Expr.natlit (Z.logand m n))
-      | n when n = mk_name "Nat" "lor" ->
-        binary (fun m n -> Expr.natlit (Z.logor m n))
-      | n when n = mk_name "Nat" "xor" ->
-        binary (fun m n -> Expr.natlit (Z.logxor m n))
+      | n when n = nat_land -> binary (fun m n -> Expr.natlit (Z.logand m n))
+      | n when n = nat_lor -> binary (fun m n -> Expr.natlit (Z.logor m n))
+      | n when n = nat_xor -> binary (fun m n -> Expr.natlit (Z.logxor m n))
       (* Bit shift operations: Nat.shiftLeft, Nat.shiftRight *)
-      | n when n = mk_name "Nat" "shiftLeft" ->
+      | n when n = nat_shift_left ->
         binary (fun m n -> Expr.natlit (Z.shift_left m (Z.to_int n)))
-      | n when n = mk_name "Nat" "shiftRight" ->
+      | n when n = nat_shift_right ->
         binary (fun m n -> Expr.natlit (Z.shift_right m (Z.to_int n)))
       (* Bit test: Nat.testBit *)
-      | n when n = mk_name "Nat" "testBit" ->
+      | n when n = nat_test_bit ->
         binary (fun m n -> bool_const (Z.testbit m (Z.to_int n)))
       | _ -> None)
     | _ -> None
