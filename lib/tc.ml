@@ -377,6 +377,40 @@ module Reduce = struct
           Logger.debug "iota_at_head: rec=%a major_idx=%d major_whnf=@[%a@]"
             Name.pp rec_name major_idx Expr.pp major_whnf;
           let maj_hd, maj_args = Expr.get_apps major_whnf in
+          (* Structure eta: [major_whnf] isn't headed by one of this recursor's
+             own constructors (it may be Const-headed by something else
+             entirely, e.g. a stuck recursor on an unrelated symbolic
+             argument -- not just non-Const/non-NatLit) but the recursor's
+             inductive is a single-ctor, non-recursive, no-index structure, so
+             [major] is definitionally [Ctor (major.0) (major.1) ...]
+             regardless of its own head. Shared by both the "Const-headed but
+             not one of our own ctors" case and the general "not
+             ctor/NatLit-headed" case below. *)
+          let try_struct_eta_reduce () =
+            match rec_name with
+            | Name.Str (ind_name, _) ->
+              (match Hashtbl.find_opt env.tbl ind_name with
+              | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
+                when List.length ctor_names = 1
+                     && num_idx = 0 && not is_recursive ->
+                let rule = List.hd rules in
+                let rule_val =
+                  Expr.subst_levels rule.value decl_uparams rec_levels
+                in
+                let prefix_len = num_params + num_motives + num_minors in
+                let prefix = CCList.take prefix_len args in
+                let suffix = CCList.drop (major_idx + 1) args in
+                let field_args =
+                  List.init rule.ctor_num_args (fun i ->
+                      Expr.proj ind_name i major)
+                in
+                let new_args = prefix @ field_args @ suffix in
+                let red = Expr.mk_app rule_val new_args in
+                Logger.debug "iota (struct-eta): %a" Expr.pp red;
+                Some red
+              | _ -> None)
+            | _ -> None
+          in
           match node maj_hd with
           | Expr.Const { name = ctor_name; _ } ->
             (* Find matching reduction rule *)
@@ -387,8 +421,13 @@ module Reduce = struct
             in
             (match rule_opt with
             | None ->
-              (* Not a constructor the recursor knows about *)
-              e
+              (* Not a constructor this recursor's rules know about -- may
+                 still be a stuck term of a struct-eta-eligible type (e.g. a
+                 [Poly.cancel] application stuck on a symbolic list, being
+                 destructured by [Prod.rec]). *)
+              (match try_struct_eta_reduce () with
+              | Some red -> red
+              | None -> e)
             | Some rule ->
               (* Append only the constructor's own field args (not its params, already in prefix), or params get passed twice. *)
               let prefix_len = num_params + num_motives + num_minors in
@@ -441,30 +480,11 @@ module Reduce = struct
               Logger.debug "iota (natlit): %a" Expr.pp red;
               red)
           | _ ->
-            (* major isn't constructor-headed: try structure eta, projecting out each field. *)
-            (match rec_name with
-            | Name.Str (ind_name, _) ->
-              (match Hashtbl.find_opt env.tbl ind_name with
-              | Some (Decl.Inductive { ctor_names; num_idx; is_recursive; _ })
-                when List.length ctor_names = 1
-                     && num_idx = 0 && not is_recursive ->
-                let rule = List.hd rules in
-                let rule_val =
-                  Expr.subst_levels rule.value decl_uparams rec_levels
-                in
-                let prefix_len = num_params + num_motives + num_minors in
-                let prefix = CCList.take prefix_len args in
-                let suffix = CCList.drop (major_idx + 1) args in
-                let field_args =
-                  List.init rule.ctor_num_args (fun i ->
-                      Expr.proj ind_name i major)
-                in
-                let new_args = prefix @ field_args @ suffix in
-                let red = Expr.mk_app rule_val new_args in
-                Logger.debug "iota (struct-eta): %a" Expr.pp red;
-                red
-              | _ -> e)
-            | _ -> e)
+            (* major isn't constructor/NatLit-headed: try structure eta,
+               projecting out each field. *)
+            (match try_struct_eta_reduce () with
+            | Some red -> red
+            | None -> e)
         )
       | Decl.Quot _ ->
         (* Quot.ind/Quot.lift computation rules. *)

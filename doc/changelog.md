@@ -5,6 +5,45 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: structure-eta iota reachable when the stuck major is Const-headed
+
+**Files:** `lib/tc.ml` (`iota_at_head`).
+
+`Nat.Linear.ExprCnstr.denote_toNormPoly` (from `Init.Data.Nat.Linear`, the
+`omega`-style decision procedure) failed with `Defeq_failure("infer App:
+btype vs arg type")`. Root cause was in `iota_at_head`'s major-premise
+dispatch: `Poly.cancelAux`'s `let (lhs, rhs) := Poly.cancel a b; ...`
+pattern-match compiles to `Prod.rec motive minor (Poly.cancel a b)`, and with
+`a`, `b` symbolic (the theorem's free-variable `Expr`s), `Poly.cancel a b`'s
+own whnf gets stuck -- but stuck *Const-headed* (a `List.rec`/`Expr.rec`
+application over the still-opaque `Poly`), not stuck at a bare `FreeVar`.
+`iota_at_head` matched on `major_whnf`'s head: a `Expr.Const {name=ctor_name}`
+pattern unconditionally took the "look up `ctor_name` among this recursor's
+own rules" branch; when `rule_opt` came back `None` (the stuck head obviously
+isn't one of `Prod.mk`'s rules), it returned the term unreduced. The
+structure-eta fallback -- `Prod` is a single-ctor, non-recursive,
+no-index structure, so `Prod.rec motive minor e` is definitionally `minor
+e.1 e.2` for *any* `e`, constructor-headed or not -- only lived in the
+`_ ->` wildcard arm, unreachable whenever the stuck major happened to be
+Const-headed rather than FreeVar/Sort/etc.-headed. `PolyCnstr.lhs
+(ExprCnstr.toNormPoly c)` stayed stuck at `Prod.rec`, while the theorem's own
+`eq_iff_iff`-rewritten statement had already reduced the same subterm to
+`Prod.fst (Poly.cancel ...)` -- two different normal forms for the same
+term, so the final `Proj`-vs-`Proj` comparison saw different projected types
+and rejected them.
+
+Fix: factored the struct-eta reduction into a shared closure
+(`try_struct_eta_reduce`) and call it from both the `_ ->` wildcard arm and
+the Const-headed arm's `rule_opt = None` case. Left the `NatLit` arm alone --
+`Nat` is recursive, so the struct-eta guard (`not is_recursive`) correctly
+never fires for it regardless.
+
+**Result:** `Nat.Linear.ExprCnstr.denote_toNormPoly` now type-checks.
+`dune build @runtest`: same 4 known failures (`app-lam`, `grind-ring-5`,
+`bad/130`, `bad/131`); no regressions.
+
+---
+
 ## 2026-07-17: kernel-order `isDefEq`, `InferOnly` inference, lazy failure formatting
 
 **Files:** `lib/tc.ml` (`isDefEq_impl` reorder, `infer_flag`, split infer
