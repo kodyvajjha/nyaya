@@ -5,6 +5,52 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-18: isDefEq safety-net retry compares against the true original args
+
+**Files:** `lib/tc.ml` (`isDefEq_impl`'s lazy-delta `Stuck` handling).
+
+`Nat.sub_succ'` (`n - (m+1) = (n - m) - 1` by `rfl`) failed with
+`Depth_limit("[d#2032] depth 2001 exceeds max 2000, input=n =?= Nat.sub n
+m")` -- a genuine infinite recursion, not a slow-but-terminating comparison.
+
+Root cause: the lazy-delta `Stuck` branch's exception-handler safety net
+retries with `whnf env e1`/`whnf env e2` when that differs from `e1'`/`e2'`
+(lazy-delta's own already-unfolded stuck output), on the theory that a full,
+independent whnf might resolve something lazy-delta's one-side-at-a-time
+strategy missed. But `whnf_impl` has an explicit guard that leaves `Nat.sub`
+un-delta-unfolded whenever `nat_lit_reduce` declines (added earlier to avoid
+forcing `Nat.sub`'s real `brecOn`-based definition open on a large/symbolic
+subtrahend) -- and `find_delta_target`, which lazy-delta's own loop uses, has
+no such guard, so lazy-delta happily delta-unfolds `Nat.sub`'s `brecOn`
+definition down through `Nat.below`/`PProd` scaffolding to a stuck `Nat.rec`
+application. `whnf env (Nat.sub n m)` (guarded) can therefore *never* equal
+`e2'` (unguarded, already several delta-steps deeper) -- so the "did full
+whnf change anything" check always reads "yes, e2_full differs from e2'",
+and the retry always calls `isDefEq env e1_full e2_full` with `e1_full`/
+`e2_full` reconstructed by the guard back to the exact same `n`/`Nat.sub n
+m` pair this call started with. Unconditional self-recursion, bounded only
+by the `DefEqTrace` depth cap.
+
+Fix: compare `e1_full`/`e2_full` against this call's own original `e1`/`e2`
+(not lazy-delta's `e1'`/`e2'`). That's the check the comment already
+describes ("retry once against fully-whnf'd originals... if that ALSO
+doesn't change anything, re-raise") -- comparing against the true starting
+point guarantees the retry can never reuse the exact pair a frame started
+with, closing the loop regardless of which whnf-vs-lazy-delta guard caused
+the divergence.
+
+Diagnosed by extracting the two sides (`Nat.sub n (Nat.succ m)` vs
+`Nat.sub (Nat.sub n m) 1`, both via `HSub.hSub`/`OfNat.ofNat`) into a
+standalone `isDefEq` call with the four speculative `Logs.set_level None`
+sites temporarily disabled, since the runaway recursion lived entirely
+inside one of those normally-silent blocks.
+
+**Result:** `Nat.sub_succ'` now type-checks. `dune build @runtest`: same 4
+known failures (`app-lam`, `grind-ring-5`, `bad/130`, `bad/131`); no
+regressions.
+
+---
+
 ## 2026-07-18: structure-eta iota reachable when the stuck major is Const-headed
 
 **Files:** `lib/tc.ml` (`iota_at_head`).

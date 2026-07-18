@@ -2098,10 +2098,25 @@ and isDefEq_impl env e1 e2 =
                      pre-lazy-delta behavior as an ultimate fallback, so it can
                      only ever rescue a case lazy-delta's strategy mishandled,
                      never mask a real inequality. If that ALSO doesn't change
-                     anything, re-raise the original failure. *)
+                     anything, re-raise the original failure.
+
+                     The "doesn't change anything" check must compare against
+                     [e1]/[e2] (this call's own original arguments), not
+                     [e1']/[e2'] (lazy-delta's already-unfolded stuck output):
+                     a whnf-level guard that leaves a term stuck earlier than
+                     lazy-delta's own unguarded unfolding does (e.g. [Nat.sub],
+                     guarded in [whnf_impl] but not in [find_delta_target]) means
+                     [whnf env e1]/[whnf env e2] can permanently differ from
+                     [e1']/[e2'] on every retry without ever converging -- so
+                     comparing against [e1']/[e2'] never detects "no progress"
+                     and retries forever with the exact same [e1_full]/[e2_full]
+                     pair (observed: [Nat.sub_succ'], `n =?= Nat.sub n m` looping
+                     to the 2000-deep [DefEqTrace] cap). Comparing against the
+                     true originals guarantees the retry can never be called
+                     with the same two arguments this frame started with. *)
                   let e1_full = whnf env e1 in
                   let e2_full = whnf env e2 in
-                  if e1_full == e1' && e2_full == e2' then
+                  if e1_full == e1 && e2_full == e2 then
                     raise exn
                   else
                     isDefEq env e1_full e2_full
