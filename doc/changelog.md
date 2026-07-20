@@ -5,6 +5,102 @@ Test target: `init.export` (36688 declarations from Lean 4's Init library).
 
 ---
 
+## 2026-07-20: `app-lam.ndjson` fixed -- environment-threaded `infer`, plus three bugs found closing it out
+
+**Files:** `lib/tc.ml` (`infer`/`infer_open`/`infer_open_impl`/`resolve`/
+`infer_sort_of`/`infer_sort_of_open`, `infer_memo_check`/`infer_memo_no_check`,
+`InferTrace`/`WhnfTrace`/`WhnfCoreTrace`/`DefEqTrace`'s `default_max_depth`),
+`lib/parser/util.ml` (`MakeTrace.enter`'s depth-limit message), `lib/dune`
+(new `containers.pvec` dependency).
+
+`perf/app-lam.ndjson` (n-level alternating App/Lam, ~4087 Lam nodes, DAG-shared
+arguments, deep cross-level binder references) has been a known-failing perf
+case since it was added: killed at 30s, no verdict (`doc/perf-deferrals.md`).
+Root cause: `infer_impl`'s `Lam`/`Forall` cases opened each binder by calling
+`Expr.instantiate`, which eagerly rebuilds the *entire* remaining subtree
+before recursing -- for terms whose bodies reference far-outer binders (so
+`instantiate`'s `num_loose_bvars` short-circuit never fires), that's O(n)
+rebuilds each doing O(remaining size) work, with every rebuilt copy retained
+live through the recursive `infer` call stack while it recurses deeper, so
+peak live memory tracked cumulative substitution work.
+
+**Fix:** replaced the "instantiate a binder, then recurse" pattern with
+environment threading. `infer_open` carries an explicit `benv` (a persistent
+vector of `(replacement, type)` pairs) instead of eagerly substituting;
+`Lam`/`Forall`/`Let` push onto it and recurse directly on the raw body (no
+rebuild at all); `BoundVar` resolves against `benv` instead of being treated
+as impossible. Every `benv` entry and every `infer_open` result is fully
+closed by construction, so any *raw* AST field still needing concrete use
+(a binder's `btype`, a `Let`'s `value`, a `Proj`'s struct expr) goes through
+a new `resolve` helper (`Expr.instantiate_many` in one pass, O(1)
+short-circuit when already closed) first. Memoization moved from
+`Expr.tag`-only to `(tag, env_id)`, `env_id` a fresh id per `benv` push
+(`0` reserved for the empty environment) -- sound by construction (two ids
+are only ever equal for the literal same push) and still catches the
+DAG-sharing case (`App (App (comb, lam_k), lam_k)`'s two `lam_k` occurrences
+share the same ambient `env_id`, so the second hits the cache, same as
+today's tag-only scheme did).
+
+Three more bugs surfaced getting this correct, each caught by direct
+measurement rather than reasoning it out in advance:
+
+1. **Closed subterms weren't sharing the cache.** A subterm that doesn't
+   reference `benv` at all (most of any real term) was still memoized under
+   whatever `env_id` happened to be ambient, so the same closed subterm
+   recomputed under every distinct enclosing environment instead of hitting
+   cache. Cost: `shift-cascade.ndjson` (deeply-nested lets) needed 2x the
+   `InferTrace` recursion depth the old eager code did for the same file,
+   tripping the depth-limit safety net. Fix: `infer_open` normalizes to the
+   canonical `(benv=[], env_id=0)` up front whenever `expr` is closed.
+2. **`benv` as a plain list reintroduced O(n^2) by a different route.**
+   `List.nth`'s O(n) lookup, hit at every `BoundVar` occurrence on a term
+   with binder depth and bound-variable indices both in the thousands, is
+   exactly the cost class this rewrite set out to eliminate. `app-lam` was
+   *still* memory-blowing-up after fix (1) landed, with a flat allocation
+   profile pointing nowhere obvious -- switched `benv` to
+   `Containers_pvec.t` (new `containers.pvec` dependency) for O(1)-ish
+   random access.
+3. **Reporting a depth-limit hit could itself OOM -- pre-existing, not
+   introduced by this change, just never reached before.** `MakeTrace.enter`
+   built its depth-limit error message by unconditionally calling
+   `Data.input_summary` (`Expr.pp`, a non-memoized DAG-as-tree walk) --
+   exactly the failure mode a comment elsewhere in the same file already
+   warned about, just not applied to this call site. On `app-lam`'s
+   heavily-DAG-shared term this re-expands every shared subterm at every
+   occurrence and can single-handedly OOM, turning "diagnose a depth-limit
+   hit" into a worse failure than the hit itself. Only became reachable
+   once fixes (1) and (2) made `infer` cheap enough to actually *reach* the
+   depth limit cleanly instead of dying from the original bug first. Fixed
+   by gating the render behind `Logs.level () = Some Logs.Debug`, matching
+   the existing convention for the ordinary per-call trace line right below
+   it.
+
+With all three landed, `app-lam.ndjson`'s adversarial term needs roughly
+18-20k levels of `InferTrace` depth to complete (each level now O(1) instead
+of O(remaining size), so this is cheap) -- comfortably past the previous
+2000 default. Raised `InferTrace`'s default via a new per-trace-kind
+`default_max_depth` (`WhnfTrace`/`WhnfCoreTrace`/`DefEqTrace` unchanged at
+2000; none of them needed raising for this file).
+
+**Result:** `app-lam.ndjson` now accepts in ~50ms (`scripts/bench.sh`),
+down from a 30s timeout with no verdict. `dune build @runtest`: `app-lam`
+now passes; `grind-ring-5`, `bad/130`, `bad/131` unchanged (pre-existing,
+unrelated). Full `init.export` sweep: 36688/36688, identical to baseline, 0
+regressions. `scripts/bench.sh`: `init-prelude`/`shift-cascade` counters
+within noise of baseline; `grind-ring-5` incidentally faster (1922ms ->
+968ms cpu) from the closed-term cache-sharing fix, verdict unchanged
+(still the pre-existing false-reject).
+
+**Kernel reference:** N/A for the core fix -- this goes beyond what either
+Lean4's `type_checker.cpp` or nanoda_lib do. Both batch only *consecutive*
+same-kind binders (a `while (is_lambda(e))`-style loop) into one
+substitution pass; `app-lam`'s shape (every `Lam` immediately followed by an
+`App` layer, telescopes of length 1) gets zero benefit from that trick, so
+the reference kernel is very likely equally exposed to this exact
+adversarial shape.
+
+---
+
 ## 2026-07-18: closed-term `whnf` cache -- 54% fewer reductions on a full sweep
 
 **Files:** `lib/tc.ml` (`whnf_closed_memo`, `whnf`).

@@ -148,7 +148,14 @@ module type TRACE_DATA = sig
   val max_depth_env : string
   (** Name of the env var that sets the maximum trace depth.  When the
       depth exceeds this limit, [enter] raises [Failure] with a diagnostic
-      message.  Default (when unset): 1000. *)
+      message.  Default (when unset): {!default_max_depth}. *)
+
+  val default_max_depth : int
+  (** [max_depth] when [max_depth_env] is unset (or unparseable). Each trace
+      kind picks its own: a legitimate, non-adversarial recursion through
+      that kind of call should comfortably fit under it, while a genuine
+      unbounded/buggy recursion still gets caught before exhausting real
+      resources. *)
 
   val input_summary : input -> string
 
@@ -182,8 +189,8 @@ module MakeTrace (Data : TRACE_DATA) = struct
 
   let max_depth =
     match Sys.getenv_opt Data.max_depth_env with
-    | Some s -> (try int_of_string s with _ -> 2000)
-    | None -> 2000
+    | Some s -> (try int_of_string s with _ -> Data.default_max_depth)
+    | None -> Data.default_max_depth
 
   let max_path_entries = 8
 
@@ -210,9 +217,24 @@ module MakeTrace (Data : TRACE_DATA) = struct
     incr depth;
     if !depth > !max_depth_seen then max_depth_seen := !depth;
     if !depth > max_depth then (
+      (* [Data.input_summary] (typically [Expr.pp], a non-memoized
+         DAG-as-tree walk) must never be *computed* unless Debug logging is
+         actually on -- same rationale as the gate below for the ordinary
+         per-call trace line. On a heavily-shared hash-consed DAG (exactly
+         the kind of adversarial term likely to run deep enough to trip this
+         limit in the first place), naively pretty-printing it re-expands
+         every shared subterm at every occurrence and can single-handedly
+         OOM -- turning "diagnose a depth-limit hit" into a worse failure
+         than the depth-limit hit itself. *)
+      let input_desc =
+        if Logs.level () = Some Logs.Debug then
+          Data.input_summary input
+        else
+          "<omitted, set log level to Debug to render>"
+      in
       let msg =
         Printf.sprintf "[%s#%d] depth %d exceeds max %d, input=%s" Data.kind id
-          !depth max_depth (Data.input_summary input)
+          !depth max_depth input_desc
       in
       Logger.app "DEPTH LIMIT: %s" msg;
       raise (Depth_limit msg)

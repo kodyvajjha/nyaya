@@ -69,10 +69,35 @@ let whnf_core_memo : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
     verification), so [Check] hits satisfy both modes and its table is
     consulted first for every query; an [InferOnly] result must never
     satisfy a [Check] query, so the no-check table is only consulted in
-    [InferOnly] mode. *)
-let infer_memo_check : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+    [InferOnly] mode.
 
-let infer_memo_no_check : (int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+    Keyed by [(Expr.tag expr, env_id)], not just [Expr.tag expr]: since
+    {!infer_open} resolves [BoundVar]s against an explicit environment
+    ([benv]) instead of eagerly substituting them away, the same raw,
+    still-open subterm can in general need a different result under a
+    different enclosing environment, so the hashcons tag alone is no longer
+    a sound cache key. [env_id] is a fresh id minted every time a binder is
+    pushed onto [benv] (see [fresh_env_id]/[infer_open]'s [Lam]/[Forall]/
+    [Let] cases) -- two [env_id]s are only ever equal if they name the
+    literal same push, so this can never conflate two different
+    environments. [env_id = 0] is reserved for the empty (top-level) [benv],
+    so ordinary closed terms -- the overwhelming majority -- get exactly the
+    same [(tag, 0)] caching behavior this table always had. *)
+let infer_memo_check : (int * int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+
+let infer_memo_no_check : (int * int, Expr.t) Hashtbl.t = Hashtbl.create 4096
+
+(** Fresh ids for {!infer_memo_check}/{!infer_memo_no_check}'s environment
+    component. [0] is reserved for the empty [benv] (see above); real pushes
+    start from [1]. Never reset -- a stale id from an earlier declaration
+    simply won't be found in the (per-declaration-reset) memo tables, so
+    reuse across declarations is harmless, and there's no correctness reason
+    to reset the counter itself. *)
+let env_id_counter = ref 0
+
+let fresh_env_id () =
+  incr env_id_counter;
+  !env_id_counter
 
 (** Whether diagnostic counters are collected ([NYAYA_STATS=1]). When off, the
     only cost is a handful of [if stats_on then incr] guards on hot paths. See
@@ -103,6 +128,15 @@ module InferTrace = Nyaya_parser.Util.MakeTrace (struct
 
   let max_depth_env = "NYAYA_INFER_MAX_DEPTH"
 
+  (* [infer_open]'s environment-threaded recursion (see its doc) makes each
+     level of a deep binder chain cheap, so a legitimate deeply-nested term
+     can genuinely need tens of thousands of levels, not thousands --
+     measured directly: `app-lam.ndjson`'s adversarial-but-valid term needs
+     ~18-20k. 25k gives headroom over that measurement while still catching
+     genuinely unbounded/buggy recursion (which would run away far past
+     this regardless of the exact cutoff). *)
+  let default_max_depth = 25000
+
   let input_summary = expr_summary
 
   let output_summary = expr_summary
@@ -122,6 +156,8 @@ module WhnfTrace = Nyaya_parser.Util.MakeTrace (struct
   let elide_ok_env = "NYAYA_WHNF_TRACE_ELIDE_OK"
 
   let max_depth_env = "NYAYA_WHNF_MAX_DEPTH"
+
+  let default_max_depth = 2000
 
   let input_summary = expr_summary
 
@@ -143,6 +179,8 @@ module WhnfCoreTrace = Nyaya_parser.Util.MakeTrace (struct
 
   let max_depth_env = "NYAYA_WHNF_CORE_MAX_DEPTH"
 
+  let default_max_depth = 2000
+
   let input_summary = expr_summary
 
   let output_summary = expr_summary
@@ -162,6 +200,8 @@ module DefEqTrace = Nyaya_parser.Util.MakeTrace (struct
   let elide_ok_env = "NYAYA_DEFEQ_TRACE_ELIDE_OK"
 
   let max_depth_env = "NYAYA_DEFEQ_MAX_DEPTH"
+
+  let default_max_depth = 2000
 
   let input_summary (lhs, rhs) =
     truncate (CCFormat.asprintf "%a =?= %a" Expr.pp lhs Expr.pp rhs)
@@ -1082,16 +1122,99 @@ let compare_reducibility_hints (h1 : Decl.hint) (h2 : Decl.hint) : int =
 
 (** Infer the type of the given [expr]. See {!infer_flag} for what [flag]
     controls; declaration-level entry points pass [Check], everything in
-    service of reduction/defeq passes [InferOnly]. *)
+    service of reduction/defeq passes [InferOnly]. Thin wrapper over
+    {!infer_open} with an empty environment -- see that function's doc for
+    why the eager "instantiate a binder, then recurse" pattern was replaced
+    with environment threading. *)
 let rec infer (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
-  match Hashtbl.find_opt infer_memo_check (Expr.tag expr) with
+  infer_open flag env Containers_pvec.empty 0 expr
+
+(** Like {!infer}, but resolves [BoundVar]s against an explicit environment
+    [benv] (a persistent vector, pushed at the end as binders open, so the
+    most-recently-opened/innermost binder sits at index [length benv - 1] --
+    see {!infer_open_impl}'s [BoundVar] case) instead of requiring [expr] to
+    already be fully substituted. [env_id] identifies this specific [benv]
+    for memoization purposes only -- see {!infer_memo_check}'s doc.
+
+    [benv] is a {!Containers_pvec.t}, not a plain list: [BoundVar] lookups
+    need O(1)-ish (O(log n) with a large branching factor) random access,
+    not [List.nth]'s O(n) linear scan. On an adversarial term with binder
+    depth and bound-variable indices both in the thousands (the exact shape
+    this whole rewrite targets), an O(n) lookup at every occurrence
+    re-introduces an O(n^2) cost by a different route than the one this
+    rewrite set out to eliminate -- caught by direct measurement on
+    `app-lam.ndjson` (still memory-blowing-up with a plain-list [benv], even
+    after every other fix in this rewrite landed).
+
+    This exists to fix a memory-quadratic blowup on adversarial terms with
+    many nested binders whose bodies reference far-outer binders (so
+    [Expr.instantiate]'s [num_loose_bvars] short-circuit never fires):
+    the old [infer_impl] opened one binder at a time by calling
+    [Expr.instantiate], which eagerly rebuilds the *entire* remaining
+    subtree before recursing -- for [n] such binders that's O(n) rebuilds
+    each doing O(remaining size) work, and (worse than just slow) every
+    rebuilt copy is retained live through the recursive [infer] call stack
+    while it recurses deeper, so peak live memory tracks cumulative
+    substitution work. [infer_open] never rebuilds a value just to open a
+    binder: [Lam]/[Forall]/[Let] push the binder's replacement onto [benv]
+    and recurse directly on the raw, untouched body; [BoundVar] resolves
+    against [benv] instead of assuming it can never occur.
+
+    Invariant maintained throughout: every [benv] entry, and every value
+    [infer_open] returns, is fully closed (benv-independent) by
+    construction. The one thing every case must do itself is pass any *raw*
+    AST field it's about to use concretely (a binder's [btype], a [Let]'s
+    [value], a [Proj]'s struct expr) through {!resolve} first, since those
+    can still carry loose bvars referencing already-pushed outer binders.
+
+    Each [benv] entry is a [(replacement, ty)] pair, not just the
+    replacement value: [BoundVar] resolution needs [ty] (its whole purpose
+    is to feed [infer]), and storing it precomputed makes that a pure O(1)
+    lookup instead of a nested [infer] call. That distinction matters
+    because a nested call would add a genuine extra stack frame at *every*
+    bound-variable occurrence (not merely extra work -- real recursion
+    depth), on top of whatever depth the surrounding term structure already
+    contributes; on deeply-nested terms that was enough on its own to trip
+    {!InferTrace}'s depth-limit safety net well short of any actual runaway
+    recursion. [Lam]/[Forall] get [ty] for free (it's [btype], already
+    resolved before the fresh [FreeVar] is built); [Let] computes it once at
+    push time via a single plain [infer] call, reused by however many
+    occurrences of the bound variable [body] contains. *)
+and infer_open (flag : infer_flag) (env : Env.t)
+    (benv : (Expr.t * Expr.t) Containers_pvec.t) (env_id : int)
+    (expr : Expr.t) : Expr.t =
+  (* Normalize a closed [expr] to the canonical empty environment before
+     doing anything else. Without this, a subterm that happens not to
+     reference [benv] at all (the common case: most of any real term is
+     closed relative to its own immediately-enclosing binders) would still
+     get memoized under whatever [env_id] happened to be ambient at the
+     point it was reached -- defeating cache sharing across every other
+     occurrence of that same subterm anywhere else in the declaration (under
+     a different, unrelated ambient environment), even though its inferred
+     type can only ever be one thing. Measured directly: without this,
+     `shift-cascade.ndjson` (deeply-nested lets, each level's own body
+     largely closed) drove [InferTrace]'s recursion depth to 2x what the old
+     eager-substitution code needed for the exact same file, tripping the
+     depth-limit safety net -- not because the new recursion is inherently
+     deeper, but because closed sub-computations that used to hit the
+     (tag-only-keyed) cache on repeat were instead being fully re-walked
+     under a fresh [env_id] every time. This also means [infer_open_impl]
+     never has to [resolve] anything inside an already-closed subterm. *)
+  let benv, env_id =
+    if Containers_pvec.is_empty benv || Expr.num_loose_bvars expr = 0 then
+      Containers_pvec.empty, 0
+    else
+      benv, env_id
+  in
+  let key = Expr.tag expr, env_id in
+  match Hashtbl.find_opt infer_memo_check key with
   | Some ty ->
     if stats_on then incr infer_memo_hits;
     ty
   | None ->
     let no_check_hit =
       match flag with
-      | InferOnly -> Hashtbl.find_opt infer_memo_no_check (Expr.tag expr)
+      | InferOnly -> Hashtbl.find_opt infer_memo_no_check key
       | Check -> None
     in
     (match no_check_hit with
@@ -1100,25 +1223,68 @@ let rec infer (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
       ty
     | None ->
       let frame = InferTrace.enter env expr in
-      (match infer_impl flag env expr with
+      (match infer_open_impl flag env benv env_id expr with
       | ty ->
         InferTrace.leave_success env frame ty;
         (match flag with
-        | Check -> Hashtbl.replace infer_memo_check (Expr.tag expr) ty
-        | InferOnly -> Hashtbl.replace infer_memo_no_check (Expr.tag expr) ty);
+        | Check -> Hashtbl.replace infer_memo_check key ty
+        | InferOnly -> Hashtbl.replace infer_memo_no_check key ty);
         ty
       | exception exn ->
         let backtrace = Printexc.get_raw_backtrace () in
         InferTrace.leave_failure env frame exn;
         Printexc.raise_with_backtrace exn backtrace))
 
-and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
+(** Resolve [expr] (which may carry loose [BoundVar]s referencing entries of
+    [benv]) into a fully closed term, by substituting the whole of [benv] in
+    one pass via {!Expr.instantiate_many}. O(1) short-circuit (matching
+    [Expr.instantiate]'s own [num_loose_bvars] check) when [expr] has no
+    loose bvars at all -- the common case. [Expr.instantiate_many]'s
+    [free_vars] convention is "first element fills the outermost binder",
+    which is exactly [benv]'s own natural (push-at-the-end) order, so no
+    reversal is needed -- just an in-order fold. Raises if a bvar escapes
+    past the whole of [benv]: for a well-scoped term reachable from a
+    declaration's own (closed) value/type, every loose bvar at any point
+    must be bound by some ambient (already-pushed) binder, so an escape
+    means malformed input, not a case to silently paper over -- matches how
+    {!infer_open_impl}'s own [BoundVar] case treats it. *)
+and resolve (benv : (Expr.t * Expr.t) Containers_pvec.t) (expr : Expr.t) :
+    Expr.t =
+  if Containers_pvec.is_empty benv || Expr.num_loose_bvars expr = 0 then
+    expr
+  else
+    let free_vars =
+      Containers_pvec.fold_rev (fun acc (v, _) -> v :: acc) [] benv
+    in
+    let result = Expr.instantiate_many ~free_vars ~expr () in
+    if Expr.num_loose_bvars result > 0 then
+      raise (TypeError "infer: bound variable escaped its scope")
+    else
+      result
+
+and infer_open_impl (flag : infer_flag) (env : Env.t)
+    (benv : (Expr.t * Expr.t) Containers_pvec.t) (env_id : int)
+    (expr : Expr.t) : Expr.t =
   let module Logger = (val env.logger) in
   match Expr.node expr with
   | Expr.Sort u -> Expr.sort (Level.Succ u)
   | Expr.FreeVar { name; expr; info; fvarId } -> expr
+  | Expr.BoundVar i ->
+    (* [benv] is pushed at the end as binders open, so the innermost
+       (most-recently-opened, index 0 in de Bruijn terms) binder is the
+       *last* entry, at [length benv - 1]. *)
+    (match Containers_pvec.get_opt benv (Containers_pvec.length benv - 1 - i) with
+    | Some (_replacement, ty) -> ty
+    | None ->
+      Logger.err
+        "@[<v 0>@[infer BoundVar: bound variable escaped its scope (index \
+         %d, %d in scope):@,\
+         @[<hv 2> %a@]@]@]"
+        (TypeError "infer: bound variable escaped its scope") i
+        (Containers_pvec.length benv) Expr.pp expr)
   | Expr.Lam { name; btype; binfo; body } ->
-    (* infer Lam: Pi binder (abstract (infer (instantiate body binderFvar)) binderFvar). *)
+    (* infer Lam: Pi binder (abstract (infer (open body with binderFvar)) binderFvar). *)
+    let btype = resolve benv btype in
     (* The binder-type-is-a-sort check is [Check]-only, like the kernel's
        [infer_lambda] (which only [ensure_sort]s under [!infer_only]). *)
     if flag = Check then (
@@ -1131,20 +1297,24 @@ and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
     let binder_free_var =
       Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ())
     in
+    let new_env_id = fresh_env_id () in
     let body_type =
-      infer flag env
-        (Expr.instantiate ~logger:env.logger ~free_var:binder_free_var
-           ~expr:body ())
+      infer_open flag env
+        (Containers_pvec.push benv (binder_free_var, btype))
+        new_env_id body
     in
     let target_id = Expr.get_fvar_id binder_free_var in
     Expr.pi name btype binfo (Expr.abstract_fvar ~target_id ~k:0 body_type)
   | Expr.Forall { name; btype; binfo; body } ->
-    (* infer Forall: imax(sortOf binder, sortOf (instantiate body (fvar binder))). *)
+    (* infer Forall: imax(sortOf binder, sortOf (open body with binderFvar)). *)
+    let btype = resolve benv btype in
     let l = infer_sort_of flag env btype in
     let free_var = Expr.fvar name btype binfo (Nyaya_parser.Util.Uid.mk ()) in
+    let new_env_id = fresh_env_id () in
     let r =
-      infer_sort_of flag env
-        (Expr.instantiate ~logger:env.logger ~free_var ~expr:body ())
+      infer_sort_of_open flag env
+        (Containers_pvec.push benv (free_var, btype))
+        new_env_id body
     in
     Expr.sort (Level.IMax (l, r) |> Level.simplify)
   | Expr.Const { name; uparams } ->
@@ -1165,14 +1335,14 @@ and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
     Expr.subst_levels (known_type |> Decl.get_type) known_type_uparams uparams
   | Expr.App (f, arg) ->
     (* infer App: whnf(infer f) must be a Pi; check binder.type =?= infer arg, instantiate body with arg. *)
-    (match whnf env (infer flag env f) |> Expr.node with
+    (match whnf env (infer_open flag env benv env_id f) |> Expr.node with
     | Expr.Forall { btype; body; _ } ->
       (* The argument's type must be defeq to the parameter type -- in
          [Check] mode only, matching the kernel's [infer_app] under
          [infer_only]. (Proof irrelevance lives in [isDefEq], not here: it
          never licenses skipping this check in Check mode.) *)
       if flag = Check then (
-        let arg_type = infer flag env arg in
+        let arg_type = infer_open flag env benv env_id arg in
         if not (isDefEq env btype arg_type) then
           if Logs.level () = Some Logs.Debug then
             Logger.err
@@ -1189,24 +1359,44 @@ and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
                diagnostics when Debug logging is actually on. *)
             raise (Defeq_failure "infer App: btype vs arg type")
       );
-      Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body ()
+      (* Non-dependent Pi (the common case, and the shape that makes the
+         classic app-lam adversarial term cheap): [body] doesn't reference
+         the bound var at all, so it's returned unchanged without ever
+         needing to resolve [arg] -- which can itself be an arbitrarily
+         large, benv-dependent value (a shared DAG argument reused across
+         many App nodes) that would be wasted work to resolve if the result
+         is discarded immediately anyway. Only a genuinely dependent Pi pays
+         the resolve cost, same as today's unconditional cost. *)
+      if Expr.num_loose_bvars body = 0 then
+        body
+      else
+        let arg = resolve benv arg in
+        Expr.instantiate ~logger:env.logger ~free_var:arg ~expr:body ()
     | e ->
       Logger.err "infer App: expected forall, got @[%a@]"
         (TypeError "infer App: whnf of fn type not a forall") Expr.pp expr)
   | Let { name; btype; value; body } ->
-    (* infer Let: check binder.type is a sort and infer(val) =?= binder.type, then infer (instantiate body val). *)
+    (* infer Let: check binder.type is a sort and infer(val) =?= binder.type, then infer (open body with value). *)
+    let btype = resolve benv btype in
+    let value = resolve benv value in
+    (* Computed unconditionally (not just under [flag = Check] like the
+       check below): every [BoundVar] occurrence of this let-binding in
+       [body] needs [value]'s type as an O(1) [benv] lookup (see
+       [infer_open]'s doc), so it has to exist before we recurse. Memoized,
+       so this is cheap on any occurrence beyond the first regardless. *)
+    let value_ty = infer flag env value in
     (* Both checks are [Check]-only, like the kernel's [infer_let]. *)
     if flag = Check then (
       match infer flag env btype |> Expr.node with
       | Sort _ ->
-        if not (isDefEq env btype (infer flag env value)) then
+        if not (isDefEq env btype value_ty) then
           if Logs.level () = Some Logs.Debug then
             Logger.err
               "@[<v 0>[infer Let] defeq failed for@,\
               \ btype = %a@,\
               \ value_type = %a@]"
               (Defeq_failure "infer Let: btype vs value type") Expr.pp btype
-              Expr.pp (infer flag env value)
+              Expr.pp value_ty
           else
             (* Same rationale as the infer App failure above: don't
                pretty-print full terms for a routinely-caught failure. *)
@@ -1215,10 +1405,13 @@ and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
         Logger.err "infer Let: binder type is not a sort: %a"
           (TypeError "infer Let: binder type not a sort") Expr.pp expr
     );
-    infer flag env
-      (Expr.instantiate ~logger:env.logger ~free_var:value ~expr:body ())
+    let new_env_id = fresh_env_id () in
+    infer_open flag env
+      (Containers_pvec.push benv (value, value_ty))
+      new_env_id body
   | Proj { name; nat; expr } ->
     (* infer Proj: instantiate the sole constructor's type with the struct's params, then with each prior projection, up to nat. *)
+    let expr = resolve benv expr in
     let struct_type = infer flag env expr |> whnf env in
     let const, ty_args = Expr.get_apps struct_type in
     (match const |> Expr.node with
@@ -1310,20 +1503,19 @@ and infer_impl (flag : infer_flag) (env : Env.t) (expr : Expr.t) : Expr.t =
     (match lit with
     | Expr.NatLit _ -> Expr.const (Name.of_string "Nat")
     | Expr.StrLit _ -> Expr.const (Name.of_string "String"))
-  | BoundVar _ ->
-    (* Locally nameless: a bound variable here means a binder wasn't instantiated with a free var. *)
-    Logger.err
-      "@[<v 0>@[infer BoundVar: encountered bound variable during inference:@,\
-       @[<hv 2> %a@]@]@]" (TypeError "infer: unexpected bound variable") Expr.pp
-      expr
 
 and infer_sort_of flag env (expr : Expr.t) =
+  infer_sort_of_open flag env Containers_pvec.empty 0 expr
+
+and infer_sort_of_open flag env (benv : (Expr.t * Expr.t) Containers_pvec.t)
+    (env_id : int) (expr : Expr.t) =
   let module Logger = (val env.logger) in
-  match whnf env (infer flag env expr) |> Expr.node with
+  match whnf env (infer_open flag env benv env_id expr) |> Expr.node with
   | Sort lvl -> lvl
   | _ ->
     Logger.err "infer_sort_of: expr %a is not a sort"
-      (TypeError "infer_sort_of: not a sort") Expr.pp (infer flag env expr)
+      (TypeError "infer_sort_of: not a sort") Expr.pp
+      (infer_open flag env benv env_id expr)
 
 and whnf (env : Env.t) (expr : Expr.t) : Expr.t =
   (* Closed terms (no free vars) go through [whnf_closed_memo] instead of the
